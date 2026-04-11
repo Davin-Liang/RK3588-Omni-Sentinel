@@ -1,0 +1,58 @@
+/*
+ * icm45686.dtsi - ICM45686惯性测量单元设备树文件
+ *
+ * 适用于RKS588ELF2板子的ICM45686传感器设备树描述
+ *
+ * Copyright (c) 2026
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+    icm45686_spi: icm45686@0 {
+        compatible = "invensense,icm45686";
+        reg = <0>; /* SPI片选地址 */
+        spi-max-frequency = <10000000>; /* 最大SPI频率10MHz */
+        spi-cpol;
+        spi-cpha;
+        
+        /* 中断引脚配置 - RKS588ELF2: GPIO0_B6 */
+        interrupt-parent = <&gpio0>;
+        interrupts = <18 IRQ_TYPE_LEVEL_HIGH>;
+        
+        /* 复位引脚配置 - RKS588ELF2: GPIO0_B7 */
+        reset-gpios = <&gpio0 19 GPIO_ACTIVE_LOW>;
+        
+        /* 电源使能引脚配置 */
+        vdd-supply = <&vcc_3v3>;
+        vddio-supply = <&vcc_3v3>;
+        
+        /* 传感器配置 */
+        invensense,accel-range = <2>; /* 加速度计量程2G */
+        invensense,gyro-range = <250>; /* 陀螺仪量程250DPS */
+        invensense,accel-odr = <100>; /* 加速度计输出数据率100Hz */
+        invensense,gyro-odr = <100>; /* 陀螺仪输出数据率100Hz */
+    };
+    
+    icm45686_i2c: icm45686@68 {
+        compatible = "invensense,icm45686";
+        reg = <0x68>; /* I2C地址 */
+        
+        /* 中断引脚配置 - RKS588ELF2: GPIO0_B6 */
+        interrupt-parent = <&gpio0>;
+        interrupts = <18 IRQ_TYPE_LEVEL_HIGH>;
+        
+        /* 复位引脚配置 - RKS588ELF2: GPIO0_B7 */
+        reset-gpios = <&gpio0 19 GPIO_ACTIVE_LOW>;
+        
+        /* 电源使能引脚配置 */
+        vdd-supply = <&vcc_3v3>;
+        vddio-supply = <&vcc_3v3>;
+        
+        /* 传感器配置 */
+        invensense,accel-range = <2>; /* 加速度计量程2G */
+        invensense,gyro-range = <250>; /* 陀螺仪量程250DPS */
+        invensense,accel-odr = <100>; /* 加速度计输出数据率100Hz */
+        invensense,gyro-odr = <100>; /* 陀螺仪输出数据率100Hz */
+    };
+};
