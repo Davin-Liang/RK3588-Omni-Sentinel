@@ -34,14 +34,24 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
     ctx->height = height;
     ctx->bufferCount = bufferCount;
 
-    // ==========================================================
-    // 新增: 初始化针对 RGA 输出的 DMA 内存池
-    // 目标大小: 680x680, 目标格式: RGB888
-    // 缓冲块数量可以和 V4L2 保持一致，也可以根据下游消费速度略大一点
-    // ==========================================================
-    ctx->rgaOutputPool = std::make_unique<DmaBufferPool>();
-    if (!ctx->rgaOutputPool->alloc_pool(bufferCount, 640, 640, BufferFormat::RGB888)) {
-        std::cerr << "Failed to allocate RGA output DMA pool for camera " << camNum << std::endl;
+    /* 初始化 NPU 内存池 (640x640 RGB) */
+    ctx->npuRgbPool = std::make_unique<DmaBufferPool>();
+    if (!ctx->npuRgbPool->alloc_pool(bufferCount, 640, 640, BufferFormat::RGB888)) {
+        std::cerr << "初始化 NPU 内存池失败!———— " << camNum << std::endl;
+        return false;
+    }
+
+    /* 初始化 原始图像拷贝 内存池 (保持和摄像头输出一致 ———— NV12) */
+    ctx->origCopyPool = std::make_unique<DmaBufferPool>();
+    if (!ctx->origCopyPool->alloc_pool(bufferCount, width, height, BufferFormat::NV12)) {
+        std::cerr << "初始化原始图像拷贝内存池失败!————" << camNum << std::endl;
+        return false;
+    }
+
+    /* 初始化 720P OSD 内存池 */
+    ctx->osd720pPool = std::make_unique<DmaBufferPool>();
+    if (!ctx->osd720pPool->alloc_pool(bufferCount, 1280, 720, BufferFormat::NV12)) {
+        std::cerr << "初始化 720P OSD 内存池!————" << camNum << std::endl;
         return false;
     }
 
@@ -247,58 +257,80 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     break;
                 }
 
-                // raw_frame_count++;
-                // auto now = std::chrono::steady_clock::now();
-                // auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fps_time).count();
-                
-                // if (elapsed >= 1000) {
-                //     float fps = (raw_frame_count * 1000.0f) / elapsed;
-                //     std::cout << "\033[1;32m[RAW FPS] Camera " << camNum << ": " << fps << " fps\033[0m" << std::endl;
-                //     raw_frame_count = 0;
-                //     last_fps_time = now;
-                // }
-
                 // 获取包含了最新一帧图像数据的 DMA fd
                 int currentDmaFd = ctx->buffers[buf.index].dmaFd;
-
-                // ==========================================================
-                // 新增: RGA 处理与 DmaBufferPool 的联动
-                // ==========================================================
+                // 获取最新一帧图像数据的时间戳
+                uint64_t timestampUs = (uint64_t)buf.timestamp.tv_sec * 1000000LL + buf.timestamp.tv_usec;
                 
-                // 步骤 2.1: 从内存池获取一个空闲的 DMA 块用来接 RGA 的输出
-                DmaBuffer_t* targetBuf = ctx->rgaOutputPool->get_buffer();
+                /* 从内存池获取空闲的 DMA 块 */
+                DmaBuffer_t* targetNpuBuf = ctx->npuRgbPool->get_buffer();
+                DmaBuffer_t* targetOsd720pBuf = ctx->osd720pPool->get_buffer();
 
-                if (targetBuf != nullptr) {
+                if (targetNpuBuf != nullptr) { // 这里并不做 targetOsd720pBuf 是否为空指针的判断，因为当并不对带框图像进行推流的时候，osd720pPool中会没有buffer
                     // TODO: 这里的偏移量(横向/纵向)通常由外部 IMU 陀螺仪计算后传入
                     // 此处模拟获取实时的防抖平移参数
                     int currentHorizOffset = 0; 
                     int currentVertOffset  = 0; 
 
+                    // 记录时间戳
+                    targetNpuBuf->timestampUs = timestampUs;
+                    if(targetOsd720pBuf) targetOsd720pBuf->timestampUs = timestampUs;
+
                     auto start_time = std::chrono::high_resolution_clock::now();
 
-                    // 执行硬件 RGA：NV12 -> RGB888 + 缩放 + 防抖平移
-                    if (rga_process_to_rgb_(currentDmaFd, ctx->width, ctx->height, targetBuf, 
-                                            currentHorizOffset, currentVertOffset)) {
-                        // 转换成功，直接调用安全队列的 push，内部会自动加锁并 notify 消费者
-                        ctx->targetTaskQueue.push(targetBuf);
-                        
+                    // 操作 A: RGA 缩放并转码给 NPU (1080P NV12 -> 640 RGB888)
+                    bool npuOk = rga_process_to_rgb_(currentDmaFd, ctx->width, ctx->height, 
+                                                    targetNpuBuf, currentHorizOffset, 
+                                                    currentVertOffset);
+
+                    // 操作 B: RGA 缩放 (1080P NV12 -> 720P NV12)
+                    bool scaleOk = true;
+                    if (targetOsd720pBuf != nullptr) {
+                        scaleOk = rga_scale_nv12_to_nv12_(currentDmaFd, ctx->width, ctx->height, 
+                                                            targetOsd720pBuf);
+                    }
+
+                    if (npuOk && scaleOk) {
+                        // 打包并 Push 到 NPU 队列
+                        // targetOsd720pBuf是nullptr无所谓
+                        NpuOSD task = {targetNpuBuf, targetOsd720pBuf};
+                        ctx->npuTaskQueue.push(task);
                     } else {
-                        // 转换失败，立即归还避免内存泄漏
-                        std::cerr << "[RGA Error] Process failed, returning buffer to pool." << std::endl;
-                        ctx->rgaOutputPool->release_buffer(targetBuf);
+                        // 处理失败，归还内存
+                        std::cerr << "[RGA Error] 1080P NV12 -> 640 RGB888和1080P NV12 -> 720P NV12转换失败，立即归还避免内存泄漏." << std::endl;
+                        ctx->npuRgbPool->release_buffer(targetNpuBuf);
+                        if (targetOsd720pBuf != nullptr)
+                            ctx->osd720pPool->release_buffer(targetOsd720pBuf);
                     }
 
                     auto end_time = std::chrono::high_resolution_clock::now();
                     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                    std::cout << "[time] RGA (NV12 -> RGB888 & EIS): " << duration.count() << " ms." << std::endl;
+                    std::cout << "[time] RGA (NV12 -> RGB888 & EIS & scale): " << duration.count() << " ms." << std::endl;
                 } else {
                     // 缓冲池干涸策略：通常意味着下游处理太慢，此时直接丢弃当前帧 (Drop Frame)
                     std::cerr << "[Thread] Warning: RGA buffer pool empty! Dropping frame." << std::endl;
+                    if (targetNpuBuf) ctx->npuRgbPool->release_buffer(targetNpuBuf);
+                    if (targetOsd720pBuf) ctx->osd720pPool->release_buffer(targetOsd720pBuf);
                 }
 
-                // ==========================================================
+                DmaBuffer_t* targetOrigBuf = ctx->origCopyPool->get_buffer();
 
-                // 2. RGA（或其他）处理完毕后，将该 Buffer 重新入队交还给摄像头驱动
+                if (targetOrigBuf != nullptr) {
+                    // 记录时间戳
+                    targetOrigBuf->timestampUs = timestampUs;
+
+                    bool copyOk = rga_copy_buffer_(currentDmaFd, ctx->width, ctx->height, 
+                                                    targetOrigBuf);
+
+                    if (copyOk) {
+                        ctx->processTaskQueue.push(targetOrigBuf);
+                    } else {
+                        std::cerr << "[RGA Error] 拷贝图像失败，立即归还避免内存泄漏." << std::endl;
+                        ctx->origCopyPool->release_buffer(targetOrigBuf);
+                    }
+                }
+
+                // RGA（或其他）处理完毕后，将该 Buffer 重新入队交还给摄像头驱动
                 if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
                     perror("[Thread] VIDIOC_QBUF requeue failed");
                     ctx->isThreadRunning = false;
@@ -335,13 +367,46 @@ void SentinelVisioner::release_camera_resources_(CameraContext* ctx) {
     // ==========================================================
     // 新增: 释放针对该路摄像头的 RGA DMA 内存池
     // ==========================================================
-    if (ctx->rgaOutputPool) {
-        ctx->rgaOutputPool->destroy_pool();
-        ctx->rgaOutputPool.reset(); 
+    if (ctx->npuRgbPool) {
+        ctx->npuRgbPool->destroy_pool();
+        ctx->npuRgbPool.reset(); 
+    }
+
+    if (ctx->origCopyPool) {
+        ctx->origCopyPool->destroy_pool();
+        ctx->origCopyPool.reset(); 
+    }
+    if (ctx->osd720pPool) {
+        ctx->osd720pPool->destroy_pool();
+        ctx->osd720pPool.reset(); 
     }
 }
 
-DmaBuffer_t* SentinelVisioner::wait_get_rga_buffer(int camNum) {
+NpuOSD SentinelVisioner::wait_get_npuOSD(int camNum) {
+    auto it = _cameraContextMap.find(camNum);
+    if (it == _cameraContextMap.end()) {
+        return {nullptr, nullptr};
+    }
+
+    CameraContext* ctx = it->second.get();
+    
+    // 调用安全队列的阻塞方法，线程会在这里休眠，直到捕获线程 push 了新的一帧
+    return ctx->npuTaskQueue.pop(); 
+}
+
+void SentinelVisioner::release_npuOSD(int camNum, NpuOSD* npuOSD) {
+    if (npuOSD == nullptr) return;
+
+    auto it = _cameraContextMap.find(camNum);
+    if (it != _cameraContextMap.end()) {
+        // 交还给对应摄像头的专用内存池
+        it->second->npuRgbPool->release_buffer(npuOSD->npuImage);
+        if (npuOSD->osdImage != nullptr)
+            it->second->osd720pPool->release_buffer(npuOSD->osdImage);
+    }
+}
+
+DmaBuffer_t* SentinelVisioner::wait_get_orig_copy_buffer(int camNum) {
     auto it = _cameraContextMap.find(camNum);
     if (it == _cameraContextMap.end()) {
         return nullptr;
@@ -350,16 +415,16 @@ DmaBuffer_t* SentinelVisioner::wait_get_rga_buffer(int camNum) {
     CameraContext* ctx = it->second.get();
     
     // 调用安全队列的阻塞方法，线程会在这里休眠，直到捕获线程 push 了新的一帧
-    return ctx->targetTaskQueue.pop(); 
+    return ctx->processTaskQueue.pop(); 
 }
 
-void SentinelVisioner::release_rga_buffer(int camNum, DmaBuffer_t* buf) {
+void SentinelVisioner::release_orig_copy_buffer(int camNum, DmaBuffer_t* buf) {
     if (buf == nullptr) return;
 
     auto it = _cameraContextMap.find(camNum);
     if (it != _cameraContextMap.end()) {
         // 交还给对应摄像头的专用内存池
-        it->second->rgaOutputPool->release_buffer(buf);
+        it->second->origCopyPool->release_buffer(buf);
     }
 }
 
@@ -431,4 +496,88 @@ bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeigh
     releasebuffer_handle(rga_handle_dst);
 
     return ret;
+}
+
+bool SentinelVisioner::rga_scale_nv12_to_nv12_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf) {
+    // 检查参数合法性
+    if (srcFd <= 0 || !dstBuf || dstBuf->dmaFd <= 0) {
+        std::cerr << "[RGA Error] Invalid DMA fd for scaling!" << std::endl;
+        return false;
+    }
+
+    // 源格式和目标格式保持一致，都是 NV12 (Rockchip 宏定义通常为 YCrCb_420_SP 或 YCbCr_420_SP)
+    int fmt = RK_FORMAT_YCrCb_420_SP; 
+
+    // 1. 导入 DMA Fd 生成 RGA Handle
+    im_handle_param_t in_param = { srcWidth, srcHeight, fmt };
+    rga_buffer_handle_t rga_handle_src = importbuffer_fd(srcFd, &in_param);
+    if (rga_handle_src <= 0) {
+        std::cerr << "[RGA Error] Failed to import source buffer fd: " << srcFd << std::endl;
+        return false;
+    }
+
+    im_handle_param_t dst_param = { dstBuf->width, dstBuf->height, fmt };
+    rga_buffer_handle_t rga_handle_dst = importbuffer_fd(dstBuf->dmaFd, &dst_param);
+    if (rga_handle_dst <= 0) {
+        std::cerr << "[RGA Error] Failed to import destination buffer fd: " << dstBuf->dmaFd << std::endl;
+        releasebuffer_handle(rga_handle_src);
+        return false;
+    }
+
+    // 2. 包装 RGA Buffer
+    // 跨距 (Stride) 默认与宽度对齐，如果你的分配器有特殊的步长，请修改最后的两个参数
+    rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, srcWidth, srcHeight, fmt, srcWidth, srcHeight);
+    rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, fmt, dstBuf->width, dstBuf->height);
+
+    // 3. 设置源和目标的矩形区域 (全图到全图映射)
+    im_rect srect = {0, 0, srcWidth, srcHeight};
+    im_rect drect = {0, 0, dstBuf->width, dstBuf->height};
+
+    // 4. 执行 RGA 硬件缩放
+    // 不需要背景填充(pat)和遮罩(prect)，全部置 0
+    rga_buffer_t pat; memset(&pat, 0, sizeof(rga_buffer_t));
+    im_rect prect; memset(&prect, 0, sizeof(im_rect));
+    
+    // 调用 improcess，RGA 会自动识别源和目标的大小差异并启动缩放引擎
+    IM_STATUS ret_rga = improcess(rga_buf_src, rga_buf_dst, pat, srect, drect, prect, 0);
+
+    // 5. 释放句柄 (极其重要，否则会造成内核 RGA 句柄泄漏)
+    releasebuffer_handle(rga_handle_src);
+    releasebuffer_handle(rga_handle_dst);
+
+    if (ret_rga <= 0) {
+        std::cerr << "[RGA Error] improcess scale failed: " << imStrError(ret_rga) << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height, DmaBuffer_t* dstBuf) {
+    if (srcFd <= 0 || !dstBuf || dstBuf->dmaFd <= 0) return false;
+
+    // MIPI 摄像头通常输入为 NV12 (YCrCb_420_SP)
+    int fmt = RK_FORMAT_YCrCb_420_SP; 
+
+    im_handle_param_t in_param = { width, height, fmt };
+    rga_buffer_handle_t rga_handle_src = importbuffer_fd(srcFd, &in_param);
+    if (rga_handle_src <= 0) return false;
+
+    im_handle_param_t dst_param = { dstBuf->width, dstBuf->height, fmt };
+    rga_buffer_handle_t rga_handle_dst = importbuffer_fd(dstBuf->dmaFd, &dst_param);
+    if (rga_handle_dst <= 0) {
+        releasebuffer_handle(rga_handle_src);
+        return false;
+    }
+
+    rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, width, height, fmt, width, height);
+    rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, fmt, dstBuf->width, dstBuf->height);
+
+    // 调用 RGA 硬件拷贝
+    IM_STATUS ret_rga = imcopy(rga_buf_src, rga_buf_dst);
+
+    releasebuffer_handle(rga_handle_src);
+    releasebuffer_handle(rga_handle_dst);
+
+    return ret_rga == IM_STATUS_SUCCESS;
 }
