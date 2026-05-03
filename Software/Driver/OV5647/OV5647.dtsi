@@ -1,0 +1,150 @@
+#define USE_OV5647 1
+
+#if USE_OV5647
+
+/ {
+    /* 树莓派 OV5647 板载 25MHz 晶振虚拟时钟 */
+    ext_clk_ov5647: ext-clk-ov5647 {
+        compatible = "fixed-clock";
+        clock-frequency = <25000000>; /* 25MHz */
+        clock-output-names = "clk_ov5647";
+        #clock-cells = <0>;
+    };
+};
+
+// &mipi_dcphy0 {
+//    status = "okay";
+//};
+
+//&rkisp0 {
+//    status = "okay";
+//};
+
+//&isp0_mmu {
+//    status = "okay";
+//};
+
+/* 配置 I2C 控制总线与 Sensor 节点 */
+&i2c5 {
+    status = "okay";
+    clock-frequency = <400000>;
+
+    ov5647: camera@36 {
+        compatible = "ovti,ov5647";
+        reg = <0x36>;
+        status = "okay";
+
+        clocks = <&ext_clk_ov5647>;
+        clock-names = "xvclk";
+
+        /* 核心使能脚：对应原理图 P16 Pin 5 (GPIO4_A2) */
+        pwdn-gpios = <&gpio4 RK_PA2 GPIO_ACTIVE_HIGH>;
+
+        rockchip,camera-module-index = <1>;
+        rockchip,camera-module-facing = "back";
+        rockchip,camera-module-name = "RPi-Camera-V1";
+        rockchip,camera-module-lens-name = "default";
+
+        port {
+            ov5647_out: endpoint {
+                remote-endpoint = <&mipi_in_ucam2>;
+                data-lanes = <1 2>; /* 树莓派 OV5647 是 2-lane */
+            };
+        };
+    };
+};
+
+/* 物理层 (D-PHY)：使用 dphy0 拆分出的第一个 2-lane 通道 */
+&csi2_dphy1 {
+    status = "okay";
+    ports {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        port@0 {
+            reg = <0>;
+            /* --- 新增这两行声明端点格式 --- */
+            #address-cells = <1>;
+            #size-cells = <0>;
+            
+            mipi_in_ucam2: endpoint@1 {
+                reg = <1>;
+                remote-endpoint = <&ov5647_out>;
+                data-lanes = <1 2>;
+            };
+        };
+        port@1 {
+            reg = <1>;
+            /* --- 新增这两行声明端点格式 --- */
+            #address-cells = <1>;
+            #size-cells = <0>;
+            
+            csidphy1_out: endpoint@0 {
+                reg = <0>;
+                remote-endpoint = <&mipi2_csi2_input>;
+            };
+        };
+    };
+};
+
+/* 协议层 (CSI-2 Host)：对接 mipi2 */
+&mipi2_csi2 {
+    status = "okay";
+    ports {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        port@0 {
+            reg = <0>;
+            /* --- 新增这两行声明端点格式 --- */
+            #address-cells = <1>;
+            #size-cells = <0>;
+            
+            mipi2_csi2_input: endpoint@1 {
+                reg = <1>;
+                remote-endpoint = <&csidphy1_out>;
+            };
+        };
+        port@1 {
+            reg = <1>;
+            /* --- 新增这两行声明端点格式 --- */
+            #address-cells = <1>;
+            #size-cells = <0>;
+            
+            mipi2_csi2_output: endpoint@0 {
+                reg = <0>;
+                remote-endpoint = <&cif_mipi_lvds2>;
+            };
+        };
+    };
+};
+
+/* 采集层 (VICAP/CIF)：对接 cif 2 号接口 */
+&rkcif_mipi_lvds2 {
+    status = "okay";
+    port {
+        cif_mipi_lvds2: endpoint {
+            remote-endpoint = <&mipi2_csi2_output>;
+        };
+    };
+};
+
+/* 采集层分发接口：直通 ISP */
+&rkcif_mipi_lvds2_sditf {
+    status = "okay";
+    port {
+        mipi_lvds_sditf2: endpoint {
+            remote-endpoint = <&isp0_vir2>;
+        };
+    };
+};
+
+/* 图像处理层 (ISP)：对接 ISP0 的第 2 号虚拟通道 */
+&rkisp0_vir2 {
+    status = "okay";
+    port {
+        isp0_vir2: endpoint {
+            remote-endpoint = <&mipi_lvds_sditf2>;
+        };
+    };
+};
+
+#endif
