@@ -1,0 +1,39 @@
+/*
+ * icm45686.dtsi - ICM45686设备树配置片段
+ *
+ * 适用于RK3588平台的ICM45686传感器
+ *
+ * 日期: 2026-05-05
+ */
+
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/gpio/gpio.h>
+
+&spi4 {
+    status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&spi4m2_pins
+                &spi4m2_cs0>;
+
+    icm45686@0 {
+        compatible = "invensense,icm45686";
+        reg = <0>;
+        spi-max-frequency = <10000000>;
+        spi-cpol;
+        spi-cpha;
+
+        interrupt-parent = <&gpio1>;
+        interrupts = <45 IRQ_TYPE_LEVEL_HIGH>;
+
+        reset-gpios = <&gpio1 44 GPIO_ACTIVE_LOW>;
+
+        vdd-supply = <&vcc3v3_sys>;
+        vddio-supply = <&vcc3v3_sys>;
+
+        /* 可选配置参数 */
+        invensense,accel-range = <2>;    /* ±2G */
+        invensense,gyro-range = <250>;   /* ±250DPS */
+        invensense,accel-odr = <100>;    /* 100Hz */
+        invensense,gyro-odr = <100>;     /* 100Hz */
+    };
+};

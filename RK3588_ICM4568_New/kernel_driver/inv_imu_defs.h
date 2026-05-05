@@ -1,19 +1,15 @@
 /*
- * icm45686_defs.h - ICM45686惯性测量单元寄存器和位定义
+ * inv_imu_defs.h - ICM45686惯性测量单元寄存器和位定义
  *
- * 适用于RKS588ELF2板子的ICM45686传感器驱动
+ * 适用于RK3588平台的ICM45686传感器驱动
  *
- * 日期: 2026-04-09
+ * 日期: 2026-05-05
  */
 
-#ifndef __ICM45686_DEFS_H__
-#define __ICM45686_DEFS_H__
+#ifndef __INV_IMU_DEFS_H__
+#define __INV_IMU_DEFS_H__
 
-#include <stdint.h>
-
-/* 寄存器地址 */
-#define ICM45686_I2C_ADDR     0x68  /* AD0=0时的I2C地址 */
-#define ICM45686_I2C_ADDR_AD0 0x69  /* AD0=1时的I2C地址 */
+#include <linux/types.h>
 
 /* 寄存器地址 */
 #define ICM45686_REG_WHO_AM_I        0x0F  /* 设备ID寄存器 */
@@ -67,6 +63,15 @@
 #define ICM45686_GYRO_CONFIG0_FS_1000DPS    0x02  /* 满量程1000DPS */
 #define ICM45686_GYRO_CONFIG0_FS_2000DPS    0x03  /* 满量程2000DPS */
 
+/* 中断配置0寄存器位定义 */
+#define ICM45686_INT_CONFIG0_INT1_EN        0x01  /* INT1使能 */
+#define ICM45686_INT_CONFIG0_INT1_ACTL      0x02  /* INT1极性 */
+#define ICM45686_INT_CONFIG0_INT1_OPEN      0x04  /* INT1开漏/推挽 */
+#define ICM45686_INT_CONFIG0_INT1_LATCH     0x08  /* INT1锁存 */
+
+/* 中断源0寄存器位定义 */
+#define ICM45686_INT_SOURCE0_DATA_RDY_INT   0x01  /* 数据就绪中断 */
+
 /* 传感器数据结构 */
 typedef struct {
     int16_t accel_x;  /* 加速度计X轴原始数据 */
@@ -76,7 +81,7 @@ typedef struct {
     int16_t gyro_y;   /* 陀螺仪Y轴原始数据 */
     int16_t gyro_z;   /* 陀螺仪Z轴原始数据 */
     int16_t temp;     /* 温度原始数据 */
-} icm45686_raw_data_t;
+} inv_imu_raw_data_t;
 
 /* 传感器数据（转换后） */
 typedef struct {
@@ -87,13 +92,6 @@ typedef struct {
     float gyro_y;   /* 陀螺仪Y轴数据（单位：rad/s） */
     float gyro_z;   /* 陀螺仪Z轴数据（单位：rad/s） */
     float temp;     /* 温度数据（单位：℃） */
-} icm45686_data_t;
+} inv_imu_data_t;
 
-/* 传输接口结构体 */
-typedef struct {
-    int (*read_reg)(uint8_t reg, uint8_t *data, uint16_t len);  /* 读取寄存器函数 */
-    int (*write_reg)(uint8_t reg, uint8_t *data, uint16_t len); /* 写入寄存器函数 */
-    void (*delay_us)(uint32_t us);                            /* 延时函数 */
-} icm45686_transport_t;
-
-#endif /* __ICM45686_DEFS_H__ */
+#endif /* __INV_IMU_DEFS_H__ */
