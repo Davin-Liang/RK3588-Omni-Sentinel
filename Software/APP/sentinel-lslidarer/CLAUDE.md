@@ -2,92 +2,68 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 构建系统
+## 项目性质
 
-这是一个 ROS2 colcon 工作空间。在工作空间根目录下构建：
+这是一个**完全脱离 ROS** 的镭神 N10Plus 单线激光雷达驱动静态库。从原厂 ROS2 驱动抽取核心串口通信与协议解码逻辑，零 ROS 运行时依赖。
 
-```bash
-source /opt/ros/<ros2-distro>/setup.bash
-colcon build --symlink-install
-source install/setup.bash
-```
-
-单独编译某个包：
+## 构建
 
 ```bash
-colcon build --packages-select <package-name>
+# 交叉编译 aarch64 (RK3588)
+export CROSS_COMPILE_PATH=/path/to/aarch64-buildroot-linux-gnu_sdk-buildroot
+./build.sh
+
+# 手动:
+mkdir -p build/ && cd build/
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+make install
 ```
 
-## 包结构
+唯一依赖: `libpthread`（工具链内置）。
 
-### `turn_on_wheeltec_robot` — 机器人启动与传感器集成
+产物:
+- `install/lib/libsentinel_lslidarer_lib.a` — 静态库
+- `install/include/sentinel_lslidarer.h` — 公共头文件
+- `install/sentinel_lslidarer_demo` — Demo 可执行程序
+- `install/lidar_udev.sh` — udev 规则安装脚本
 
-顶层集成包，包含两个 C++ 节点：
+## 架构
 
-- **`wheeltec_robot_node`** (`src/wheeltec_robot.cpp`, `src/Quaternion_Solution.cpp`) — 通过串口 (`/dev/wheeltec_controller`, 115200 波特率) 与 Wheeltec 底盘控制器通信。发布里程计、接收 cmd_vel、处理机器人状态机。
-- **`ImuProcessor`** (`src/ImuProcessor.cpp`) — IMU 数据处理，发布姿态数据。
+三层结构，自底向上:
 
-核心配置集中在 `config/wheeltec_param.yaml`。这一个文件控制机器人型号、雷达类型、IMU 模式和相机模式的选择。启动时可通过 launch 参数覆盖 YAML 默认值。
+**SerialPort** (`src/serial_port.cpp`) — POSIX 串口 I/O
+- 打开 `/dev/sentinel_lidar`，460800 baud / 8N1
+- 阻塞 `read()` + 内存扫描 `0xA5 0x5A` 包头
+- 返回固定 108 字节 N10Plus 数据包
 
-主要 launch 文件：
-- `turn_on_wheeltec_robot.launch.py` — 顶层启动：启动底盘串口、EKF、joint state publisher、机器人模型描述。
-- `base_serial.launch.py` — 启动 `wheeltec_robot_node`，可选择启动 IMU 节点（stm32 或 H30 模式）。
-- `wheeltec_lidar.launch.py` — 雷达调度：从 YAML 读取 `lidar_type`，启动对应的驱动（lslidar / ldlidar / rplidar）。
-- `wheeltec_camera.launch.py` — 相机启动。
-- `wheeltec_ekf.launch.py` — 里程计 EKF 融合。
+**RingBuffer** (`src/ring_buffer.cpp`) — SWCR 无锁环形缓冲区
+- 单写（雷达线程）单读（应用线程）模型
+- `std::atomic<uint32_t>` 读写指针 + per-slot sequence 号 + `memory_order_release`/`acquire` 屏障
+- 预分配 64 字节对齐内存池（10 帧 × 540 点 ≈ 65 KB）
 
-### `wheeltec_lidar_ros2/lslidar_ros2/` — 镭神 (LSLIDAR) 雷达驱动
+**SentinelLslidarer** (`src/sentinel_lslidarer.cpp`) — 主驱动类
+- 拥有 reader 线程：阻塞读包 → CRC 校验 → 双回波解码 → sin/cos LUT 查表 → 笛卡尔坐标转换 → 圈边界检测 → 提交完整帧
+- 提供 `get_closest_frame(cameraTsNs, outFrame)`: 以 `CLOCK_MONOTONIC` 纳秒时间戳线性扫描返回最近帧
+- 距离滤波 0.15m–50.0m，角度裁剪 90°–240° 盲区屏蔽
 
-两个子包：
+**N10Plus 协议解码** (`src/m10p_protocol.cpp`)
+- 36000 项 sin/cos 预计算 LUT
+- CRC 字节累加和校验
+- 32 点/包（16 角度组 × 2 回波，含反射强度）
 
-- **`lslidar_msgs`** — 自定义 ROS2 接口：`LslidarInformation.msg`、`LslidarPacket.msg`，以及 10 个服务定义（电机速度、上下电、授时模式、网络配置等）。
-- **`lslidar_driver`** — 驱动库 + 节点。采用策略模式：`lslidar_driver_node.cpp` 从 ROS 参数中读取 `lidar_type` 并实例化对应的驱动子类：
-  - `LslidarCxDriver` — 机械式多线雷达（C16、C32 等）
-  - `LslidarChDriver` — 905nm 混合固态雷达（CH16X1、CH32A、CH64W 等）
-  - `LslidarLsDriver` — 1550nm 系列（LS25D、LS128S1 等）
-  - `LslidarX10Driver` — 单线雷达（M10、N10、N301 等）
-
-  发布自定义点云类型 `PointXYZIRT`（x、y、z、intensity、ring、time），同时可发布 LaserScan 消息。支持 PCAP 离线回放、组播、多种滤波和坐标变换。通过 `config/` 目录下的 YAML 文件配置（如 `lslidar_cx.yaml`、`lslidar_x10.yaml`）。
-
-### `wheeltec_lidar_ros2/rplidar_ros/` — 思岚 (SLAMTEC) RPLIDAR 驱动
-
-标准思岚 ROS2 驱动，支持 A1/A2/A3/S1/S2/S3/T1/C1 型号。串口通信。`launch/` 中 `view_*` 开头的文件在启动驱动的同时启动 RViz。
-
-### `wheeltec_lidar_ros2/ldlidar_ros2/` — LD 系列雷达驱动
-
-支持 LD06/LD19/STL06N/STL19P/STL26/STL27L 系列雷达。
-
-## 运行命令
-
-启动完整机器人：
+## Demo 运行
 
 ```bash
-ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
+# 先在目标板安装 udev 规则（一次）
+sudo bash lidar_udev.sh
+
+# 运行
+./sentinel_lslidarer_demo
 ```
 
-启动时指定雷达类型：
+## 性能指标 (RK3588, N10Plus 10Hz)
 
-```bash
-ros2 launch turn_on_wheeltec_robot wheeltec_lidar.launch.py lidar_type:=ls_M10P_uart
-```
-
-单独启动某个雷达驱动：
-
-```bash
-ros2 launch lslidar_driver lslidar_ch_launch.py   # 905 系列
-ros2 launch lslidar_driver lslidar_cx_launch.py   # 机械式多线
-ros2 launch lslidar_driver lslidar_ls_launch.py   # 1550 系列
-ros2 launch lslidar_driver lslidar_x10_launch.py  # 单线
-```
-
-## 关键依赖
-
-系统包：`libpcl-dev`、`libpcap-dev`、`libyaml-cpp-dev`、`libboost-thread-dev`
-
-ROS 包：`pcl-conversions`、`rosidl-default-generators`、`builtin-interfaces`、`sensor-msgs`、`nav-msgs`、`tf2`、`geometry-msgs`
-
-`turn_on_wheeltec_robot` 包额外依赖 `wheeltec_robot_msg` 和 `serial`（与底盘的串口通信）。
-
-## 配置流程
-
-`wheeltec_param.yaml` → launch 文件读取 → 参数注入各节点。其中的 `lidar_type`、`imu_mode`、`car_mode`、`camera_mode` 字段决定了启动哪些子模块。雷达的角度裁剪参数也在该文件的 `x10` 和 `lscx` 键下配置。
+- Reader 线程 CPU: 6.0%, 主线程: 1.3%
+- 进程 RES: 2.2 MB, 帧龄: 2-12 ms
+- FD 数恒定 4 个，零泄漏
