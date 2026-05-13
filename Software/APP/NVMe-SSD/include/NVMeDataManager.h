@@ -8,7 +8,6 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
-#include <sys/uio.h>
 #include <unistd.h>
 #include <memory>
 
@@ -59,7 +58,8 @@ public:
                              uint64_t timestamp_ns);
 
     // 数据读取接口
-    bool read_video_frame_from_disk(uint64_t target_timestamp, float time_interval);
+    bool read_video_frame_from_disk(uint64_t target_timestamp, float time_interval,
+                                    std::vector<uint8_t>& out_frame_data);
 
     // 获取统计信息
     size_t get_queue_size() const;
@@ -71,11 +71,11 @@ private:
 
     // 辅助函数
     void prepare_header(Header& header, DataType type, uint64_t timestamp, uint32_t data_size);
-    bool write_to_nvme(const iovec* iov, int iovcnt);
+    bool write_to_nvme(const void* data, size_t size);
 
     // 线程和同步
     std::thread writer_thread_;
-    std::mutex queue_mutex_;
+    mutable std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::atomic<bool> running_;
 
@@ -92,6 +92,7 @@ private:
     DataBlock front_camera_block_;
     DataBlock rear_camera_block_;
     DataBlock lidar_block_;
+    DataBlock imu_block_;
 
     // NVMe设备文件描述符
     int nvme_fd_;
