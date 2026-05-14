@@ -12,10 +12,6 @@ NVMeDataManager::NVMeDataManager()
     , lidar_buffer_pos_(0)
     , imu_buffer_pos_(0)
     , nvme_fd_(-1) {
-    // 初始化数据块
-    front_camera_block_.data.reserve(1024 * 1024);  // 预分配足够空间
-    rear_camera_block_.data.reserve(1024 * 1024);
-    lidar_block_.data.reserve(1024 * 1024);
 }
 
 NVMeDataManager::~NVMeDataManager() {
@@ -89,14 +85,24 @@ void NVMeDataManager::prepare_header(Header& header, DataType type, uint64_t tim
     header.data_size = data_size;
 }
 
-bool NVMeDataManager::write_to_nvme(const void* data, size_t size) {
-    if (nvme_fd_ < 0) {
-        return false;
-    }
+bool NVMeDataManager::write_to_nvme(const Header* header, const uint8_t* data,
+                                     size_t data_size, size_t padding_size) {
+    if (nvme_fd_ < 0) return false;
 
-    ssize_t bytes_written = write(nvme_fd_, data, size);
-    if (bytes_written < 0) {
-        std::cerr << "Failed to write to NVMe: " << strerror(errno) << std::endl;
+    // 静态512字节零填充缓冲区（writev 需要非 const iov_base）
+    static uint8_t zero_buf[HEADER_ALIGNMENT] = {0};
+
+    struct iovec iov[3];
+    iov[0].iov_base = const_cast<Header*>(header);
+    iov[0].iov_len  = sizeof(Header);
+    iov[1].iov_base = const_cast<uint8_t*>(data);
+    iov[1].iov_len  = data_size;
+    iov[2].iov_base = zero_buf;
+    iov[2].iov_len  = padding_size;
+
+    ssize_t written = writev(nvme_fd_, iov, 3);
+    if (written < 0) {
+        std::cerr << "writev to NVMe failed: " << strerror(errno) << std::endl;
         return false;
     }
     return true;
@@ -104,41 +110,22 @@ bool NVMeDataManager::write_to_nvme(const void* data, size_t size) {
 
 bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_t frame_size,
                                            uint64_t timestamp_ns, bool is_front_camera) {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
+    // 计算对齐填充（无需加锁）
+    size_t padding = calc_padding(sizeof(Header) + frame_size);
 
-    // 选择对应的数据块
-    DataBlock* target_block = is_front_camera ? &front_camera_block_ : &rear_camera_block_;
+    // 直接创建 DataBlock（只拷贝一次数据，无包头拼接）
+    auto block = std::make_shared<DataBlock>();
+    prepare_header(block->header,
+                  is_front_camera ? DataType::VIDEO_FRONT : DataType::VIDEO_REAR,
+                  timestamp_ns, static_cast<uint32_t>(frame_size));
+    block->data.assign(frame_data, frame_data + frame_size);
+    block->padding_size = padding;
 
-    // 计算对齐后的总大小（header + frame data + padding）
-    size_t header_size = sizeof(Header);
-    size_t total_data_size = header_size + frame_size;
-    size_t padding_size = 0;
-
-    // 计算需要填充的对齐字节
-    if (total_data_size % HEADER_ALIGNMENT != 0) {
-        padding_size = HEADER_ALIGNMENT - (total_data_size % HEADER_ALIGNMENT);
+    // 仅入队时持锁，减小锁粒度
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        data_queue_.push(std::move(block));
     }
-
-    // 准备包头（包含真实数据大小，不包含填充）
-    prepare_header(target_block->header,
-                 is_front_camera ? DataType::VIDEO_FRONT : DataType::VIDEO_REAR,
-                 timestamp_ns, static_cast<uint32_t>(frame_size));
-
-    // 设置数据（header + frame data + padding）
-    target_block->data.clear();
-    target_block->data.insert(target_block->data.end(),
-                           reinterpret_cast<const uint8_t*>(&target_block->header),
-                           reinterpret_cast<const uint8_t*>(&target_block->header) + sizeof(Header));
-    target_block->data.insert(target_block->data.end(), frame_data, frame_data + frame_size);
-
-    // 添加填充字节（全0）
-    if (padding_size > 0) {
-        target_block->data.resize(target_block->data.size() + padding_size, 0);
-    }
-
-    // 创建共享指针并加入队列
-    auto block_ptr = std::make_shared<DataBlock>(*target_block);
-    data_queue_.push(block_ptr);
     queue_cv_.notify_one();
 
     return true;
@@ -150,27 +137,21 @@ bool NVMeDataManager::write_lidar_points_to_disk(const uint8_t* points_data, siz
 
     // 检查缓冲池空间
     if (lidar_buffer_pos_ + points_size > lidar_buffer_.size()) {
-        // 缓冲池满了，需要写入
+        // 缓冲池满了，需要刷入队列
         if (!lidar_buffer_pos_) {
             std::cerr << "Lidar buffer is empty but still full, possible logic error" << std::endl;
             return false;
         }
 
-        // 准备包头
-        prepare_header(lidar_block_.header, DataType::LIDAR, timestamp_ns,
-                     static_cast<uint32_t>(lidar_buffer_pos_));
+        // 直接创建 DataBlock（一次拷贝，无包头拼接）
+        auto block = std::make_shared<DataBlock>();
+        prepare_header(block->header, DataType::LIDAR, timestamp_ns,
+                      static_cast<uint32_t>(lidar_buffer_pos_));
+        block->data.assign(lidar_buffer_.data(),
+                          lidar_buffer_.data() + lidar_buffer_pos_);
+        block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
 
-        // 设置数据
-        lidar_block_.data.clear();
-        lidar_block_.data.insert(lidar_block_.data.end(),
-                              reinterpret_cast<const uint8_t*>(&lidar_block_.header),
-                              reinterpret_cast<const uint8_t*>(&lidar_block_.header) + sizeof(Header));
-        lidar_block_.data.insert(lidar_block_.data.end(),
-                              lidar_buffer_.data(), lidar_buffer_.data() + lidar_buffer_pos_);
-
-        // 创建共享指针并加入队列
-        auto block_ptr = std::make_shared<DataBlock>(lidar_block_);
-        data_queue_.push(block_ptr);
+        data_queue_.push(std::move(block));
         queue_cv_.notify_one();
 
         // 重置缓冲池位置
@@ -194,27 +175,21 @@ bool NVMeDataManager::write_imu_data_to_disk(const uint8_t* imu_data, size_t imu
 
     // 检查缓冲池空间
     if (imu_buffer_pos_ + imu_size > imu_buffer_.size()) {
-        // 缓冲池满了，需要写入
+        // 缓冲池满了，需要刷入队列
         if (!imu_buffer_pos_) {
             std::cerr << "IMU buffer is empty but still full, possible logic error" << std::endl;
             return false;
         }
 
-        // 准备包头
-        prepare_header(imu_block_.header, DataType::IMU, timestamp_ns,
-                     static_cast<uint32_t>(imu_buffer_pos_));
+        // 直接创建 DataBlock（一次拷贝，无包头拼接）
+        auto block = std::make_shared<DataBlock>();
+        prepare_header(block->header, DataType::IMU, timestamp_ns,
+                      static_cast<uint32_t>(imu_buffer_pos_));
+        block->data.assign(imu_buffer_.data(),
+                          imu_buffer_.data() + imu_buffer_pos_);
+        block->padding_size = calc_padding(sizeof(Header) + imu_buffer_pos_);
 
-        // 设置数据
-        imu_block_.data.clear();
-        imu_block_.data.insert(imu_block_.data.end(),
-                              reinterpret_cast<const uint8_t*>(&imu_block_.header),
-                              reinterpret_cast<const uint8_t*>(&imu_block_.header) + sizeof(Header));
-        imu_block_.data.insert(imu_block_.data.end(),
-                              imu_buffer_.data(), imu_buffer_.data() + imu_buffer_pos_);
-
-        // 创建共享指针并加入队列
-        auto block_ptr = std::make_shared<DataBlock>(imu_block_);
-        data_queue_.push(block_ptr);
+        data_queue_.push(std::move(block));
         queue_cv_.notify_one();
 
         // 重置缓冲池位置
@@ -316,30 +291,32 @@ size_t NVMeDataManager::get_buffer_usage() const {
 
 void NVMeDataManager::writer_thread() {
     while (running_) {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
+        std::shared_ptr<DataBlock> block;
 
-        // 等待队列中有数据或关闭信号
-        queue_cv_.wait(lock, [this] {
-            return !data_queue_.empty() || !running_;
-        });
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
 
-        if (!running_) {
-            break;
+            // 等待队列中有数据或关闭信号
+            queue_cv_.wait(lock, [this] {
+                return !data_queue_.empty() || !running_;
+            });
+
+            if (!running_) break;
+            if (data_queue_.empty()) continue;
+
+            // 出队（仅移动 shared_ptr，不拷贝数据）
+            block = std::move(data_queue_.front());
+            data_queue_.pop();
         }
+        // IO 期间不持锁
 
-        if (data_queue_.empty()) {
-            continue;
-        }
-
-        // 获取数据块
-        auto block_ptr = data_queue_.front();
-        data_queue_.pop();
-        lock.unlock();
-
-        // data向量已包含 header + payload + padding，直接整体写入
-        if (!write_to_nvme(block_ptr->data.data(), block_ptr->data.size())) {
-            std::cerr << "Writer thread: failed to write " << block_ptr->data.size()
-                      << " bytes to NVMe" << std::endl;
+        // 使用 writev 零拷贝写入：header + payload + zero-padding
+        if (!write_to_nvme(&block->header,
+                          block->data.data(),
+                          block->data.size(),
+                          block->padding_size)) {
+            std::cerr << "Writer thread: writev failed for "
+                      << block->data.size() << " bytes" << std::endl;
         }
     }
 }

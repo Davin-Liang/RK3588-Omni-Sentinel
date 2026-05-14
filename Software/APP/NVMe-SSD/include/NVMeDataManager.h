@@ -10,6 +10,7 @@
 #include <atomic>
 #include <unistd.h>
 #include <memory>
+#include <sys/uio.h>
 
 // 数据类型枚举
 enum class DataType : uint8_t {
@@ -32,7 +33,8 @@ struct Header {
 // 数据块结构
 struct DataBlock {
     Header header;             // 数据包头
-    std::vector<uint8_t> data;  // 数据内容
+    std::vector<uint8_t> data;  // 数据内容（不含包头和填充）
+    size_t padding_size;        // 512B对齐所需的填充字节数
 };
 
 class NVMeDataManager {
@@ -71,7 +73,14 @@ private:
 
     // 辅助函数
     void prepare_header(Header& header, DataType type, uint64_t timestamp, uint32_t data_size);
-    bool write_to_nvme(const void* data, size_t size);
+    bool write_to_nvme(const Header* header, const uint8_t* data,
+                       size_t data_size, size_t padding_size);
+
+    // 计算512B对齐填充
+    static size_t calc_padding(size_t total_size) {
+        size_t mod = total_size % HEADER_ALIGNMENT;
+        return mod ? (HEADER_ALIGNMENT - mod) : 0;
+    }
 
     // 线程和同步
     std::thread writer_thread_;
@@ -87,12 +96,6 @@ private:
     std::vector<uint8_t> imu_buffer_;
     size_t lidar_buffer_pos_;
     size_t imu_buffer_pos_;
-
-    // 数据块
-    DataBlock front_camera_block_;
-    DataBlock rear_camera_block_;
-    DataBlock lidar_block_;
-    DataBlock imu_block_;
 
     // NVMe设备文件描述符
     int nvme_fd_;

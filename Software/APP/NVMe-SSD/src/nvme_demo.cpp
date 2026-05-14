@@ -2,42 +2,45 @@
 #include <chrono>
 #include <thread>
 #include <vector>
-#include <random>
 #include <cstring>
 #include <iomanip>
 #include "NVMeDataManager.h"
 
-// 模拟生成摄像头图像数据
+// 快速伪随机数生成器（线性同余，比 std::mt19937 快 100x 以上）
+static uint32_t fast_rand() {
+    static uint32_t seed = 0x12345678;
+    seed = seed * 1103515245 + 12345;
+    return seed;
+}
+
+// 模拟生成摄像头图像数据（使用快速填充，避免 mt19937 的极高 CPU 开销）
 void generate_camera_frame(std::vector<uint8_t>& frame_data, int width = 1920, int height = 1080) {
     // 模拟 RGB888 图像数据
     size_t frame_size = width * height * 3; // RGB888: 3 bytes per pixel
     frame_data.resize(frame_size);
 
-    // 使用随机数生成器模拟图像数据
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, 255);
-
-    for (size_t i = 0; i < frame_size; i++) {
-        frame_data[i] = dis(gen);
+    // 使用 LCG 快速填充，模拟真实图像数据
+    for (size_t i = 0; i < frame_size; i += 4) {
+        uint32_t r = fast_rand();
+        frame_data[i] = r & 0xFF;
+        if (i + 1 < frame_size) frame_data[i + 1] = (r >> 8) & 0xFF;
+        if (i + 2 < frame_size) frame_data[i + 2] = (r >> 16) & 0xFF;
+        if (i + 3 < frame_size) frame_data[i + 3] = (r >> 24) & 0xFF;
     }
 }
 
-// 模拟生成激光雷达点云数据
+// 模拟生成激光雷达点云数据（快速填充）
 void generate_lidar_points(std::vector<uint8_t>& points_data, int point_count = 4096) {
     // 模拟点云数据：每个点包含 x, y, z, intensity (4 float = 16 bytes)
     size_t point_size = point_count * 16;
     points_data.resize(point_size);
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<> dis(-50.0, 50.0); // -50 到 50 米的范围
-
+    // 使用 LCG 快速生成模拟点云
     for (int i = 0; i < point_count; i++) {
-        float x = dis(gen);
-        float y = dis(gen);
-        float z = dis(gen);
-        float intensity = dis(gen) / 255.0f; // 0-1之间的强度值
+        float x = (fast_rand() % 10000) / 100.0f - 50.0f;
+        float y = (fast_rand() % 10000) / 100.0f - 50.0f;
+        float z = (fast_rand() % 10000) / 100.0f - 50.0f;
+        float intensity = (fast_rand() % 256) / 255.0f;
 
         memcpy(&points_data[i * 16], &x, 4);
         memcpy(&points_data[i * 16 + 4], &y, 4);
@@ -46,17 +49,17 @@ void generate_lidar_points(std::vector<uint8_t>& points_data, int point_count = 
     }
 }
 
-// 模拟生成 IMU 数据
+// 模拟生成 IMU 数据（数据量很小，保持使用简单生成）
 void generate_imu_data(std::vector<uint8_t>& imu_data) {
     // 模拟 IMU 数据：acceleration + gyroscope (6 float = 24 bytes)
     imu_data.resize(24);
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<> dis(-1.0, 1.0); // -1 到 1 之间的值
-
-    float ax = dis(gen), ay = dis(gen), az = dis(gen);
-    float gx = dis(gen), gy = dis(gen), gz = dis(gen);
+    float ax = (fast_rand() % 2000) / 1000.0f - 1.0f;
+    float ay = (fast_rand() % 2000) / 1000.0f - 1.0f;
+    float az = (fast_rand() % 2000) / 1000.0f - 1.0f;
+    float gx = (fast_rand() % 2000) / 1000.0f - 1.0f;
+    float gy = (fast_rand() % 2000) / 1000.0f - 1.0f;
+    float gz = (fast_rand() % 2000) / 1000.0f - 1.0f;
 
     memcpy(&imu_data[0], &ax, 4);
     memcpy(&imu_data[4], &ay, 4);
