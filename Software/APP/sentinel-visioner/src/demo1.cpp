@@ -107,19 +107,20 @@ void stream_consumer_thread(SentinelVisioner* visioner, int camNum) {
 // ============================================================================
 // 主函数入口
 // ============================================================================
-int main() {
+int main(int argc, char* argv[]) {
     SentinelVisioner visioner;
 
-    std::string devName = "/dev/video11"; // 请替换为你实际的摄像头节点
+    std::string devName = (argc > 1) ? argv[1] : "/dev/video11";
+    int runSeconds      = (argc > 2) ? atoi(argv[2]) : 60;
     int camNum = 0;
-    
-    // 1. 注册并添加摄像头 (移除了 enableOsd 参数，恢复 5 个参数的调用)
+
+    // 1. 注册并添加摄像头
     if (!visioner.add_camera(devName, 1920, 1080, 8, camNum)) {
         std::cerr << "Failed to add camera!" << std::endl;
         return -1;
     }
 
-    // 2. 开启视频流（此时内部的捕获线程会启动，开始抓图并压入队列）
+    // 2. 开启视频流
     if (!visioner.camera_stream_ctrl(camNum, true)) {
         std::cerr << "Failed to start camera stream!" << std::endl;
         return -1;
@@ -129,9 +130,9 @@ int main() {
     std::thread npu_thread(npu_osd_consumer_thread, &visioner, camNum);
     std::thread stream_thread(stream_consumer_thread, &visioner, camNum);
 
-    // 主线程保持运行 60 秒以进行观察...
-    std::cout << "System running... Press Ctrl+C to stop (or wait 60s)." << std::endl;
-    for (int i = 0; i < 60; ++i) {
+    // 主线程保持运行
+    std::cout << "System running... Press Ctrl+C to stop (or wait " << runSeconds << "s)." << std::endl;
+    for (int i = 0; i < runSeconds; ++i) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 

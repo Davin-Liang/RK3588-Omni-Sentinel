@@ -58,6 +58,9 @@ sentinel-visioner (相机视觉管线 + RGA 硬件加速)
   ├── 3rdparty/opencv (OpenCV 3.4.5, 预编译 aarch64)
   └── 3rdparty/rknpu2 (RKNN NPU 运行时，CMake 已就绪但未完全接入)
 
+lidar-camera-fusion (视觉-雷达数据融合，纯算法组件)
+  └── sentinel-lslidarer/include (仅依赖 LidarPoint/LidarFrame 类型定义)
+
 sentinel-lslidarer (激光雷达驱动，完全独立)
   └── Threads::Threads (唯一外部依赖)
 ```
@@ -71,6 +74,20 @@ sentinel-lslidarer (激光雷达驱动，完全独立)
 - **SentinelLslidarer**: 拥有 reader 线程，持续解码 N10Plus 108 字节固定包协议（双回波、CRC 校验），检测 360° 圈边界后提交完整帧。以 `CLOCK_MONOTONIC` 纳秒时间戳为索引，通过 `get_closest_frame(cameraTsNs, outFrame)` 线性扫描返回与相机时间戳最近的点云帧
 
 唯一公共头文件: `include/sentinel_lslidarer.h`，API 类: `SentinelLslidarer`
+
+### lidar-camera-fusion — 视觉-雷达数据融合
+
+纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，输出每个检测框内的 LiDAR 点索引。
+
+- **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化为 6 次乘法 + 3 次加法
+- **内参投影**: pinhole 模型 `u = fx*cx/cz + cx_principal`，过滤相机后方及画面外点
+- **2D bbox 判定**: first-hit 策略，每个 LiDAR 点归属至多一个检测框
+- **两阶段算法**: Pass 1 — 透射+投影+分类；Pass 2 — 计数排序写回候选点索引
+- **累计融合**: `reset()` → 多次 `fuse_data()` (不同相机) → `result()`，支持多相机累计
+- **预分配内存**: `new (std::nothrow)` 预分配约 12 KB 缓冲区，零运行时堆分配
+- **线程模型**: 无内部线程/锁，设计为单线程顺序调用
+
+唯一公共头文件: `include/lidar_camera_fusion.h`，API 类: `LidarCameraFusion`
 
 ### sentinel-visioner — 多路视觉流水线
 
@@ -111,3 +128,67 @@ sentinel-lslidarer (激光雷达驱动，完全独立)
 - DMA 缓冲区遵循严格的"获取-使用-归还"生命周期，未归还将导致内核态内存枯竭和丢帧
 - 时间戳统一使用 `CLOCK_MONOTONIC`，不同组件间通过此时间域实现传感器融合对齐
 - 各开发者在自己的分支上工作，勿交叉修改他人负责的组件
+
+## 编码规范
+
+以下规范适用于本项目所有 C++ 组件。
+
+### 命名
+
+| 类别 | 约定 | 示例 |
+|------|------|------|
+| 文件名 | `snake_case` | `lidar_camera_fusion.h`, `demo_single.cpp` |
+| 类 / 结构体 | `PascalCase` | `LidarCameraFusion`, `YoloBBox`, `FusionResult` |
+| 公共方法 | `snake_case` | `fuse_data()`, `get_closest_frame()` |
+| 私有方法 | `snake_case` + 尾部 `_` | `transform_point_()`, `reader_loop_()` |
+| 私有成员变量 | 尾部 `_` | `config_`, `running_`, `head_` |
+| 结构体成员 / 公共成员 | `camelCase` | `x1`, `y1`, `classId`, `dmaFd` |
+| 编译期常量 | `k` + `PascalCase` | `kMaxLidarPoints`, `kPacketLength` |
+| 宏 | `UPPER_SNAKE_CASE` | `LIDAR_CAMERA_FUSION_H` |
+| 局部变量 / 参数 | `camelCase` | `srcWidth`, `nPoints`, `bestIdx` |
+| 全局变量 | `g` + `PascalCase` | `gRunning`, `g_is_running` |
+
+### 格式
+
+- **缩进**: 4 空格，禁用 tab
+- **行宽**: 建议 ≤ 100 字符
+- **大括号**: K&R 风格（左括号与声明同行），函数体左括号同行
+- **Include guard**: `#ifndef` / `#define` / `#endif`，尾部加 `// GUARD_NAME` 注释。不使用 `#pragma once`
+
+### 注释
+
+- **README / 文档**: 简体中文
+- **公共 API Doxygen**: `/** @brief ... */` 块注释，中文为主
+- **行内注释**: `//` 或 `///<`（成员变量），中文或英文均可
+- **内部实现注释**: `//`，简明解释非显而易见的逻辑
+- **不使用** `@file`、`@author`、`@date` 等占位标签
+
+### 错误处理与日志
+
+- 公共方法通过 `bool` 返回值表示成功/失败
+- 不使用 C++ 异常（嵌入式目标平台约束）
+- 不使用 `assert()` / `static_assert()`
+- 诊断输出统一使用 `fprintf(stderr, "[ComponentName] ...")`，带组件名前缀
+- 系统调用失败时附 `strerror(errno)` 信息
+
+### 内存管理
+
+- 优先预分配，避免运行时动态分配
+- 使用 `new (std::nothrow)` + 显式空指针检查
+- RAII 析构函数清理所有资源
+- DMA 缓冲区遵循"获取-使用-归还"生命周期
+- 非平凡类删除拷贝构造和拷贝赋值 (`= delete`)
+
+### 线程安全
+
+- 组件内部默认不使用锁，设计为单线程顺序调用
+- 需要跨线程共享状态时，使用 `std::atomic` + 显式 `memory_order`
+- 阻塞队列使用 `std::mutex` + `std::condition_variable`
+
+### 构建
+
+- C++14 标准，CMake ≥ 3.4.1
+- 每个组件编译为静态库（`.a`），附带独立 demo 可执行文件
+- 产物输出到组件 `install/` 目录
+- 交叉编译目标: `aarch64-buildroot-linux-gnu`
+- x86 本地编译仅用于 demo 测试，不产生安装包
