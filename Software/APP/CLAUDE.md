@@ -63,6 +63,12 @@ lidar-camera-fusion (视觉-雷达数据融合，纯算法组件)
 
 sentinel-lslidarer (激光雷达驱动，完全独立)
   └── Threads::Threads (唯一外部依赖)
+
+sentinel-streamer (推流与录像组件)
+  ├── sentinel-visioner (依赖头文件 + 运行时调用 wait/get/release 接口)
+  ├── dma-buffer-pool (720p 中间缩放缓冲池)
+  ├── 3rdparty/librga (1080p→720p NV12 硬件缩放)
+  └── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
 ```
 
 ### sentinel-lslidarer — 镭神 N10Plus 单线雷达驱动
@@ -103,6 +109,20 @@ sentinel-lslidarer (激光雷达驱动，完全独立)
 
 唯一公共头文件: `include/sentinel-visioner.h`，API 类: `SentinelVisioner`
 
+### sentinel-streamer — 推流与录像组件
+
+作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 1080p NV12 帧 → RGA 缩放为 720p → MPP 硬件编码 H.264 → 双路输出。
+
+- **双编码器架构**: `streamEncCtx`（720p, 推流）和 `recordEncCtx`（1080p/720p, 录像）各自独立，惰性创建，互不干扰
+- **ffmpeg 子进程推流**: `popen("ffmpeg -f h264 -i pipe:0 -c copy -f rtsp ...")` 通过管道推流，`ferror` 检测断线自动重连；子进程崩溃不影响主程序
+- **PTS 硬件时间戳**: `(timestampUs - 首帧偏移) × 90000 / 1000000`，帧率波动不影响播放速度
+- **MP4 录像**: FFmpeg API `av_write_frame` 写入 MP4，支持 1080p / 720p
+- **线程安全**: 每路摄像头独立推流线程，编码器和输出上下文严格在 `workerThread.join()` 后销毁，杜绝 use-after-free
+- **状态回调**: `StreamerCallback` 函数指针，通知上层启停/错误事件
+- **反复启停**: 编码器每轮销毁重建，无 DTS 残留
+
+唯一公共头文件: `include/sentinel_streamer.h`，API 类: `SentinelStreamer`
+
 ### dma-buffer-pool — DMA 内存池
 
 - O(1) 空闲链表（Free List）分配/归还模型
@@ -119,6 +139,7 @@ sentinel-lslidarer (激光雷达驱动，完全独立)
 | `opencv` | OpenCV 3.4.5 预编译 aarch64 完整包 |
 | `libdrm` | DRM 头文件 + `libdrm.so`（allocator 通过 dlopen 使用） |
 | `allocator` | DMA/DRM 底层分配器，CMake OBJECT 库（非 .a） |
+| `ffmpeg` | FFmpeg 动态库 (`libavcodec.so` 等，nyanmisaka/ffmpeg-rockchip 分支交叉编译) |
 
 ## 关键约定
 
