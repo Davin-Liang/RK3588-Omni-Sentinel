@@ -44,13 +44,21 @@ add_executable(nvme_demo
     src/nvme_demo.cpp
 )
 
+# 编译可执行 Benchmark 程序
+add_executable(nvme_benchmark
+    src/nvme_benchmark.cpp
+)
+
 # 链接库到可执行程序
 target_link_libraries(nvme_demo
     nvme_data_manager_lib
 )
+target_link_libraries(nvme_benchmark
+    nvme_data_manager_lib
+)
 
 # 安装规则
-install(TARGETS nvme_demo DESTINATION ./)
+install(TARGETS nvme_demo nvme_benchmark DESTINATION ./)
 
 # 输出信息
 message(STATUS "NVMe SSD Demo project configured successfully")

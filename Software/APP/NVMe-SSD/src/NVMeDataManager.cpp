@@ -11,7 +11,9 @@ NVMeDataManager::NVMeDataManager()
     : running_(false)
     , lidar_buffer_pos_(0)
     , imu_buffer_pos_(0)
-    , nvme_fd_(-1) {
+    , nvme_fd_(-1)
+    , write_buffer_(nullptr)
+    , write_buffer_size_(0) {
 }
 
 NVMeDataManager::~NVMeDataManager() {
@@ -19,8 +21,8 @@ NVMeDataManager::~NVMeDataManager() {
 }
 
 bool NVMeDataManager::initialize() {
-    // 打开NVMe设备（不使用O_DIRECT以避免缓冲区对齐要求）
-    nvme_fd_ = open("/dev/nvme0n1", O_WRONLY);
+    // 打开NVMe设备（使用 O_DIRECT 绕过 page cache，降低 CPU 占用）
+    nvme_fd_ = open("/dev/nvme0n1", O_WRONLY | O_DIRECT);
     if (nvme_fd_ < 0) {
         std::cerr << "Failed to open NVMe device: " << strerror(errno) << std::endl;
         return false;
@@ -52,6 +54,23 @@ bool NVMeDataManager::initialize() {
     imu_buffer_.assign(static_cast<uint8_t*>(imu_ptr),
                      static_cast<uint8_t*>(imu_ptr) + BUFFER_SIZE);
 
+    // 预分配摄像头帧缓冲池（避免运行时 6MB 反复 malloc/free）
+    for (int i = 0; i < CAMERA_POOL_SIZE; i++) {
+        camera_pool_[i].data.reserve(CAMERA_MAX_SIZE + HEADER_ALIGNMENT);
+        camera_pool_used_[i] = false;
+    }
+
+    // 分配页对齐的写入缓冲区（O_DIRECT 要求缓冲区地址512B对齐）
+    write_buffer_size_ = CAMERA_MAX_SIZE + sizeof(Header) + HEADER_ALIGNMENT;
+    void* wbuf = nullptr;
+    if (posix_memalign(&wbuf, HEADER_ALIGNMENT, write_buffer_size_) != 0) {
+        std::cerr << "Failed to allocate aligned write buffer" << std::endl;
+        close(nvme_fd_);
+        nvme_fd_ = -1;
+        return false;
+    }
+    write_buffer_ = static_cast<uint8_t*>(wbuf);
+
     // 启动写入线程
     running_ = true;
     writer_thread_ = std::thread(&NVMeDataManager::writer_thread, this);
@@ -68,6 +87,14 @@ void NVMeDataManager::shutdown() {
         }
     }
 
+    // 排空队列，触发自定义 deleter 将池块归还（此时池成员仍有效）
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        while (!data_queue_.empty()) {
+            data_queue_.pop();
+        }
+    }
+
     if (nvme_fd_ >= 0) {
         close(nvme_fd_);
         nvme_fd_ = -1;
@@ -76,6 +103,11 @@ void NVMeDataManager::shutdown() {
     // 释放缓冲池内存
     lidar_buffer_.clear();
     imu_buffer_.clear();
+
+    // 释放页对齐写入缓冲区
+    free(write_buffer_);
+    write_buffer_ = nullptr;
+    write_buffer_size_ = 0;
 }
 
 void NVMeDataManager::prepare_header(Header& header, DataType type, uint64_t timestamp, uint32_t data_size) {
@@ -89,23 +121,44 @@ bool NVMeDataManager::write_to_nvme(const Header* header, const uint8_t* data,
                                      size_t data_size, size_t padding_size) {
     if (nvme_fd_ < 0) return false;
 
-    // 静态512字节零填充缓冲区（writev 需要非 const iov_base）
-    static uint8_t zero_buf[HEADER_ALIGNMENT] = {0};
+    size_t total = sizeof(Header) + data_size + padding_size;
+    if (total > write_buffer_size_) return false;
 
-    struct iovec iov[3];
-    iov[0].iov_base = const_cast<Header*>(header);
-    iov[0].iov_len  = sizeof(Header);
-    iov[1].iov_base = const_cast<uint8_t*>(data);
-    iov[1].iov_len  = data_size;
-    iov[2].iov_base = zero_buf;
-    iov[2].iov_len  = padding_size;
+    // 将 header + payload + 零填充合并写入页对齐缓冲区（O_DIRECT 要求）
+    memcpy(write_buffer_, header, sizeof(Header));
+    memcpy(write_buffer_ + sizeof(Header), data, data_size);
+    if (padding_size > 0) {
+        memset(write_buffer_ + sizeof(Header) + data_size, 0, padding_size);
+    }
 
-    ssize_t written = writev(nvme_fd_, iov, 3);
+    ssize_t written = write(nvme_fd_, write_buffer_, total);
     if (written < 0) {
-        std::cerr << "writev to NVMe failed: " << strerror(errno) << std::endl;
+        std::cerr << "write to NVMe failed: " << strerror(errno) << std::endl;
         return false;
     }
     return true;
+}
+
+DataBlock* NVMeDataManager::acquire_pool_block() {
+    std::lock_guard<std::mutex> lock(camera_pool_mutex_);
+    for (int i = 0; i < CAMERA_POOL_SIZE; i++) {
+        if (!camera_pool_used_[i]) {
+            camera_pool_used_[i] = true;
+            return &camera_pool_[i];
+        }
+    }
+    return nullptr;  // 池耗尽
+}
+
+void NVMeDataManager::release_pool_block(DataBlock* block) {
+    std::lock_guard<std::mutex> lock(camera_pool_mutex_);
+    for (int i = 0; i < CAMERA_POOL_SIZE; i++) {
+        if (&camera_pool_[i] == block) {
+            camera_pool_used_[i] = false;
+            return;
+        }
+    }
+    // 非池块（回退分配），不做任何事
 }
 
 bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_t frame_size,
@@ -113,13 +166,31 @@ bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_
     // 计算对齐填充（无需加锁）
     size_t padding = calc_padding(sizeof(Header) + frame_size);
 
-    // 直接创建 DataBlock（只拷贝一次数据，无包头拼接）
-    auto block = std::make_shared<DataBlock>();
-    prepare_header(block->header,
-                  is_front_camera ? DataType::VIDEO_FRONT : DataType::VIDEO_REAR,
-                  timestamp_ns, static_cast<uint32_t>(frame_size));
-    block->data.assign(frame_data, frame_data + frame_size);
-    block->padding_size = padding;
+    std::shared_ptr<DataBlock> block;
+
+    // 优先从缓冲池取（避免运行时分配 6MB 堆内存）
+    DataBlock* pool_block = acquire_pool_block();
+    if (pool_block) {
+        pool_block->data.assign(frame_data, frame_data + frame_size);
+        prepare_header(pool_block->header,
+                      is_front_camera ? DataType::VIDEO_FRONT : DataType::VIDEO_REAR,
+                      timestamp_ns, static_cast<uint32_t>(frame_size));
+        pool_block->padding_size = padding;
+
+        // 自定义 deleter：将池块归还
+        block = std::shared_ptr<DataBlock>(pool_block, [this](DataBlock* b) {
+            this->release_pool_block(b);
+        });
+    } else {
+        // 池耗尽，回退到普通分配（极少发生）
+        auto fb = std::make_shared<DataBlock>();
+        prepare_header(fb->header,
+                      is_front_camera ? DataType::VIDEO_FRONT : DataType::VIDEO_REAR,
+                      timestamp_ns, static_cast<uint32_t>(frame_size));
+        fb->data.assign(frame_data, frame_data + frame_size);
+        fb->padding_size = padding;
+        block = std::move(fb);
+    }
 
     // 仅入队时持锁，减小锁粒度
     {
@@ -310,7 +381,7 @@ void NVMeDataManager::writer_thread() {
         }
         // IO 期间不持锁
 
-        // 使用 writev 零拷贝写入：header + payload + zero-padding
+        // 通过 O_DIRECT 页对齐缓冲区写入：header + payload + zero-padding
         if (!write_to_nvme(&block->header,
                           block->data.data(),
                           block->data.size(),

@@ -76,6 +76,10 @@ private:
     bool write_to_nvme(const Header* header, const uint8_t* data,
                        size_t data_size, size_t padding_size);
 
+    // 摄像头帧缓冲池管理
+    DataBlock* acquire_pool_block();
+    void release_pool_block(DataBlock* block);
+
     // 计算512B对齐填充
     static size_t calc_padding(size_t total_size) {
         size_t mod = total_size % HEADER_ALIGNMENT;
@@ -88,6 +92,13 @@ private:
     std::condition_variable queue_cv_;
     std::atomic<bool> running_;
 
+    // 摄像头帧缓冲池（必须声明在 data_queue_ 之前，确保析构时池晚于队列销毁）
+    static constexpr int CAMERA_POOL_SIZE = 4;
+    static constexpr size_t CAMERA_MAX_SIZE = 1920 * 1080 * 3;  // 6,220,800
+    DataBlock camera_pool_[CAMERA_POOL_SIZE];
+    bool camera_pool_used_[CAMERA_POOL_SIZE];
+    mutable std::mutex camera_pool_mutex_;
+
     // 队列
     std::queue<std::shared_ptr<DataBlock>> data_queue_;
 
@@ -96,6 +107,10 @@ private:
     std::vector<uint8_t> imu_buffer_;
     size_t lidar_buffer_pos_;
     size_t imu_buffer_pos_;
+
+    // 页对齐的写入缓冲区（O_DIRECT 要求）
+    uint8_t* write_buffer_;
+    size_t write_buffer_size_;
 
     // NVMe设备文件描述符
     int nvme_fd_;
