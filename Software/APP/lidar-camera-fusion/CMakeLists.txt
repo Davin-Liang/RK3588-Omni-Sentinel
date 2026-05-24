@@ -26,6 +26,7 @@ find_package(Threads REQUIRED)
 # === 核心库（纯算法，无线程，demo 用） ===
 add_library(lidar_camera_fusion_core STATIC
     src/lidar_camera_fusion.cpp
+    src/lidar_target_tracker.cpp
 )
 
 target_include_directories(lidar_camera_fusion_core PUBLIC
@@ -37,6 +38,7 @@ target_include_directories(lidar_camera_fusion_core PUBLIC
 add_library(lidar_camera_fusion_lib STATIC
     src/lidar_camera_fusion.cpp
     src/lidar_camera_fusion_thread.cpp
+    src/lidar_target_tracker.cpp
 )
 
 target_include_directories(lidar_camera_fusion_lib PUBLIC
@@ -57,6 +59,13 @@ add_executable(lidar_camera_fusion_demo_dual
 
 target_link_libraries(lidar_camera_fusion_demo_single lidar_camera_fusion_core)
 target_link_libraries(lidar_camera_fusion_demo_dual   lidar_camera_fusion_core)
+
+# === demo_tracking（跟踪测试，x86 本地可编译） ===
+add_executable(lidar_camera_fusion_demo_tracking
+    src/demo_tracking.cpp
+)
+
+target_link_libraries(lidar_camera_fusion_demo_tracking lidar_camera_fusion_core)
 
 # === demo_thread（目标板运行，依赖真实雷达驱动） ===
 if(NOT TARGET sentinel_lslidarer_lib)

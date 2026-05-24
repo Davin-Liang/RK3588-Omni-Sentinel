@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "sentinel_lslidarer.h"
+#include "lidar_tracking_types.h"
 
 /**
  * @struct YoloBBox
@@ -54,6 +55,7 @@ struct FusionResult {
 };
 
 class SentinelLslidarer;
+class LidarTargetTracker;
 
 /**
  * @class LidarCameraFusion
@@ -128,6 +130,61 @@ public:
      */
     bool is_running() const;
 
+    // ---- 目标跟踪 API ----
+
+    /**
+     * @brief  配置跟踪器参数（需在 enable_tracking 之前调用）。
+     * @param  config 跟踪器配置，内部做合法性校验
+     * @return true 配置有效并已应用，false 参数非法
+     */
+    bool configure_tracker(const TrackerConfig& config);
+
+    /**
+     * @brief  启用/禁用目标跟踪。
+     * @param  enable true 启用，false 禁用
+     * @return true 成功
+     */
+    bool enable_tracking(bool enable);
+
+    /**
+     * @brief  重置跟踪器状态（清零所有航迹，ID 重置）。
+     */
+    void reset_tracking();
+
+    /**
+     * @brief  执行一次跟踪更新（手动模式，在 fuse_data() 完成后调用）。
+     * @param  fusionResult fuse_data() 输出的融合结果
+     * @param  lidarPoints   原始雷达点云数组（与 fuse_data() 使用的相同）
+     * @param  pointCount    雷达点云有效点数
+     * @param  bboxes        YOLO 检测框数组（仅用于 classId/confidence，顺序须与 fuse_data 调用顺序一致）
+     * @param  bboxCount     bbox 数量
+     * @param  timestampNs   当前帧时间戳（CLOCK_MONOTONIC, ns）
+     * @return true 成功，false 参数非法或 tracker 未分配
+     */
+    bool update_tracking(const FusionResult& fusionResult,
+                         const LidarPoint* lidarPoints,
+                         uint32_t pointCount,
+                         const YoloBBox* bboxes,
+                         uint32_t bboxCount,
+                         uint64_t timestampNs);
+
+    /**
+     * @brief  注册距离告警回调。
+     * @param  cb       回调函数指针
+     * @param  userData 用户数据指针（透传到回调）
+     */
+    void register_warning_callback(TrackingCallback cb, void* userData);
+
+    /**
+     * @brief  拷贝当前跟踪目标快照（线程安全）。
+     * @param  out      输出缓冲区（调用者预分配）
+     * @param  maxCount 缓冲区容量
+     * @param  outCount 输出实际拷贝数量
+     * @return true 成功
+     */
+    bool copy_tracked_targets(TrackedTarget* out, uint32_t maxCount,
+                              uint32_t* outCount) const;
+
 private:
     // ---- 数学辅助 ----
     void transform_point_(float lx, float ly, const float* T,
@@ -167,6 +224,11 @@ private:
     uint32_t           camCount_;
     LidarPoint*        lidarPointsBuf_;
     std::vector<YoloBBox> fakeDetections_[kMaxCameras];  ///< 虚构测试数据，推理类就绪后删除
+
+    // ---- 目标跟踪 ----
+    bool               trackingEnabled_{false};
+    TrackerConfig      trackerConfig_{};
+    LidarTargetTracker* tracker_{nullptr};
 };
 
 #endif // LIDAR_CAMERA_FUSION_H

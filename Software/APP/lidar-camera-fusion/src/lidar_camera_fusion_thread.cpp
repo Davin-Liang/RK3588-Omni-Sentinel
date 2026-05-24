@@ -1,4 +1,5 @@
 #include "lidar_camera_fusion.h"
+#include "lidar_target_tracker.h"
 
 #include <cstdio>
 
@@ -79,17 +80,31 @@ void LidarCameraFusion::fusion_thread_()
             continue;
         }
 
-        // ---- 步骤 4：累积融合 ----
+        // ---- 步骤 4：累积融合 + 同步记录 bbox ----
         reset();
+        YoloBBox allBboxes[kMaxDetections];
+        uint32_t totalBboxes = 0;
         for (uint32_t c = 0; c < camCount_; ++c) {
             if (!fakeDetections_[c].empty()) {
                 fuse_data(fakeDetections_[c],
                           fakeDetections_[c][0].timestampNs,
                           frame, camConfigs_[c]);
+                // 同步 append bbox，保证与 FusionResult 顺序 100% 一致
+                for (const auto& b : fakeDetections_[c]) {
+                    if (totalBboxes < kMaxDetections) {
+                        allBboxes[totalBboxes++] = b;
+                    }
+                }
             }
         }
 
-        // ---- 步骤 5：输出结果 ----
+        // ---- 步骤 5：目标跟踪 ----
+        if (trackingEnabled_ && tracker_) {
+            tracker_->update(result_, lidarPointsBuf_, frame.pointsCount,
+                             allBboxes, totalBboxes, frame.timestampNs);
+        }
+
+        // ---- 步骤 6：输出结果 ----
         // TODO: 推入下游队列
         ++iterationCount;
         if (iterationCount % 100 == 0) {
@@ -97,21 +112,48 @@ void LidarCameraFusion::fusion_thread_()
                                   + behindCameraCount
                                   + outOfImageCount;
             printf("[LidarCameraFusion] %lu iters | bboxes:%u matched:%u "
-                   "behind:%u out:%u frame:%u\n",
+                   "behind:%u out:%u frame:%u",
                    (unsigned long)iterationCount,
                    result_.bboxCount,
                    totalCandidateCount,
                    behindCameraCount,
                    outOfImageCount,
                    frameTotal);
+            if (trackingEnabled_ && tracker_) {
+                TrackedTarget snapshot[10];
+                uint32_t tcount = 0;
+                tracker_->copy_snapshot(snapshot, 10, &tcount);
+                printf(" tracks:%u\n", tcount);
+                for (uint32_t ti = 0; ti < tcount; ++ti) {
+                    const char* stateStr = "?";
+                    switch (snapshot[ti].state) {
+                    case TrackState::Tentative: stateStr = "Tentative"; break;
+                    case TrackState::Confirmed: stateStr = "Confirmed"; break;
+                    case TrackState::Coasting:  stateStr = "Coasting";  break;
+                    case TrackState::Deleted:   stateStr = "Deleted";   break;
+                    default: break;
+                    }
+                    printf("  #%u | pos=(%.2f,%.2f) vel=(%.2f,%.2f) "
+                           "dist=%.2fm %s\n",
+                           snapshot[ti].id,
+                           snapshot[ti].posX, snapshot[ti].posY,
+                           snapshot[ti].velX, snapshot[ti].velY,
+                           snapshot[ti].distanceMeters,
+                           stateStr);
+                }
+            } else {
+                printf("\n");
+            }
 
-            // 打印所有匹配点的雷达坐标
-            for (uint32_t j = 0; j < totalCandidateCount; ++j) {
-                uint32_t pi = result_.bboxPointIndices[j];
-                printf("  pt[%u]: lidar(%.3f, %.3f) u=%.0f v=%.0f\n", pi,
-                       lidarPointsBuf_[pi].x, lidarPointsBuf_[pi].y,
-                       camConfigs_[0].fx * lidarPointsBuf_[pi].y / (-lidarPointsBuf_[pi].x) + camConfigs_[0].cx,
-                       camConfigs_[0].cy);
+            // 打印所有匹配点的雷达坐标（仅未启用跟踪时）
+            if (!trackingEnabled_) {
+                for (uint32_t j = 0; j < totalCandidateCount; ++j) {
+                    uint32_t pi = result_.bboxPointIndices[j];
+                    printf("  pt[%u]: lidar(%.3f, %.3f) u=%.0f v=%.0f\n", pi,
+                           lidarPointsBuf_[pi].x, lidarPointsBuf_[pi].y,
+                           camConfigs_[0].fx * lidarPointsBuf_[pi].y / (-lidarPointsBuf_[pi].x) + camConfigs_[0].cx,
+                           camConfigs_[0].cy);
+                }
             }
         }
 
@@ -134,11 +176,11 @@ void LidarCameraFusion::generate_fake_detections_(uint32_t camIndex)
     static uint64_t fakeNs = 0;
     fakeNs += 33333333ULL;
 
-    // bbox 覆盖图像右半区域（适配正后方点 u≈380）
+    // bbox 覆盖雷达正后方区域，距离过滤交由 tracker 处理
     YoloBBox bbox;
-    bbox.x1          = 200;
+    bbox.x1          = 280;
     bbox.y1          = 200;
-    bbox.x2          = 440;
+    bbox.x2          = 460;
     bbox.y2          = 280;
     bbox.classId     = 0;
     bbox.confidence  = 0.9f;

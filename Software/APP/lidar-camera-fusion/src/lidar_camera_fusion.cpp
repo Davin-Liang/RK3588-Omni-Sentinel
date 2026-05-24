@@ -1,4 +1,5 @@
 #include "lidar_camera_fusion.h"
+#include "lidar_target_tracker.h"
 
 #include <cstdio>
 #include <cstring>
@@ -28,9 +29,10 @@ LidarCameraFusion::LidarCameraFusion()
     bboxOffsets        = new (std::nothrow) uint32_t[kMaxDetections];
     writeCursor        = new (std::nothrow) uint32_t[kMaxDetections];
     lidarPointsBuf_    = new (std::nothrow) LidarPoint[kMaxLidarPoints];
+    tracker_           = new (std::nothrow) LidarTargetTracker();
 
     if (!candidatePointBuf || !pointToBbox || !bboxPointCountsBuf ||
-        !bboxOffsets || !writeCursor || !lidarPointsBuf_) {
+        !bboxOffsets || !writeCursor || !lidarPointsBuf_ || !tracker_) {
         fprintf(stderr, "[LidarCameraFusion] buffer allocation failed in constructor\n");
         delete[] candidatePointBuf;   candidatePointBuf  = nullptr;
         delete[] pointToBbox;         pointToBbox        = nullptr;
@@ -38,6 +40,7 @@ LidarCameraFusion::LidarCameraFusion()
         delete[] bboxOffsets;         bboxOffsets        = nullptr;
         delete[] writeCursor;         writeCursor        = nullptr;
         delete[] lidarPointsBuf_;     lidarPointsBuf_    = nullptr;
+        delete tracker_;              tracker_           = nullptr;
     }
 
     std::memset(&result_, 0, sizeof(result_));
@@ -63,6 +66,7 @@ LidarCameraFusion::~LidarCameraFusion()
     delete[] bboxOffsets;
     delete[] writeCursor;
     delete[] lidarPointsBuf_;
+    delete tracker_;
 }
 
 // ============================================================================
@@ -234,4 +238,81 @@ void LidarCameraFusion::project_point_(float cx, float cy, float cz,
     float invZ = 1.0f / cz;
     u = cameraCfg.fx * cx * invZ + cameraCfg.cx;
     v = cameraCfg.fy * cy * invZ + cameraCfg.cy;
+}
+
+// ============================================================================
+// 目标跟踪（委托给 LidarTargetTracker）
+// ============================================================================
+
+bool LidarCameraFusion::configure_tracker(const TrackerConfig& config)
+{
+    if (trackingEnabled_) {
+        fprintf(stderr, "[LidarCameraFusion] configure_tracker: "
+                "disable tracking first\n");
+        return false;
+    }
+    if (!tracker_) {
+        fprintf(stderr, "[LidarCameraFusion] configure_tracker: "
+                "tracker not allocated\n");
+        return false;
+    }
+    if (!tracker_->configure(config)) {
+        return false;
+    }
+    trackerConfig_ = config;
+    return true;
+}
+
+bool LidarCameraFusion::enable_tracking(bool enable)
+{
+    if (enable && !tracker_) {
+        fprintf(stderr, "[LidarCameraFusion] enable_tracking: "
+                "tracker not allocated\n");
+        return false;
+    }
+    trackingEnabled_ = enable;
+    return true;
+}
+
+void LidarCameraFusion::reset_tracking()
+{
+    if (tracker_) {
+        tracker_->reset();
+    }
+}
+
+bool LidarCameraFusion::update_tracking(const FusionResult& fusionResult,
+                                         const LidarPoint* lidarPoints,
+                                         uint32_t pointCount,
+                                         const YoloBBox* bboxes,
+                                         uint32_t bboxCount,
+                                         uint64_t timestampNs)
+{
+    if (!trackingEnabled_) {
+        return true;
+    }
+    if (!tracker_) {
+        return false;
+    }
+    return tracker_->update(fusionResult, lidarPoints, pointCount,
+                            bboxes, bboxCount, timestampNs);
+}
+
+void LidarCameraFusion::register_warning_callback(TrackingCallback cb,
+                                                    void* userData)
+{
+    if (tracker_) {
+        tracker_->register_callback(cb, userData);
+    }
+}
+
+bool LidarCameraFusion::copy_tracked_targets(TrackedTarget* out,
+                                              uint32_t maxCount,
+                                              uint32_t* outCount) const
+{
+    if (!tracker_) {
+        if (outCount) *outCount = 0;
+        return false;
+    }
+    return tracker_->copy_snapshot(out, maxCount, outCount);
 }
