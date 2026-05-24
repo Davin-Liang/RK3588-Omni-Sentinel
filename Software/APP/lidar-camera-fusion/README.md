@@ -111,3 +111,7 @@ const FusionResult& r = fusion.result();
 - `reset()` 必须在每帧新的雷达帧融合前调用；同一雷达帧的多次 `fuse_data()` 之间不要调用 `reset()`
 - 结果在下一次 `reset()` 调用时被覆盖，需及时消费
 - YOLO 检测结果的数据结构定义在此组件中，待 YOLO 模块正式实现后可统一
+
+## 开发记录
+
+- [BUG_RECORD.md](docs/BUG_RECORD.md) — 开发过程中遇到的 bug 及修复记录
