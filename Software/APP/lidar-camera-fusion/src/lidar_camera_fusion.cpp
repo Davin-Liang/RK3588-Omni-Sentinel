@@ -18,33 +18,51 @@ LidarCameraFusion::LidarCameraFusion()
     , totalCandidateCount(0)
     , behindCameraCount(0)
     , outOfImageCount(0)
+    , lidar_(nullptr)
+    , camCount_(0)
+    , lidarPointsBuf_(nullptr)
 {
     candidatePointBuf  = new (std::nothrow) uint32_t[kMaxLidarPoints];
     pointToBbox        = new (std::nothrow) int32_t[kMaxLidarPoints];
     bboxPointCountsBuf = new (std::nothrow) uint32_t[kMaxDetections];
     bboxOffsets        = new (std::nothrow) uint32_t[kMaxDetections];
     writeCursor        = new (std::nothrow) uint32_t[kMaxDetections];
+    lidarPointsBuf_    = new (std::nothrow) LidarPoint[kMaxLidarPoints];
 
     if (!candidatePointBuf || !pointToBbox || !bboxPointCountsBuf ||
-        !bboxOffsets || !writeCursor) {
+        !bboxOffsets || !writeCursor || !lidarPointsBuf_) {
         fprintf(stderr, "[LidarCameraFusion] buffer allocation failed in constructor\n");
         delete[] candidatePointBuf;   candidatePointBuf  = nullptr;
         delete[] pointToBbox;         pointToBbox        = nullptr;
         delete[] bboxPointCountsBuf;  bboxPointCountsBuf = nullptr;
         delete[] bboxOffsets;         bboxOffsets        = nullptr;
         delete[] writeCursor;         writeCursor        = nullptr;
+        delete[] lidarPointsBuf_;     lidarPointsBuf_    = nullptr;
     }
 
     std::memset(&result_, 0, sizeof(result_));
 }
 
+void LidarCameraFusion::stop()
+{
+    if (running_) {
+        running_ = false;
+        if (fusionThread_.joinable()) {
+            fusionThread_.join();
+        }
+    }
+}
+
 LidarCameraFusion::~LidarCameraFusion()
 {
+    stop();
+
     delete[] candidatePointBuf;
     delete[] pointToBbox;
     delete[] bboxPointCountsBuf;
     delete[] bboxOffsets;
     delete[] writeCursor;
+    delete[] lidarPointsBuf_;
 }
 
 // ============================================================================
@@ -60,7 +78,6 @@ void LidarCameraFusion::reset()
 
     std::memset(&result_, 0, sizeof(result_));
 
-    // pointToBbox: -1 = 未匹配
     for (uint32_t i = 0; i < kMaxLidarPoints; ++i) {
         pointToBbox[i] = -1;
     }
@@ -101,11 +118,10 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
     }
 
     if (nBboxes == 0) {
-        return true;  // 没有检测框，无需处理
+        return true;
     }
 
     // ---- 第一趟：变换 + 投影 + 分类 ----
-    // 只处理尚未匹配的点（pointToBbox[i] == -1）
     for (uint32_t b = 0; b < nBboxes; ++b) {
         uint32_t gb = totalBboxCount + b;
         bboxPointCountsBuf[gb] = 0;
@@ -113,27 +129,23 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
 
     for (uint32_t i = 0; i < nPoints; ++i) {
         if (pointToBbox[i] >= 0) {
-            continue;  // 已被前序调用匹配
+            continue;
         }
 
         float lx = lidarFrame.points[i].x;
         float ly = lidarFrame.points[i].y;
 
-        // 外参变换
         float cx, cy, cz;
         transform_point_(lx, ly, cameraCfg.tLidarToCam, cx, cy, cz);
 
-        // 相机后方判定
         if (cz <= 0.0f) {
             ++behindCameraCount;
             continue;
         }
 
-        // 内参投影
         float u, v;
         project_point_(cx, cy, cz, cameraCfg, u, v);
 
-        // 图像边界判定
         float fImgWidth  = static_cast<float>(cameraCfg.imgWidth);
         float fImgHeight = static_cast<float>(cameraCfg.imgHeight);
         if (u < 0.0f || u >= fImgWidth || v < 0.0f || v >= fImgHeight) {
@@ -141,7 +153,6 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
             continue;
         }
 
-        // bbox 归属判定（首次命中即跳出）
         uint32_t ui = static_cast<uint32_t>(u);
         uint32_t vi = static_cast<uint32_t>(v);
         int32_t bboxIdx = -1;
@@ -160,11 +171,9 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
         }
     }
 
-    // ---- 更新 totalBboxCount ----
     totalBboxCount += nBboxes;
 
     // ---- 第二趟：计数排序写出 ----
-    // 计算所有 bbox 的偏移，从 totalCandidateCount 位置开始写入
     uint32_t cumOffset = 0;
     for (uint32_t gb = 0; gb < totalBboxCount; ++gb) {
         bboxOffsets[gb] = cumOffset;
@@ -173,7 +182,6 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
     }
     totalCandidateCount = cumOffset;
 
-    // 写出所有已匹配的点（包括前序调用中已匹配的点，幂等操作）
     for (uint32_t i = 0; i < nPoints; ++i) {
         int32_t gb = pointToBbox[i];
         if (gb >= 0) {
@@ -183,7 +191,6 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
         }
     }
 
-    // ---- 填充结果 ----
     result_.imageTimestampNs = imageTimestampNs;
     result_.lidarTimestampNs = lidarFrame.timestampNs;
     result_.bboxPointIndices = candidatePointBuf;
@@ -215,8 +222,6 @@ uint32_t LidarCameraFusion::out_of_image_count() const
 void LidarCameraFusion::transform_point_(float lx, float ly, const float* T,
                                           float& cx, float& cy, float& cz) const
 {
-    // P_cam = T * (lx, ly, 0, 1)^T
-    // T 为 4x4 行主序，省略 z=0 和 w=1 项
     cx = T[0] * lx + T[1] * ly + T[3];
     cy = T[4] * lx + T[5] * ly + T[7];
     cz = T[8] * lx + T[9] * ly + T[11];

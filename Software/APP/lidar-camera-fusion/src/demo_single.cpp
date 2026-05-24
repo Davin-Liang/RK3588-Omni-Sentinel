@@ -91,8 +91,8 @@ int main()
     // 检测框需完全覆盖对应组所有点的投影范围
     // bbox：左上角 (x1,y1) 包含，右下角 (x2,y2) 不包含
     std::vector<YoloBBox> detections;
-    detections.push_back({410, 200, 600, 280, 2, 0.95f});  // 车辆
-    detections.push_back({180, 200, 335, 280, 0, 0.88f});  // 行人
+    detections.push_back({410, 200, 600, 280, 2, 0.95f, imageTs});  // 车辆
+    detections.push_back({180, 200, 335, 280, 0, 0.88f, imageTs});  // 行人
 
     // ---- 融合 ----
     LidarCameraFusion fusion;

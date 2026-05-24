@@ -88,8 +88,8 @@ int main()
     camB = camA;
 
     std::vector<YoloBBox> detA, detB;
-    detA.push_back({410, 200, 600, 280, 2, 0.9f});   // 相机 A
-    detB.push_back({150, 200, 300, 280, 0, 0.8f});   // 相机 B
+    detA.push_back({410, 200, 600, 280, 2, 0.9f, imageTs});   // 相机 A
+    detB.push_back({150, 200, 300, 280, 0, 0.8f, imageTs});   // 相机 B
 
     // ---- 双相机累积融合 ----
     // reset() → fuse_data(A) → fuse_data(B) → result()

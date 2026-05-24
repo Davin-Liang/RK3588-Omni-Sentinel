@@ -22,14 +22,15 @@ cat > ${RULES_DIR}/sentinel_lidar.rules << 'EOF'
 KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="0001", MODE:="0777", GROUP:="dialout", SYMLINK+="sentinel_lidar"
 EOF
 
-# CH9102 芯片，已安装驱动，串口号 0001 → sentinel_lidar
+# CH9102 芯片，已安装驱动 → sentinel_lidar
+# 序列号非固定值，仅匹配 vendor + product
 cat > ${RULES_DIR}/sentinel_lidar_ch343.rules << 'EOF'
-KERNEL=="ttyCH343USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", ATTRS{serial}=="0001", MODE:="0777", GROUP:="dialout", SYMLINK+="sentinel_lidar"
+KERNEL=="ttyCH343USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", MODE:="0777", GROUP:="dialout", SYMLINK+="sentinel_lidar"
 EOF
 
-# CH9102 芯片，未安装驱动，串口号 0001 → sentinel_lidar
+# CH9102 芯片，未安装驱动 → sentinel_lidar
 cat > ${RULES_DIR}/sentinel_lidar_acm.rules << 'EOF'
-KERNEL=="ttyACM*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", ATTRS{serial}=="0001", MODE:="0777", GROUP:="dialout", SYMLINK+="sentinel_lidar"
+KERNEL=="ttyACM*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", MODE:="0777", GROUP:="dialout", SYMLINK+="sentinel_lidar"
 EOF
 
 # 重新加载规则

@@ -21,9 +21,22 @@ set(CMAKE_SKIP_INSTALL_RPATH FALSE)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
 
-# static library
+find_package(Threads REQUIRED)
+
+# === 核心库（纯算法，无线程，demo 用） ===
+add_library(lidar_camera_fusion_core STATIC
+    src/lidar_camera_fusion.cpp
+)
+
+target_include_directories(lidar_camera_fusion_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
+)
+
+# === 完整库（核心 + 线程，实际部署用，依赖 sentinel-lslidarer） ===
 add_library(lidar_camera_fusion_lib STATIC
     src/lidar_camera_fusion.cpp
+    src/lidar_camera_fusion_thread.cpp
 )
 
 target_include_directories(lidar_camera_fusion_lib PUBLIC
@@ -31,7 +44,9 @@ target_include_directories(lidar_camera_fusion_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
 )
 
-# demo executables
+target_link_libraries(lidar_camera_fusion_lib PUBLIC Threads::Threads)
+
+# === demo executables（只依赖核心库，可在 x86 本地编译测试） ===
 add_executable(lidar_camera_fusion_demo_single
     src/demo_single.cpp
 )
@@ -40,11 +55,28 @@ add_executable(lidar_camera_fusion_demo_dual
     src/demo_dual.cpp
 )
 
-target_link_libraries(lidar_camera_fusion_demo_single lidar_camera_fusion_lib)
-target_link_libraries(lidar_camera_fusion_demo_dual   lidar_camera_fusion_lib)
+target_link_libraries(lidar_camera_fusion_demo_single lidar_camera_fusion_core)
+target_link_libraries(lidar_camera_fusion_demo_dual   lidar_camera_fusion_core)
 
-# install rules
+# === demo_thread（目标板运行，依赖真实雷达驱动） ===
+if(NOT TARGET sentinel_lslidarer_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer
+                     ${CMAKE_CURRENT_BINARY_DIR}/lslidarer_build)
+endif()
+
+add_executable(lidar_camera_fusion_demo_thread
+    src/demo_thread.cpp
+)
+
+target_link_libraries(lidar_camera_fusion_demo_thread
+    lidar_camera_fusion_lib
+    sentinel_lslidarer_lib
+    Threads::Threads
+)
+
+# === install rules ===
 install(TARGETS lidar_camera_fusion_lib           DESTINATION lib)
 install(TARGETS lidar_camera_fusion_demo_single   DESTINATION ./)
 install(TARGETS lidar_camera_fusion_demo_dual     DESTINATION ./)
+install(TARGETS lidar_camera_fusion_demo_thread   DESTINATION ./)
 install(DIRECTORY include/ DESTINATION include)

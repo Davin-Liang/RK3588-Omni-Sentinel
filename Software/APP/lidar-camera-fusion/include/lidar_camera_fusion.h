@@ -1,7 +1,10 @@
 #ifndef LIDAR_CAMERA_FUSION_H
 #define LIDAR_CAMERA_FUSION_H
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 #include "sentinel_lslidarer.h"
@@ -17,6 +20,7 @@ struct YoloBBox {
     uint32_t x2, y2;       ///< 右下角像素坐标（不包含），宽度 = x2 - x1
     uint32_t classId;      ///< 类别 ID（COCO 格式）
     float    confidence;   ///< 置信度 [0.0, 1.0]
+    uint64_t timestampNs;  ///< 该检测框对应的图像帧时间戳（CLOCK_MONOTONIC, ns）
 };
 
 /**
@@ -49,33 +53,35 @@ struct FusionResult {
     uint32_t bboxCount;                 ///< 已累积的 bbox 总数
 };
 
+class SentinelLslidarer;
+
 /**
  * @class LidarCameraFusion
- * @brief 视觉-雷达数据融合（支持单相机 / 多相机累积融合）。
+ * @brief 视觉-雷达数据融合（支持单相机 / 双相机累积融合，支持内部线程模式）。
  *
- * 单相机用法：
+ * 手动模式（无内部线程）：
  * @code
  * LidarCameraFusion fusion;
  * fusion.reset();
  * fusion.fuse_data(detections, imageTs, lidarFrame, cameraCfg);
  * const FusionResult& r = fusion.result();
- * // r.bboxCount = detections.size()
  * @endcode
  *
- * 双相机用法：
+ * 线程模式：
  * @code
  * LidarCameraFusion fusion;
- * fusion.reset();
- * fusion.fuse_data(detectionsA, imageTs, lidarFrame, cameraCfgA);
- * fusion.fuse_data(detectionsB, imageTs, lidarFrame, cameraCfgB);
+ * CameraConfig cfgs[2] = { frontCfg, rearCfg };
+ * fusion.start(&lidar, cfgs, 2);
+ * // ... 运行中，线程持续融合 ...
+ * fusion.stop();
  * const FusionResult& r = fusion.result();
- * // r.bboxCount = detectionsA.size() + detectionsB.size()
  * @endcode
  */
 class LidarCameraFusion {
 public:
     static constexpr uint32_t kMaxLidarPoints = 540;   ///< N10Plus 单圈最大点数
     static constexpr uint32_t kMaxDetections  = 100;   ///< 累积最大 bbox 数
+    static constexpr uint32_t kMaxCameras     = 2;     ///< 最大相机数量
 
     LidarCameraFusion();
     ~LidarCameraFusion();
@@ -84,73 +90,83 @@ public:
     LidarCameraFusion(const LidarCameraFusion&) = delete;
     LidarCameraFusion& operator=(const LidarCameraFusion&) = delete;
 
-    /**
-     * @brief  重置内部状态，开始融合一帧新的雷达点云。
-     *         必须在每次新的雷达帧融合前调用一次。
-     *         单相机：reset() → fuse_data() → result()
-     *         双相机：reset() → fuse_data(A) → fuse_data(B) → result()
-     */
+    // ---- 手动模式 API ----
+
     void reset();
 
-    /**
-     * @brief  对一帧 YOLO 检测结果和一帧雷达点云执行数据融合（累积模式）。
-     *         每次调用将当前相机的 bbox 追加到内部缓冲区。
-     *         同一雷达帧的多相机调用之间不要调用 reset()。
-     * @param  detections       YOLO 检测框列表
-     * @param  imageTimestampNs 图像帧时间戳（CLOCK_MONOTONIC, ns）
-     * @param  lidarFrame       雷达点云帧
-     * @param  cameraCfg        该相机的内参 + 外参 + 图像尺寸
-     * @return true 融合成功，false 缓冲区满或未调用 reset()
-     */
     bool fuse_data(const std::vector<YoloBBox>& detections,
                    uint64_t imageTimestampNs,
                    const LidarFrame& lidarFrame,
                    const CameraConfig& cameraCfg);
 
-    /**
-     * @brief  获取累积融合结果（只读）。
-     *         返回的引用在下一次 reset() 调用前有效。
-     * @return FusionResult 的 const 引用
-     */
     const FusionResult& result() const;
-
-    /**
-     * @brief  本轮累计的"相机后方"点数。
-     */
     uint32_t behind_camera_count() const;
-
-    /**
-     * @brief  本轮累计的"图像平面外"点数。
-     */
     uint32_t out_of_image_count() const;
 
-private:
-    /**
-     * @brief 外参变换：P_cam = T * (lx, ly, 0, 1)^T
-     */
-    void transform_point_(float lx, float ly, const float* T,
-                          float& cx, float& cy, float& cz) const;
+    // ---- 线程模式 API ----
 
     /**
-     * @brief 内参投影：(u, v, 1)^T = K * (cx/cz, cy/cz, 1)^T
+     * @brief  启动内部融合线程。
+     *         线程循环：获取 YOLO 结果 → 取雷达帧 → 累积融合 → 输出结果。
+     *         目前 YOLO 结果使用虚构测试数据（待推理类就绪后替换）。
+     * @param  lidar       雷达驱动实例指针（非拥有，生命周期由调用者管理）
+     * @param  camConfigs   相机配置数组
+     * @param  camCount     相机数量（1 或 2）
+     * @return true 成功，false 参数非法或已在运行
      */
+    bool start(SentinelLslidarer* lidar,
+               const CameraConfig* camConfigs,
+               uint32_t camCount);
+
+    /**
+     * @brief  停止融合线程并等待退出。
+     */
+    void stop();
+
+    /**
+     * @brief  查询融合线程是否在运行。
+     */
+    bool is_running() const;
+
+private:
+    // ---- 数学辅助 ----
+    void transform_point_(float lx, float ly, const float* T,
+                          float& cx, float& cy, float& cz) const;
     void project_point_(float cx, float cy, float cz,
                         const CameraConfig& cameraCfg,
                         float& u, float& v) const;
 
+    // ---- 线程 ----
+    void fusion_thread_();
+
+    /**
+     * @brief 生成虚构 YOLO 检测结果（测试用，推理类就绪后删除）。
+     *        为每帧生成一个覆盖图像中心区域的检测框。
+     */
+    void generate_fake_detections_(uint32_t camIndex);
+
     // 预分配缓冲区（构造时分配，析构时释放）
-    uint32_t* candidatePointBuf;     // kMaxLidarPoints，展平存储所有候选点索引
-    int32_t*  pointToBbox;          // kMaxLidarPoints（-1 = 未匹配任何 bbox）
-    uint32_t* bboxPointCountsBuf;   // kMaxDetections，每个 bbox 的命中点数
-    uint32_t* bboxOffsets;          // kMaxDetections，每个 bbox 在 candidatePointBuf 中的偏移
-    uint32_t* writeCursor;          // kMaxDetections，第二趟写入游标
+    uint32_t* candidatePointBuf;
+    int32_t*  pointToBbox;
+    uint32_t* bboxPointCountsBuf;
+    uint32_t* bboxOffsets;
+    uint32_t* writeCursor;
 
     FusionResult result_;
 
-    uint32_t totalBboxCount;        // 本轮已累积的 bbox 总数
-    uint32_t totalCandidateCount;   // 本轮已累积的候选点总数
-    uint32_t behindCameraCount;     // 本轮累计相机后方点数
-    uint32_t outOfImageCount;       // 本轮累计图像外点数
+    uint32_t totalBboxCount;
+    uint32_t totalCandidateCount;
+    uint32_t behindCameraCount;
+    uint32_t outOfImageCount;
+
+    // 线程相关
+    std::atomic<bool> running_{false};
+    std::thread        fusionThread_;
+    SentinelLslidarer* lidar_;
+    CameraConfig       camConfigs_[kMaxCameras];
+    uint32_t           camCount_;
+    LidarPoint*        lidarPointsBuf_;
+    std::vector<YoloBBox> fakeDetections_[kMaxCameras];  ///< 虚构测试数据，推理类就绪后删除
 };
 
 #endif // LIDAR_CAMERA_FUSION_H
