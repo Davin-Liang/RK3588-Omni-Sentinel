@@ -40,6 +40,7 @@ private slots:
     void on_btn_toggle_preview_();
     void on_btn_play_record_();
     void on_btn_refresh_files_();
+    void on_btn_stop_play_();
     void update_record_info_();
 
 private:

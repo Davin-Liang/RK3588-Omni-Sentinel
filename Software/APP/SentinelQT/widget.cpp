@@ -63,6 +63,8 @@ Widget::Widget(QWidget *parent)
             this, &Widget::on_btn_play_record_);
     connect(ui->btnRefreshFiles, &QPushButton::clicked,
             this, &Widget::on_btn_refresh_files_);
+    connect(ui->btnStopPlay, &QPushButton::clicked,
+            this, &Widget::on_btn_stop_play_);
     connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
     connect(ui->btnStopStream,  &QPushButton::clicked, this, &Widget::on_btn_stop_stream_);
     connect(ui->btnStartRecord, &QPushButton::clicked, this, &Widget::on_btn_start_record_);
@@ -296,7 +298,6 @@ void Widget::refresh_file_list_()
 
     ui->fileCombo->addItems(files);
 
-    // Restore previous selection if still exists
     int idx = ui->fileCombo->findText(current);
     if (idx >= 0) ui->fileCombo->setCurrentIndex(idx);
 }
@@ -322,7 +323,6 @@ void Widget::on_btn_play_record_()
         return;
     }
 
-    // Stop preview to free DRM for ffplay
     if (previewActive_) {
         stop_preview_();
         ui->btnTogglePreview->setText("启动预览");
@@ -339,28 +339,40 @@ void Widget::on_btn_play_record_()
 
     if (!playerProcess_) {
         playerProcess_ = new QProcess(this);
+        connect(playerProcess_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this](int, QProcess::ExitStatus) {
+            ui->btnStopPlay->setEnabled(false);
+            if (!previewActive_) {
+                start_preview_();
+                ui->btnTogglePreview->setText("关闭预览");
+                ui->btnTogglePreview->setStyleSheet(
+                    "font-size: 16px; background-color: #e67e22; color: #ffffff;"
+                    " border: none; border-radius: 6px; padding: 0 12px;");
+                ui->previewLabel->setText("等待相机...");
+            }
+            set_status_("播放结束", "#888899");
+        });
     }
 
-    // Use ffplay with DRM/KMS output
     QStringList args;
     args << "-fs" << "-autoexit" << "-infbuf" << filePath;
 
     playerProcess_->start("ffplay", args);
+    ui->btnStopPlay->setEnabled(true);
     set_status_("播放中: " + selected, "#9b59b6");
+}
 
-    // When ffplay exits, restart preview
-    connect(playerProcess_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int, QProcess::ExitStatus) {
-        if (!previewActive_) {
-            start_preview_();
-            ui->btnTogglePreview->setText("关闭预览");
-            ui->btnTogglePreview->setStyleSheet(
-                "font-size: 16px; background-color: #e67e22; color: #ffffff;"
-                " border: none; border-radius: 6px; padding: 0 12px;");
-            ui->previewLabel->setText("等待相机...");
+void Widget::on_btn_stop_play_()
+{
+    if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
+        playerProcess_->terminate();
+        playerProcess_->waitForFinished(2000);
+        if (playerProcess_->state() == QProcess::Running) {
+            playerProcess_->kill();
+            playerProcess_->waitForFinished(1000);
         }
-        set_status_("播放结束", "#888899");
-    });
+    }
+    ui->btnStopPlay->setEnabled(false);
 }
 
 // ---- Streamer events ----
