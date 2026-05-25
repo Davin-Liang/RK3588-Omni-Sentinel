@@ -176,44 +176,14 @@ bool SentinelVisioner::camera_stream_ctrl(int camNum, bool isOpen) {
     if (isOpen) {
         if (ctx->isStreaming) return true;
 
-        // 0. 重新注册 epoll (STREAMOFF 后驱动可能清除内部事件源)
-        if (ctx->epollFd >= 0 && ctx->camFd >= 0) {
-            epoll_ctl(ctx->epollFd, EPOLL_CTL_DEL, ctx->camFd, nullptr); // ignore error
-            struct epoll_event ev = {};
-            ev.events = EPOLLIN;
-            ev.data.fd = ctx->camFd;
-            if (epoll_ctl(ctx->epollFd, EPOLL_CTL_ADD, ctx->camFd, &ev) < 0) {
-                std::cerr << "epoll_ctl re-add failed: " << strerror(errno) << std::endl;
-                return false;
-            }
-        }
-
-        // 1. 重新入队所有缓冲区 (STREAMOFF 后驱动清空了队列)
-        for (int i = 0; i < ctx->bufferCount; ++i) {
-            struct v4l2_buffer buf = {};
-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-            buf.memory = V4L2_MEMORY_MMAP;
-            buf.index = i;
-
-            struct v4l2_plane planes[1] = {};
-            buf.m.planes = planes;
-            buf.length = 1;
-
-            if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
-                std::cerr << "VIDIOC_QBUF re-queue failed: " << strerror(errno) << std::endl;
-                return false;
-            }
-        }
-
-        // 2. 开启视频流
+        // 1. 开启视频流
         if (ioctl(ctx->camFd, VIDIOC_STREAMON, &type) < 0) {
             std::cerr << "VIDIOC_STREAMON failed: " << strerror(errno) << std::endl;
             return false;
         }
         ctx->isStreaming = true;
-        std::cout << "Camera " << camNum << " STREAMON OK." << std::endl;
 
-        // 3. 启动该摄像头的采集线程
+        // 2. 启动该摄像头的采集线程
         ctx->isThreadRunning = true;
         ctx->captureThread = std::make_unique<std::thread>(&SentinelVisioner::capture_thread_func_, this, camNum);
 
