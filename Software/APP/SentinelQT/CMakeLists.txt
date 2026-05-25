@@ -86,3 +86,4 @@ if(Qt5LinguistTools_FOUND)
 endif()
 
 install(TARGETS SentinelQT DESTINATION ./)
+install(FILES config.ini DESTINATION ./)
