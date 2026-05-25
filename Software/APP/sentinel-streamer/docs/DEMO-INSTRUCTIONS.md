@@ -54,7 +54,7 @@
 
 ```
 SentinelVisioner::capture_thread_
-  ├── npuTaskQueue        → (空闲)
+  ├── previewTaskQueue    → (空闲)
   └── processTaskQueue    → stream_thread_func_ (SentinelStreamer)
                               ├── RGA 1080p→720p
                               ├── streamEncCtx → H.264 → pipe → ffmpeg → RTSP

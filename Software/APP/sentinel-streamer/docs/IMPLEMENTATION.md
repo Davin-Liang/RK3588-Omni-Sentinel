@@ -11,7 +11,7 @@ SentinelStreamer 是 RK3588-Omni-Sentinel 平台的推流与录像组件，作�
 ```
 SentinelVisioner::capture_thread_
   │
-  ├── npuTaskQueue        → NPU 消费者 (本组件不涉及)
+  ├── previewTaskQueue    → NPU/预览消费者 (本组件不涉及)
   │
   └── processTaskQueue    → SentinelStreamer 推流线程
                               │

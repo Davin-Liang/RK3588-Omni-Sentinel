@@ -220,8 +220,8 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
         if (ret < 0) break;
 
-        if (pkt->pts == AV_NOPTS_VALUE) pkt->pts = sentPts;
-        if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = sentPts;
+        pkt->pts = sentPts;
+        pkt->dts = sentPts;
 
         // 推流：直接写 H.264 裸流到 ffmpeg 管道
         if (streamPipe && pkt->size > 0) {
@@ -249,8 +249,12 @@ void drain_encoder(AVCodecContext* encCtx,
 
     avcodec_send_frame(encCtx, nullptr);
 
+    int64_t drainPts = 0;
     AVPacket* pkt = av_packet_alloc();
     while (avcodec_receive_packet(encCtx, pkt) == 0) {
+        pkt->pts = drainPts;
+        pkt->dts = drainPts;
+        drainPts += 3000;
         if (streamPipe && pkt->size > 0) {
             fwrite(pkt->data, 1, pkt->size, streamPipe);
         }
