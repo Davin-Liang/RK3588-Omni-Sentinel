@@ -18,6 +18,15 @@
    <property name="rightMargin"><number>12</number></property>
    <property name="bottomMargin"><number>12</number></property>
    <item>
+    <widget class="QLabel" name="titleLabel">
+     <property name="text"><string>RK3588 Omni Sentinel</string></property>
+     <property name="alignment"><set>Qt::AlignCenter</set></property>
+     <property name="styleSheet">
+      <string notr="true">font-size: 24px; font-weight: bold; color: #00d2ff; padding: 4px;</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <widget class="QLabel" name="previewLabel">
      <property name="minimumSize">
       <size><width>640</width><height>360</height></size>
