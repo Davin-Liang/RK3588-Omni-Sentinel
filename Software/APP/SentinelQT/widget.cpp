@@ -117,6 +117,8 @@ bool Widget::init_camera_()
 
 void Widget::start_preview_()
 {
+    fprintf(stderr, "[SentinelQT] start_preview_, worker=%p, previewActive=%d\n",
+            (void*)previewWorker_, previewActive_);
     if (previewWorker_) return;
 
     previewWorker_ = new PreviewWorker(visioner_, 0);
@@ -244,6 +246,8 @@ void Widget::on_btn_record_()
 
 void Widget::on_btn_system_()
 {
+    fprintf(stderr, "[SentinelQT] on_btn_system_ systemRunning=%d previewActive=%d\n",
+            systemRunning_, previewActive_);
     if (systemRunning_) {
         // Stop everything: recording, streaming, preview, camera
         if (streamer_->is_recording(0)) {

@@ -199,12 +199,13 @@ bool SentinelVisioner::camera_stream_ctrl(int camNum, bool isOpen) {
             return false;
         }
         ctx->isStreaming = true;
+        std::cout << "Camera " << camNum << " STREAMON OK." << std::endl;
 
-        // 2. 启动该摄像头的采集线程
+        // 3. 启动该摄像头的采集线程
         ctx->isThreadRunning = true;
         ctx->captureThread = std::make_unique<std::thread>(&SentinelVisioner::capture_thread_func_, this, camNum);
-        
-        std::cout << "Camera " << camNum << " stream & thread STARTED." << std::endl;
+
+        std::cout << "Camera " << camNum << " capture thread STARTED." << std::endl;
     } else {
         if (!ctx->isStreaming) return true;
 
@@ -320,7 +321,8 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
 
                     auto end_time = std::chrono::high_resolution_clock::now();
                     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                    std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
+                    if (raw_frame_count % 30 == 0)
+                        std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
                 } else {
                     // 缓冲池干涸策略：通常意味着下游处理太慢，此时直接丢弃当前帧 (Drop Frame)
                     std::cerr << "[Thread] Warning: RGA buffer pool empty! Dropping frame." << std::endl;

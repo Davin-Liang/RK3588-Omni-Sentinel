@@ -18,10 +18,13 @@ void PreviewWorker::start()
     running_.store(true);
     int consecutiveFailures = 0;
 
+    fprintf(stderr, "[PreviewWorker] start() running, cam=%d\n", camNum_);
+
     while (running_.load()) {
         NpuPreview task = visioner_->try_get_preview(camNum_, 200);
 
         if (!running_.load()) {
+            fprintf(stderr, "[PreviewWorker] stopped, exiting loop\n");
             if (task.npuImage || task.previewImage)
                 visioner_->release_preview(camNum_, &task);
             break;
@@ -36,6 +39,9 @@ void PreviewWorker::start()
             emit frameReady(img.copy());
         } else if (task.npuImage == nullptr) {
             consecutiveFailures++;
+            if (consecutiveFailures >= 5) {
+                fprintf(stderr, "[PreviewWorker] no frame for %d cycles\n", consecutiveFailures);
+            }
             if (consecutiveFailures > 30) {
                 emit error("预览帧超时, 连续" + QString::number(consecutiveFailures) + "次");
                 consecutiveFailures = 0;
@@ -44,6 +50,8 @@ void PreviewWorker::start()
 
         visioner_->release_preview(camNum_, &task);
     }
+
+    fprintf(stderr, "[PreviewWorker] start() exited\n");
 }
 
 void PreviewWorker::stop()
