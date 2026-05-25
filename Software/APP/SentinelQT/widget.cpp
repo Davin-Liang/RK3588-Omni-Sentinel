@@ -555,8 +555,20 @@ void Widget::scan_videos_()
                 int w = ctx->streams[vs]->codecpar->width;
                 int h = ctx->streams[vs]->codecpar->height;
                 resText = QString("%1×%2").arg(w).arg(h);
+
+                // Calculate duration: prefer stream duration, fallback to container
+                int64_t durUs = ctx->streams[vs]->duration;
+                if (durUs <= 0) durUs = ctx->duration;
+                // Fallback: estimate from frame count and frame rate
+                if (durUs <= 0 && ctx->streams[vs]->nb_frames > 0) {
+                    AVRational fr = ctx->streams[vs]->avg_frame_rate;
+                    if (fr.num > 0 && fr.den > 0) {
+                        durUs = (int64_t)ctx->streams[vs]->nb_frames * fr.den
+                                * 1000000LL / fr.num;
+                    }
+                }
+                durText = format_duration_(durUs);
             }
-            durText = format_duration_(ctx->duration);
             avformat_close_input(&ctx);
         }
 
