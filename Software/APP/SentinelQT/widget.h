@@ -39,6 +39,7 @@ private slots:
     void on_btn_stop_record_();
     void on_btn_toggle_preview_();
     void on_btn_play_record_();
+    void on_btn_refresh_files_();
     void update_record_info_();
 
 private:
@@ -68,6 +69,7 @@ private:
     bool init_camera_();
     void start_preview_();
     void stop_preview_();
+    void refresh_file_list_();
     void update_button_states_();
     void set_status_(const QString& msg, const QString& color);
 };

@@ -6,6 +6,7 @@
 #include "preview_worker.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QThread>
 #include <QTimer>
 #include <QProcess>
@@ -44,6 +45,9 @@ Widget::Widget(QWidget *parent)
     rtspUrl_ = config_.value("Stream/rtspUrl", "rtsp://192.168.1.100:8554/live/cam0").toString();
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
 
+    // Populate file list
+    refresh_file_list_();
+
     // Resolution combo
     int res = config_.value("Record/resolution", 1080).toInt();
     ui->resCombo->setCurrentIndex(res == 720 ? 1 : 0);
@@ -57,6 +61,8 @@ Widget::Widget(QWidget *parent)
             this, &Widget::on_btn_toggle_preview_);
     connect(ui->btnPlayRecord, &QPushButton::clicked,
             this, &Widget::on_btn_play_record_);
+    connect(ui->btnRefreshFiles, &QPushButton::clicked,
+            this, &Widget::on_btn_refresh_files_);
     connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
     connect(ui->btnStopStream,  &QPushButton::clicked, this, &Widget::on_btn_stop_stream_);
     connect(ui->btnStartRecord, &QPushButton::clicked, this, &Widget::on_btn_start_record_);
@@ -273,11 +279,57 @@ void Widget::update_record_info_()
 
 // ---- Playback ----
 
+void Widget::refresh_file_list_()
+{
+    QString current = ui->fileCombo->currentText();
+    ui->fileCombo->clear();
+
+    QDir dir(recordDir_);
+    QStringList filters;
+    filters << "*.mp4";
+    QStringList files = dir.entryList(filters, QDir::Files, QDir::Time);
+
+    if (files.isEmpty()) {
+        ui->fileCombo->addItem("(无录像文件)");
+        return;
+    }
+
+    ui->fileCombo->addItems(files);
+
+    // Restore previous selection if still exists
+    int idx = ui->fileCombo->findText(current);
+    if (idx >= 0) ui->fileCombo->setCurrentIndex(idx);
+}
+
+void Widget::on_btn_refresh_files_()
+{
+    refresh_file_list_();
+    set_status_("文件列表已刷新", "#888899");
+}
+
 void Widget::on_btn_play_record_()
 {
-    if (currentRecordPath_.isEmpty()) {
-        set_status_("没有可播放的录像文件", "#e74c3c");
+    QString selected = ui->fileCombo->currentText();
+    if (selected.isEmpty() || selected.startsWith("(")) {
+        set_status_("请先选择一个录像文件", "#e74c3c");
         return;
+    }
+
+    QString filePath = recordDir_ + "/" + selected;
+
+    if (streamer_->is_recording(0)) {
+        set_status_("请先停止录像再播放", "#e74c3c");
+        return;
+    }
+
+    // Stop preview to free DRM for ffplay
+    if (previewActive_) {
+        stop_preview_();
+        ui->btnTogglePreview->setText("启动预览");
+        ui->btnTogglePreview->setStyleSheet(
+            "font-size: 16px; background-color: #555566; color: #999999;"
+            " border: none; border-radius: 6px; padding: 0 12px;");
+        ui->previewLabel->setText("播放中...");
     }
 
     if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
@@ -289,11 +341,26 @@ void Widget::on_btn_play_record_()
         playerProcess_ = new QProcess(this);
     }
 
+    // Use ffplay with DRM/KMS output
     QStringList args;
-    args << "-fs" << "-autoexit" << currentRecordPath_;
+    args << "-fs" << "-autoexit" << "-infbuf" << filePath;
 
     playerProcess_->start("ffplay", args);
-    set_status_("播放中: " + currentRecordPath_, "#9b59b6");
+    set_status_("播放中: " + selected, "#9b59b6");
+
+    // When ffplay exits, restart preview
+    connect(playerProcess_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this](int, QProcess::ExitStatus) {
+        if (!previewActive_) {
+            start_preview_();
+            ui->btnTogglePreview->setText("关闭预览");
+            ui->btnTogglePreview->setStyleSheet(
+                "font-size: 16px; background-color: #e67e22; color: #ffffff;"
+                " border: none; border-radius: 6px; padding: 0 12px;");
+            ui->previewLabel->setText("等待相机...");
+        }
+        set_status_("播放结束", "#888899");
+    });
 }
 
 // ---- Streamer events ----

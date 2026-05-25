@@ -60,15 +60,6 @@
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="btnPlayRecord">
-       <property name="text"><string>播放录像</string></property>
-       <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
-       <property name="styleSheet">
-        <string notr="true">font-size: 16px; background-color: #9b59b6; color: #ffffff; border: none; border-radius: 6px; padding: 0 12px;</string>
-       </property>
-      </widget>
-     </item>
-     <item>
       <widget class="QPushButton" name="btnTogglePreview">
        <property name="text"><string>关闭预览</string></property>
        <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
@@ -117,6 +108,37 @@
        <property name="enabled"><bool>false</bool></property>
        <property name="styleSheet">
         <string notr="true">font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="playbackLayout">
+     <property name="spacing"><number>8</number></property>
+     <item>
+      <widget class="QComboBox" name="fileCombo">
+       <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 16px; background-color: #2a2a3e; color: #ffffff; border: 1px solid #444466; border-radius: 6px; padding: 4px 8px;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnPlayRecord">
+       <property name="text"><string>播放</string></property>
+       <property name="minimumSize"><size><width>80</width><height>44</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 16px; background-color: #9b59b6; color: #ffffff; border: none; border-radius: 6px;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnRefreshFiles">
+       <property name="text"><string>刷新</string></property>
+       <property name="minimumSize"><size><width>80</width><height>44</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 16px; background-color: #555566; color: #ffffff; border: none; border-radius: 6px;</string>
        </property>
       </widget>
      </item>
