@@ -63,7 +63,7 @@ Widget::Widget(QWidget *parent)
     connect(recordTimer_, &QTimer::timeout, this, &Widget::update_record_info_);
 
     if (!init_camera_()) {
-        set_status_("相机初始化失败!", "#e74c3c");
+        set_status_("相机初始化失败!", "#f85149");
         ui->btnStream->setEnabled(false);
         ui->btnRecord->setEnabled(false);
         return;
@@ -71,7 +71,7 @@ Widget::Widget(QWidget *parent)
 
     start_preview_();
 
-    set_status_("系统就绪", "#4ecca3");
+    set_status_("系统就绪", "#3fb950");
 }
 
 Widget::~Widget()
@@ -152,18 +152,18 @@ void Widget::on_btn_toggle_preview_()
         stop_preview_();
         ui->btnTogglePreview->setText("启动预览");
         ui->btnTogglePreview->setStyleSheet(
-            "font-size: 16px; background-color: #555566; color: #999999;"
-            " border: none; border-radius: 6px; padding: 0 12px;");
+            "font-size: 13px; color: #3fb950; background-color: #0d1117;"
+            " border: 1px solid #3fb950; border-radius: 6px; padding: 0 16px;");
         ui->previewLabel->setText("预览已关闭");
-        set_status_("预览已关闭", "#888899");
+        set_status_("预览已关闭", "#8b949e");
     } else {
         start_preview_();
         ui->btnTogglePreview->setText("关闭预览");
         ui->btnTogglePreview->setStyleSheet(
-            "font-size: 16px; background-color: #e67e22; color: #ffffff;"
-            " border: none; border-radius: 6px; padding: 0 12px;");
+            "font-size: 13px; color: #d29922; background-color: #0d1117;"
+            " border: 1px solid #d29922; border-radius: 6px; padding: 0 16px;");
         ui->previewLabel->setText("等待相机...");
-        set_status_("预览已开启", "#4ecca3");
+        set_status_("预览已开启", "#58a6ff");
     }
 }
 
@@ -178,7 +178,7 @@ void Widget::on_frame_ready_(const QImage& image)
         uint64_t nowUs = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
         if (lastFpsTsUs_ > 0 && nowUs > lastFpsTsUs_) {
             double fps = 30.0 * 1000000.0 / (nowUs - lastFpsTsUs_);
-            ui->fpsLabel->setText(QString("FPS: %1 | 1920x1080").arg(fps, 0, 'f', 1));
+            ui->fpsLabel->setText(QString("FPS %1  ·  1920×1080").arg(fps, 0, 'f', 1));
         }
         lastFpsTsUs_ = nowUs;
     }
@@ -196,16 +196,16 @@ void Widget::on_btn_stream_()
 {
     if (streamer_->is_streaming(0)) {
         if (streamer_->stop_stream(0)) {
-            set_status_("推流已停止", "#888899");
+            set_status_("推流已停止", "#8b949e");
             update_button_states_();
         }
     } else {
         QByteArray url = rtspUrl_.toUtf8();
         if (streamer_->start_stream(0, url.constData())) {
-            set_status_("推流中: " + rtspUrl_, "#00d2ff");
+            set_status_("推流中: " + rtspUrl_, "#58a6ff");
             update_button_states_();
         } else {
-            set_status_("推流启动失败!", "#e74c3c");
+            set_status_("推流启动失败!", "#f85149");
         }
     }
 }
@@ -218,7 +218,7 @@ void Widget::on_btn_record_()
         if (streamer_->stop_record(0)) {
             recordTimer_->stop();
             ui->recordInfoLabel->clear();
-            set_status_("录像已停止: " + currentRecordPath_, "#888899");
+            set_status_("录像已停止: " + currentRecordPath_, "#8b949e");
             update_button_states_();
         }
     } else {
@@ -234,10 +234,10 @@ void Widget::on_btn_record_()
             recordStartTime_ = QDateTime::currentDateTime();
             recordTimer_->start(1000);
             update_record_info_();
-            set_status_("录像中: " + currentRecordPath_, "#4ecca3");
+            set_status_("录像中: " + currentRecordPath_, "#3fb950");
             update_button_states_();
         } else {
-            set_status_("录像启动失败!", "#e74c3c");
+            set_status_("录像启动失败!", "#f85149");
         }
     }
 }
@@ -268,9 +268,12 @@ void Widget::on_btn_system_()
         ui->btnTogglePreview->setEnabled(false);
         ui->btnSystem->setText("启动系统");
         ui->btnSystem->setStyleSheet(
-            "font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;");
+            "QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #238636;"
+            " border: 1px solid #2ea043; border-radius: 8px; }"
+            " QPushButton:hover { background-color: #2ea043; }"
+            " QPushButton:pressed { background-color: #196c2e; }");
         ui->previewLabel->setText("系统已停止");
-        set_status_("系统已停止", "#888899");
+        set_status_("系统已停止", "#8b949e");
     } else {
         // Resume RGA processing
         visioner_->camera_pause(0, false);
@@ -280,8 +283,8 @@ void Widget::on_btn_system_()
             start_preview_();
             ui->btnTogglePreview->setText("关闭预览");
             ui->btnTogglePreview->setStyleSheet(
-                "font-size: 16px; background-color: #e67e22; color: #ffffff;"
-                " border: none; border-radius: 6px; padding: 0 12px;");
+                "font-size: 13px; color: #d29922; background-color: #0d1117;"
+                " border: 1px solid #d29922; border-radius: 6px; padding: 0 16px;");
         }
 
         systemRunning_ = true;
@@ -290,10 +293,13 @@ void Widget::on_btn_system_()
         ui->btnTogglePreview->setEnabled(true);
         ui->btnSystem->setText("关闭系统");
         ui->btnSystem->setStyleSheet(
-            "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;");
+            "QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #da3633;"
+            " border: 1px solid #f85149; border-radius: 8px; }"
+            " QPushButton:hover { background-color: #f85149; }"
+            " QPushButton:pressed { background-color: #b62324; }");
         update_button_states_();
         ui->previewLabel->setText("等待相机...");
-        set_status_("系统就绪", "#4ecca3");
+        set_status_("系统就绪", "#58a6ff");
     }
 }
 
@@ -319,21 +325,21 @@ void Widget::on_streamer_event(int /*camNum*/, StreamerEvent event, const QStrin
 {
     switch (event) {
     case StreamerEvent::STREAM_STARTED:
-        set_status_("推流中: " + detail, "#00d2ff");
+        set_status_("推流中: " + detail, "#58a6ff");
         break;
     case StreamerEvent::STREAM_STOPPED:
-        set_status_("推流已停止", "#888899");
+        set_status_("推流已停止", "#8b949e");
         update_button_states_();
         break;
     case StreamerEvent::RECORD_STARTED:
-        set_status_("录像中: " + detail, "#4ecca3");
+        set_status_("录像中: " + detail, "#3fb950");
         break;
     case StreamerEvent::RECORD_STOPPED:
-        set_status_("录像已停止", "#888899");
+        set_status_("录像已停止", "#8b949e");
         update_button_states_();
         break;
     case StreamerEvent::ERROR:
-        set_status_("错误: " + (detail.isEmpty() ? "unknown" : detail), "#e74c3c");
+        set_status_("错误: " + (detail.isEmpty() ? "unknown" : detail), "#f85149");
         break;
     }
 }
@@ -348,21 +354,33 @@ void Widget::update_button_states_()
     if (streaming) {
         ui->btnStream->setText("停止推流");
         ui->btnStream->setStyleSheet(
-            "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;");
+            "QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #da3633;"
+            " border: 1px solid #f85149; border-radius: 8px; }"
+            " QPushButton:hover { background-color: #f85149; }"
+            " QPushButton:pressed { background-color: #b62324; }");
     } else {
         ui->btnStream->setText("启动推流");
         ui->btnStream->setStyleSheet(
-            "font-size: 18px; background-color: #00d2ff; color: #1a1a2e; border: none; border-radius: 8px;");
+            "QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #238636;"
+            " border: 1px solid #2ea043; border-radius: 8px; }"
+            " QPushButton:hover { background-color: #2ea043; }"
+            " QPushButton:pressed { background-color: #196c2e; }");
     }
 
     if (recording) {
         ui->btnRecord->setText("停止录像");
         ui->btnRecord->setStyleSheet(
-            "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;");
+            "QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #da3633;"
+            " border: 1px solid #f85149; border-radius: 8px; }"
+            " QPushButton:hover { background-color: #f85149; }"
+            " QPushButton:pressed { background-color: #b62324; }");
     } else {
         ui->btnRecord->setText("启动录像");
         ui->btnRecord->setStyleSheet(
-            "font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;");
+            "QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #1f6feb;"
+            " border: 1px solid #388bfd; border-radius: 8px; }"
+            " QPushButton:hover { background-color: #388bfd; }"
+            " QPushButton:pressed { background-color: #1158c7; }");
     }
 }
 

@@ -9,23 +9,42 @@
    <string>Omni Sentinel</string>
   </property>
   <property name="styleSheet">
-   <string notr="true">background-color: #1a1a2e; color: #e0e0e0;</string>
+   <string notr="true">background-color: #0d1117; color: #e6edf3;</string>
   </property>
   <layout class="QVBoxLayout" name="rootLayout">
-   <property name="spacing"><number>8</number></property>
-   <property name="leftMargin"><number>12</number></property>
-   <property name="topMargin"><number>12</number></property>
-   <property name="rightMargin"><number>12</number></property>
-   <property name="bottomMargin"><number>12</number></property>
+   <property name="spacing"><number>10</number></property>
+   <property name="leftMargin"><number>16</number></property>
+   <property name="topMargin"><number>14</number></property>
+   <property name="rightMargin"><number>16</number></property>
+   <property name="bottomMargin"><number>14</number></property>
+
+   <!-- ====== 标题栏 ====== -->
    <item>
-    <widget class="QLabel" name="titleLabel">
-     <property name="text"><string>RK3588 Omni Sentinel</string></property>
-     <property name="alignment"><set>Qt::AlignCenter</set></property>
+    <widget class="QFrame" name="titleBar">
+     <property name="minimumSize"><size><width>0</width><height>46</height></size></property>
+     <property name="maximumSize"><size><width>16777215</width><height>46</height></size></property>
      <property name="styleSheet">
-      <string notr="true">font-size: 24px; font-weight: bold; color: #00d2ff; padding: 4px;</string>
+      <string notr="true">background-color: #161b22; border: 1px solid #30363d; border-radius: 10px;</string>
      </property>
+     <layout class="QHBoxLayout" name="titleBarLayout">
+      <property name="leftMargin"><number>0</number></property>
+      <property name="topMargin"><number>0</number></property>
+      <property name="rightMargin"><number>0</number></property>
+      <property name="bottomMargin"><number>0</number></property>
+      <item>
+       <widget class="QLabel" name="titleLabel">
+        <property name="text"><string>RK3588 Omni Sentinel</string></property>
+        <property name="alignment"><set>Qt::AlignCenter</set></property>
+        <property name="styleSheet">
+         <string notr="true">font-size: 20px; font-weight: 600; color: #58a6ff; background: transparent; border: none;</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
     </widget>
    </item>
+
+   <!-- ====== 预览区域 ====== -->
    <item>
     <widget class="QLabel" name="previewLabel">
      <property name="sizePolicy">
@@ -38,99 +57,139 @@
      </property>
      <property name="alignment"><set>Qt::AlignCenter</set></property>
      <property name="styleSheet">
-      <string notr="true">background-color: #000000; border: 2px solid #333355; border-radius: 6px;</string>
+      <string notr="true">background-color: #000000; border: 1px solid #30363d; border-radius: 10px;</string>
      </property>
      <property name="text"><string>等待相机...</string></property>
     </widget>
    </item>
+
+   <!-- ====== 状态栏 ====== -->
    <item>
-    <widget class="QLabel" name="fpsLabel">
-     <property name="text"><string>FPS: -- | 1920x1080</string></property>
-     <property name="alignment"><set>Qt::AlignCenter</set></property>
+    <widget class="QFrame" name="statusBar">
+     <property name="minimumSize"><size><width>0</width><height>32</height></size></property>
+     <property name="maximumSize"><size><width>16777215</width><height>32</height></size></property>
      <property name="styleSheet">
-      <string notr="true">font-size: 16px; color: #888899; padding: 4px;</string>
+      <string notr="true">background-color: #161b22; border: 1px solid #30363d; border-radius: 8px;</string>
      </property>
+     <layout class="QHBoxLayout" name="statusBarLayout">
+      <property name="spacing"><number>16</number></property>
+      <property name="leftMargin"><number>12</number></property>
+      <property name="topMargin"><number>0</number></property>
+      <property name="rightMargin"><number>12</number></property>
+      <property name="bottomMargin"><number>0</number></property>
+      <item>
+       <widget class="QLabel" name="fpsLabel">
+        <property name="text"><string>FPS --  ·  1920×1080</string></property>
+        <property name="styleSheet">
+         <string notr="true">font-size: 13px; color: #8b949e; background: transparent; border: none;</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer>
+      </item>
+      <item>
+       <widget class="QLabel" name="recordInfoLabel">
+        <property name="text"><string></string></property>
+        <property name="styleSheet">
+         <string notr="true">font-size: 13px; color: #f85149; background: transparent; border: none;</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
     </widget>
    </item>
+
+   <!-- ====== 设置行 ====== -->
    <item>
-    <layout class="QHBoxLayout" name="resLayout">
-     <property name="spacing"><number>8</number></property>
-     <item>
-      <widget class="QLabel" name="resLabel">
-       <property name="text"><string>录像分辨率:</string></property>
-       <property name="styleSheet">
-        <string notr="true">font-size: 16px; color: #888899;</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QComboBox" name="resCombo">
-       <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
-       <property name="styleSheet">
-        <string notr="true">font-size: 18px; background-color: #2a2a3e; color: #ffffff; border: 1px solid #444466; border-radius: 6px; padding: 4px 12px;</string>
-       </property>
-       <item><property name="text"><string>1080p</string></property></item>
-       <item><property name="text"><string>720p</string></property></item>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="btnTogglePreview">
-       <property name="text"><string>关闭预览</string></property>
-       <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
-       <property name="styleSheet">
-        <string notr="true">font-size: 16px; background-color: #e67e22; color: #ffffff; border: none; border-radius: 6px; padding: 0 12px;</string>
-       </property>
-      </widget>
-     </item>
-    </layout>
+    <widget class="QFrame" name="settingsBar">
+     <property name="minimumSize"><size><width>0</width><height>48</height></size></property>
+     <property name="maximumSize"><size><width>16777215</width><height>48</height></size></property>
+     <property name="styleSheet">
+      <string notr="true">background-color: #161b22; border: 1px solid #30363d; border-radius: 8px;</string>
+     </property>
+     <layout class="QHBoxLayout" name="settingsLayout">
+      <property name="spacing"><number>10</number></property>
+      <property name="leftMargin"><number>12</number></property>
+      <property name="topMargin"><number>0</number></property>
+      <property name="rightMargin"><number>12</number></property>
+      <property name="bottomMargin"><number>0</number></property>
+      <item>
+       <widget class="QLabel" name="resLabel">
+        <property name="text"><string>录像分辨率</string></property>
+        <property name="styleSheet">
+         <string notr="true">font-size: 13px; color: #8b949e; background: transparent; border: none;</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QComboBox" name="resCombo">
+        <property name="minimumSize"><size><width>100</width><height>34</height></size></property>
+        <property name="styleSheet">
+         <string notr="true">QComboBox { font-size: 14px; color: #e6edf3; background-color: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 2px 10px; } QComboBox:hover { border-color: #58a6ff; } QComboBox QAbstractItemView { background-color: #161b22; color: #e6edf3; selection-background-color: #1f6feb; border: 1px solid #30363d; } QComboBox::drop-down { border: none; width: 24px; }</string>
+        </property>
+        <item><property name="text"><string>1080p</string></property></item>
+        <item><property name="text"><string>720p</string></property></item>
+       </widget>
+      </item>
+      <item>
+       <spacer><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btnTogglePreview">
+        <property name="text"><string>关闭预览</string></property>
+        <property name="minimumSize"><size><width>100</width><height>34</height></size></property>
+        <property name="styleSheet">
+         <string notr="true">font-size: 13px; color: #d29922; background-color: #0d1117; border: 1px solid #d29922; border-radius: 6px; padding: 0 16px;</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
    </item>
+
+   <!-- ====== 控制按钮行 ====== -->
    <item>
     <layout class="QHBoxLayout" name="btnLayout">
-     <property name="spacing"><number>12</number></property>
+     <property name="spacing"><number>10</number></property>
      <item>
       <widget class="QPushButton" name="btnStream">
        <property name="text"><string>启动推流</string></property>
-       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="minimumSize"><size><width>0</width><height>52</height></size></property>
        <property name="styleSheet">
-        <string notr="true">font-size: 18px; background-color: #00d2ff; color: #1a1a2e; border: none; border-radius: 8px;</string>
+        <string notr="true">QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #238636; border: 1px solid #2ea043; border-radius: 8px; } QPushButton:hover { background-color: #2ea043; } QPushButton:pressed { background-color: #196c2e; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
        </property>
       </widget>
      </item>
      <item>
       <widget class="QPushButton" name="btnRecord">
        <property name="text"><string>启动录像</string></property>
-       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="minimumSize"><size><width>0</width><height>52</height></size></property>
        <property name="styleSheet">
-        <string notr="true">font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;</string>
+        <string notr="true">QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #1f6feb; border: 1px solid #388bfd; border-radius: 8px; } QPushButton:hover { background-color: #388bfd; } QPushButton:pressed { background-color: #1158c7; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
        </property>
       </widget>
      </item>
      <item>
       <widget class="QPushButton" name="btnSystem">
        <property name="text"><string>关闭系统</string></property>
-       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="minimumSize"><size><width>0</width><height>52</height></size></property>
        <property name="styleSheet">
-        <string notr="true">font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;</string>
+        <string notr="true">QPushButton { font-size: 16px; font-weight: 600; color: #e6edf3; background-color: #da3633; border: 1px solid #f85149; border-radius: 8px; } QPushButton:hover { background-color: #f85149; } QPushButton:pressed { background-color: #b62324; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
        </property>
       </widget>
      </item>
     </layout>
    </item>
-   <item>
-    <widget class="QLabel" name="recordInfoLabel">
-     <property name="text"><string></string></property>
-     <property name="alignment"><set>Qt::AlignCenter</set></property>
-     <property name="styleSheet">
-      <string notr="true">font-size: 16px; color: #e74c3c; padding: 2px;</string>
-     </property>
-    </widget>
-   </item>
+
+   <!-- ====== 底部状态 ====== -->
    <item>
     <widget class="QLabel" name="statusLabel">
      <property name="text"><string>系统就绪</string></property>
+     <property name="minimumSize"><size><width>0</width><height>28</height></size></property>
      <property name="alignment"><set>Qt::AlignCenter</set></property>
      <property name="styleSheet">
-      <string notr="true">font-size: 14px; color: #4ecca3; padding: 6px;</string>
+      <string notr="true">font-size: 12px; color: #8b949e; padding: 2px;</string>
      </property>
     </widget>
    </item>
