@@ -34,6 +34,7 @@ private slots:
     void on_frame_ready_(const QImage& image);
     void on_btn_stream_();
     void on_btn_record_();
+    void on_btn_system_();
     void on_btn_toggle_preview_();
     void update_record_info_();
 
@@ -57,6 +58,7 @@ private:
     int frameCount_;
     uint64_t lastFpsTsUs_;
     bool previewActive_;
+    bool systemRunning_;
 
     static Widget* instance_;
     bool init_camera_();

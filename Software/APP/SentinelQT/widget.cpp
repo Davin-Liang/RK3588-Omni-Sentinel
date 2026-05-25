@@ -35,6 +35,7 @@ Widget::Widget(QWidget *parent)
     , frameCount_(0)
     , lastFpsTsUs_(0)
     , previewActive_(true)
+    , systemRunning_(true)
 {
     instance_ = this;
     ui->setupUi(this);
@@ -55,6 +56,7 @@ Widget::Widget(QWidget *parent)
             this, &Widget::on_btn_toggle_preview_);
     connect(ui->btnStream, &QPushButton::clicked, this, &Widget::on_btn_stream_);
     connect(ui->btnRecord, &QPushButton::clicked, this, &Widget::on_btn_record_);
+    connect(ui->btnSystem, &QPushButton::clicked, this, &Widget::on_btn_system_);
 
     // Recording elapsed-time timer
     recordTimer_ = new QTimer(this);
@@ -235,6 +237,60 @@ void Widget::on_btn_record_()
         } else {
             set_status_("录像启动失败!", "#e74c3c");
         }
+    }
+}
+
+// ---- System ----
+
+void Widget::on_btn_system_()
+{
+    if (systemRunning_) {
+        // Stop everything: recording, streaming, preview, camera
+        if (streamer_->is_recording(0)) {
+            streamer_->stop_record(0);
+            recordTimer_->stop();
+            ui->recordInfoLabel->clear();
+        }
+        if (streamer_->is_streaming(0)) {
+            streamer_->stop_stream(0);
+        }
+        if (previewActive_) {
+            stop_preview_();
+        }
+        visioner_->camera_stream_ctrl(0, false);
+
+        systemRunning_ = false;
+        ui->btnStream->setEnabled(false);
+        ui->btnRecord->setEnabled(false);
+        ui->btnTogglePreview->setEnabled(false);
+        ui->btnSystem->setText("启动系统");
+        ui->btnSystem->setStyleSheet(
+            "font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;");
+        ui->previewLabel->setText("系统已停止");
+        set_status_("系统已停止", "#888899");
+    } else {
+        // Start camera
+        visioner_->camera_stream_ctrl(0, true);
+
+        // Start preview (use toggle state tracking, not button text)
+        if (!previewActive_) {
+            start_preview_();
+            ui->btnTogglePreview->setText("关闭预览");
+            ui->btnTogglePreview->setStyleSheet(
+                "font-size: 16px; background-color: #e67e22; color: #ffffff;"
+                " border: none; border-radius: 6px; padding: 0 12px;");
+        }
+
+        systemRunning_ = true;
+        ui->btnStream->setEnabled(true);
+        ui->btnRecord->setEnabled(true);
+        ui->btnTogglePreview->setEnabled(true);
+        ui->btnSystem->setText("关闭系统");
+        ui->btnSystem->setStyleSheet(
+            "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;");
+        update_button_states_();
+        ui->previewLabel->setText("等待相机...");
+        set_status_("系统就绪", "#4ecca3");
     }
 }
 
