@@ -26,7 +26,7 @@ public:
 
     static Widget* instance() { return instance_; }
 
-    void on_streamer_event(int camNum, StreamerEvent event, const char* detail);
+    void on_streamer_event(int camNum, StreamerEvent event, const QString& detail);
 
 private slots:
     void on_frame_ready_(const QImage& image);

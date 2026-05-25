@@ -23,12 +23,12 @@ struct DmaBufferInfo {
 };
 
 /**
- * @brief 打包传递给下游的 NPU 和 OSD 渲染任务
- * @note 包含了缩放给 NPU 推理用的小图，以及准备画框用的 720P OSD 底图
+ * @brief 打包传递给下游的 NPU 推理和预览图像
+ * @note 包含了缩放给 NPU 推理用的小图，以及供 QT 预览的 1080P RGB888 图像
  */
-struct NpuOSD {
-    DmaBuffer_t* npuImage;  ///< 指向供 NPU 推理的 RGB888 小图
-    DmaBuffer_t* osdImage;  ///< 指向供 OSD 叠加的 720P NV12 图像 (可能为 nullptr)
+struct NpuPreview {
+    DmaBuffer_t* npuImage;     ///< 指向供 NPU 推理的 640x640 RGB888 小图
+    DmaBuffer_t* previewImage; ///< 指向供预览的 1920x1080 RGB888 图像 (可能为 nullptr)
 };
 
 // 内部结构体，用于保存单路摄像头的完整上下文信息
@@ -48,9 +48,9 @@ struct CameraContext {
 
     std::unique_ptr<DmaBufferPool> npuRgbPool;      ///< NPU RGB888 内存池
     std::unique_ptr<DmaBufferPool> origCopyPool;    ///< 原始大图(NV12) 拷贝池
-    std::unique_ptr<DmaBufferPool> osd720pPool;     ///< 720P OSD 图像内存池
+    std::unique_ptr<DmaBufferPool> previewPool;      ///< 1080P RGB888 预览图像内存池
 
-    ThreadSafeQueue<NpuOSD> npuTaskQueue;           ///< 供 NPU 线程消费的任务队列
+    ThreadSafeQueue<NpuPreview> previewTaskQueue;   ///< 供 NPU/预览消费者消费的任务队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; ///< 供推流/录像等后处理消费的原图队列
 
     CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false) {}
@@ -82,18 +82,26 @@ public:
     bool camera_stream_ctrl(int camNum, bool isOpen);
 
     /**
-     * @brief: 阻塞等待并获取打包好的 NPU 和 OSD 图像数据
+     * @brief: 阻塞等待并获取打包好的 NPU 推理和预览图像数据
      * @param: camNum - 摄像头编号
-     * @return: NpuOSD 结构体。若获取失败或摄像头不存在，返回 {nullptr, nullptr}
+     * @return: NpuPreview 结构体。若获取失败或摄像头不存在，返回 {nullptr, nullptr}
      */
-    NpuOSD wait_get_npuOSD(int camNum);
+    NpuPreview wait_get_preview(int camNum);
 
     /**
-     * @brief: 业务层使用完毕后，将 NPU 和 OSD 内存块归还给底层的内存池
+     * @brief: 带超时的阻塞等待预览图像数据
      * @param: camNum - 摄像头编号
-     * @param: npuOSD - 需要归还的任务结构体指针
+     * @param: timeoutMs - 超时毫秒数
+     * @return: NpuPreview 结构体。超时返回 {nullptr, nullptr}
      */
-    void release_npuOSD(int camNum, NpuOSD* npuOSD);
+    NpuPreview try_get_preview(int camNum, int timeoutMs);
+
+    /**
+     * @brief: 业务层使用完毕后，将 NPU 和预览图像内存块归还给底层的内存池
+     * @param: camNum - 摄像头编号
+     * @param: preview - 需要归还的任务结构体指针
+     */
+    void release_preview(int camNum, NpuPreview* preview);
 
     /**
      * @brief: 阻塞等待并获取拷贝好的原始高分辨率图像 (用于推流或存盘)
@@ -119,7 +127,7 @@ private:
     bool rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight, 
                              DmaBuffer_t* dstBuf, int horizontalOffset, int verticalOffset);
 
-    bool rga_scale_nv12_to_nv12_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf);
+    bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf);
 
     bool rga_copy_buffer_(int srcFd, int width, int height, DmaBuffer_t* dstBuf);
 };

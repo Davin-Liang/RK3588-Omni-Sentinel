@@ -19,7 +19,7 @@ static void streamer_callback_(int camNum, StreamerEvent event, const char* deta
     if (!w) return;
     QString detailStr = detail ? QString::fromUtf8(detail) : QString();
     QMetaObject::invokeMethod(w, [w, camNum, event, detailStr]() {
-        w->on_streamer_event(camNum, event, detailStr.toUtf8().constData());
+        w->on_streamer_event(camNum, event, detailStr);
     }, Qt::QueuedConnection);
 }
 
@@ -50,6 +50,10 @@ Widget::Widget(QWidget *parent)
     // Initialize camera
     if (!init_camera_()) {
         set_status_("相机初始化失败!", "#e74c3c");
+        ui->btnStartStream->setEnabled(false);
+        ui->btnStopStream->setEnabled(false);
+        ui->btnStartRecord->setEnabled(false);
+        ui->btnStopRecord->setEnabled(false);
         return;
     }
 
@@ -66,7 +70,12 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
-    // Release in reverse order
+    // Stop camera first: capture thread stops, no more frames to queue
+    if (visioner_) {
+        visioner_->camera_stream_ctrl(0, false);
+    }
+
+    // Stop preview worker and wait for thread
     if (previewWorker_) {
         previewWorker_->stop();
     }
@@ -74,7 +83,13 @@ Widget::~Widget()
         previewThread_->quit();
         previewThread_->wait(3000);
     }
+    delete previewWorker_;
+    previewWorker_ = nullptr;
 
+    // Cleanup streamer (remove_camera stops all internal threads)
+    if (streamer_) {
+        streamer_->remove_camera(0);
+    }
     delete streamer_;
     delete visioner_;
     delete ui;
@@ -169,25 +184,25 @@ void Widget::on_btn_stop_record_()
     }
 }
 
-void Widget::on_streamer_event(int /*camNum*/, StreamerEvent event, const char* detail)
+void Widget::on_streamer_event(int /*camNum*/, StreamerEvent event, const QString& detail)
 {
     switch (event) {
     case StreamerEvent::STREAM_STARTED:
-        set_status_("推流中: " + QString::fromUtf8(detail ? detail : ""), "#00d2ff");
+        set_status_("推流中: " + detail, "#00d2ff");
         break;
     case StreamerEvent::STREAM_STOPPED:
         set_status_("推流已停止", "#888899");
         update_button_states_();
         break;
     case StreamerEvent::RECORD_STARTED:
-        set_status_("录像中: " + QString::fromUtf8(detail ? detail : ""), "#4ecca3");
+        set_status_("录像中: " + detail, "#4ecca3");
         break;
     case StreamerEvent::RECORD_STOPPED:
         set_status_("录像已停止", "#888899");
         update_button_states_();
         break;
     case StreamerEvent::ERROR:
-        set_status_("错误: " + QString::fromUtf8(detail ? detail : "unknown"), "#e74c3c");
+        set_status_("错误: " + (detail.isEmpty() ? "unknown" : detail), "#e74c3c");
         break;
     }
 }
