@@ -37,7 +37,7 @@ private slots:
     void on_btn_system_();
     void on_btn_toggle_preview_();
     void update_clock_();
-    void update_cpu_();
+    void update_hw_usage_();
     void update_record_info_();
 
 private:

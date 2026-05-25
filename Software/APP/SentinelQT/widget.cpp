@@ -64,10 +64,10 @@ Widget::Widget(QWidget *parent)
     // Clock timer
     clockTimer_ = new QTimer(this);
     connect(clockTimer_, &QTimer::timeout, this, &Widget::update_clock_);
-    connect(clockTimer_, &QTimer::timeout, this, &Widget::update_cpu_);
+    connect(clockTimer_, &QTimer::timeout, this, &Widget::update_hw_usage_);
     clockTimer_->start(1000);
     update_clock_();
-    update_cpu_();
+    update_hw_usage_();
 
     // Recording elapsed-time timer
     recordTimer_ = new QTimer(this);
@@ -319,28 +319,72 @@ void Widget::update_clock_()
     ui->clockLabel->setText(QDateTime::currentDateTime().toString("HH:mm:ss"));
 }
 
-void Widget::update_cpu_()
+void Widget::update_hw_usage_()
 {
+    int cpuUsage   = -1;
+    int rgaUsage   = -1;
+    int npuUsage   = -1;
+
+    // ---- CPU ----
     FILE* fp = fopen("/proc/stat", "r");
-    if (!fp) return;
-
-    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
-    int n = fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
-                   &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
-    fclose(fp);
-    if (n < 4) return;
-
-    uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
-    uint64_t totalDelta = total - prevCpuTotal_;
-    uint64_t idleDelta  = idle  - prevCpuIdle_;
-
-    if (prevCpuTotal_ > 0 && totalDelta > 0) {
-        int usage = (int)(100 - (idleDelta * 100 / totalDelta));
-        ui->cpuLabel->setText(QString("CPU %1%").arg(usage));
+    if (fp) {
+        uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+        int n = fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                       &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+        fclose(fp);
+        if (n >= 4) {
+            uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
+            uint64_t totalDelta = total - prevCpuTotal_;
+            uint64_t idleDelta  = idle  - prevCpuIdle_;
+            if (prevCpuTotal_ > 0 && totalDelta > 0)
+                cpuUsage = (int)(100 - (idleDelta * 100 / totalDelta));
+            prevCpuTotal_ = total;
+            prevCpuIdle_  = idle;
+        }
     }
 
-    prevCpuTotal_ = total;
-    prevCpuIdle_  = idle;
+    // ---- RGA ----
+    fp = fopen("/sys/kernel/debug/rkrga/load", "r");
+    if (fp) {
+        char line[128];
+        int sumLoad = 0, count = 0;
+        while (fgets(line, sizeof(line), fp)) {
+            int load;
+            if (sscanf(line, "         load = %d%%", &load) == 1) {
+                sumLoad += load;
+                count++;
+            }
+        }
+        fclose(fp);
+        if (count > 0) rgaUsage = sumLoad / count;
+    }
+
+    // ---- NPU ----
+    fp = fopen("/sys/kernel/debug/rknpu/load", "r");
+    if (fp) {
+        char line[256];
+        if (fgets(line, sizeof(line), fp)) {
+            int core0 = -1, core1 = -1, core2 = -1;
+            sscanf(line, "NPU load:  Core0: %d%%, Core1: %d%%, Core2: %d%%",
+                   &core0, &core1, &core2);
+            int sum = 0, cnt = 0;
+            if (core0 >= 0) { sum += core0; cnt++; }
+            if (core1 >= 0) { sum += core1; cnt++; }
+            if (core2 >= 0) { sum += core2; cnt++; }
+            if (cnt > 0) npuUsage = sum / cnt;
+        }
+        fclose(fp);
+    }
+
+    // ---- Display ----
+    QString text;
+    text += cpuUsage >= 0 ? QString("CPU %1%").arg(cpuUsage) : "CPU --%";
+    text += "  ";
+    text += rgaUsage >= 0 ? QString("RGA %1%").arg(rgaUsage) : "RGA --%";
+    text += "  ";
+    text += npuUsage >= 0 ? QString("NPU %1%").arg(npuUsage) : "NPU --%";
+
+    ui->hwLabel->setText(text);
 }
 
 void Widget::update_record_info_()
