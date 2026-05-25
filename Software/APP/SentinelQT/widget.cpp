@@ -42,6 +42,14 @@ Widget::Widget(QWidget *parent)
     rtspUrl_ = config_.value("Stream/rtspUrl", "rtsp://192.168.1.100:8554/live/cam0").toString();
     recordPath_ = config_.value("Record/filePath", "/mnt/sdcard/record.mp4").toString();
 
+    // Init resolution combo from config, save on change
+    int res = config_.value("Record/resolution", 1080).toInt();
+    ui->resCombo->setCurrentIndex(res == 720 ? 1 : 0);
+    connect(ui->resCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        config_.setValue("Record/resolution", idx == 1 ? 720 : 1080);
+    });
+
     // Button signal-slot connections
     connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
     connect(ui->btnStopStream,  &QPushButton::clicked, this, &Widget::on_btn_stop_stream_);
@@ -163,8 +171,7 @@ void Widget::on_btn_stop_stream_()
 
 void Widget::on_btn_start_record_()
 {
-    int res = config_.value("Record/resolution", 1080).toInt();
-    RecordResolution recordRes = (res == 720)
+    RecordResolution recordRes = (ui->resCombo->currentIndex() == 1)
         ? RecordResolution::RES_720P
         : RecordResolution::RES_1080P;
 

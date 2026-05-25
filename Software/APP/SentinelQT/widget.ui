@@ -39,6 +39,29 @@
     </widget>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="resLayout">
+     <property name="spacing"><number>8</number></property>
+     <item>
+      <widget class="QLabel" name="resLabel">
+       <property name="text"><string>录像分辨率:</string></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 16px; color: #888899;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="resCombo">
+       <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 18px; background-color: #2a2a3e; color: #ffffff; border: 1px solid #444466; border-radius: 6px; padding: 4px 12px;</string>
+       </property>
+       <item><property name="text"><string>1080p</string></property></item>
+       <item><property name="text"><string>720p</string></property></item>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="btnLayout">
      <property name="spacing"><number>12</number></property>
      <item>
