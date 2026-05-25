@@ -344,34 +344,27 @@ void Widget::update_hw_usage_()
     }
 
     // ---- RGA ----
+    int rgaCores[3] = {-1, -1, -1};
     fp = fopen("/sys/kernel/debug/rkrga/load", "r");
     if (fp) {
         char line[128];
-        int sumLoad = 0, count = 0;
-        while (fgets(line, sizeof(line), fp)) {
+        int idx = 0;
+        while (fgets(line, sizeof(line), fp) && idx < 3) {
             int load;
-            if (sscanf(line, "         load = %d%%", &load) == 1) {
-                sumLoad += load;
-                count++;
-            }
+            if (sscanf(line, "         load = %d%%", &load) == 1)
+                rgaCores[idx++] = load;
         }
         fclose(fp);
-        if (count > 0) rgaUsage = sumLoad / count;
     }
 
     // ---- NPU ----
+    int npuCores[3] = {-1, -1, -1};
     fp = fopen("/sys/kernel/debug/rknpu/load", "r");
     if (fp) {
         char line[256];
         if (fgets(line, sizeof(line), fp)) {
-            int core0 = -1, core1 = -1, core2 = -1;
             sscanf(line, "NPU load:  Core0: %d%%, Core1: %d%%, Core2: %d%%",
-                   &core0, &core1, &core2);
-            int sum = 0, cnt = 0;
-            if (core0 >= 0) { sum += core0; cnt++; }
-            if (core1 >= 0) { sum += core1; cnt++; }
-            if (core2 >= 0) { sum += core2; cnt++; }
-            if (cnt > 0) npuUsage = sum / cnt;
+                   &npuCores[0], &npuCores[1], &npuCores[2]);
         }
         fclose(fp);
     }
@@ -380,9 +373,15 @@ void Widget::update_hw_usage_()
     QString text;
     text += cpuUsage >= 0 ? QString("CPU %1%").arg(cpuUsage) : "CPU --%";
     text += "  ";
-    text += rgaUsage >= 0 ? QString("RGA %1%").arg(rgaUsage) : "RGA --%";
+    text += QString("RGA %1/%2/%3%")
+                .arg(rgaCores[0] >= 0 ? QString::number(rgaCores[0]) : "-")
+                .arg(rgaCores[1] >= 0 ? QString::number(rgaCores[1]) : "-")
+                .arg(rgaCores[2] >= 0 ? QString::number(rgaCores[2]) : "-");
     text += "  ";
-    text += npuUsage >= 0 ? QString("NPU %1%").arg(npuUsage) : "NPU --%";
+    text += QString("NPU %1/%2/%3%")
+                .arg(npuCores[0] >= 0 ? QString::number(npuCores[0]) : "-")
+                .arg(npuCores[1] >= 0 ? QString::number(npuCores[1]) : "-")
+                .arg(npuCores[2] >= 0 ? QString::number(npuCores[2]) : "-");
 
     ui->hwLabel->setText(text);
 }

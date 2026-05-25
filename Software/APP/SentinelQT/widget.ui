@@ -33,7 +33,8 @@
       <property name="bottomMargin"><number>0</number></property>
       <item>
        <widget class="QLabel" name="hwLabel">
-        <property name="text"><string>CPU --%  RGA --%  NPU --%</string></property>
+        <property name="minimumSize"><size><width>220</width><height>0</height></size></property>
+        <property name="text"><string>CPU --%  RGA -/-/-%  NPU -/-/-%</string></property>
         <property name="styleSheet">
          <string notr="true">font-size: 13px; font-weight: 500; color: #2d3535; background: transparent; border: none;</string>
         </property>
@@ -56,6 +57,7 @@
       </item>
       <item>
        <widget class="QLabel" name="clockLabel">
+        <property name="minimumSize"><size><width>90</width><height>0</height></size></property>
         <property name="text"><string>--:--:--</string></property>
         <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
         <property name="styleSheet">
