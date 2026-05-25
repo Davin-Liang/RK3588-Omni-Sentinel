@@ -5,6 +5,7 @@
 #include "sentinel_streamer.h"
 #include "preview_worker.h"
 
+#include <QCoreApplication>
 #include <QThread>
 #include <QDateTime>
 #include <cstring>
@@ -30,7 +31,7 @@ Widget::Widget(QWidget *parent)
     , streamer_(new SentinelStreamer())
     , previewWorker_(nullptr)
     , previewThread_(nullptr)
-    , config_("config.ini", QSettings::IniFormat)
+    , config_(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
     , frameCount_(0)
     , lastFpsTsUs_(0)
 {
