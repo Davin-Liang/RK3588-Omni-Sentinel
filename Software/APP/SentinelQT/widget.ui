@@ -35,7 +35,7 @@
        <widget class="QLabel" name="hwLabel">
         <property name="minimumSize"><size><width>260</width><height>0</height></size></property>
         <property name="maximumSize"><size><width>260</width><height>16777215</height></size></property>
-        <property name="text"><string>CPU --%  RGA -/-/-%  NPU -/-/-%</string></property>
+        <property name="text"><string>--°C  CPU --%  RGA -/-/-%  NPU -/-/-%</string></property>
         <property name="styleSheet">
          <string notr="true">font-size: 13px; font-weight: 500; color: #2d3535; background: transparent; border: none;</string>
         </property>

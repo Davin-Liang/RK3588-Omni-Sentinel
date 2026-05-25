@@ -324,6 +324,7 @@ void Widget::update_hw_usage_()
     int cpuUsage   = -1;
     int rgaUsage   = -1;
     int npuUsage   = -1;
+    int tempC      = -1;
 
     // ---- CPU ----
     FILE* fp = fopen("/proc/stat", "r");
@@ -369,8 +370,18 @@ void Widget::update_hw_usage_()
         fclose(fp);
     }
 
+    // ---- Temperature ----
+    fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    if (fp) {
+        int raw;
+        if (fscanf(fp, "%d", &raw) == 1) tempC = raw / 1000;
+        fclose(fp);
+    }
+
     // ---- Display ----
     QString text;
+    text += tempC >= 0 ? QString("%1°C").arg(tempC) : "--°C";
+    text += "  ";
     text += cpuUsage >= 0 ? QString("CPU %1%").arg(cpuUsage) : "CPU --%";
     text += "  ";
     text += QString("RGA %1/%2/%3%")
