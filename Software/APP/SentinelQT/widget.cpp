@@ -34,6 +34,7 @@ Widget::Widget(QWidget *parent)
     , config_(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
     , frameCount_(0)
     , lastFpsTsUs_(0)
+    , previewActive_(true)
 {
     instance_ = this;
     ui->setupUi(this);
@@ -49,6 +50,9 @@ Widget::Widget(QWidget *parent)
             this, [this](int idx) {
         config_.setValue("Record/resolution", idx == 1 ? 720 : 1080);
     });
+
+    connect(ui->btnTogglePreview, &QPushButton::clicked,
+            this, &Widget::on_btn_toggle_preview_);
 
     // Button signal-slot connections
     connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
@@ -66,13 +70,8 @@ Widget::Widget(QWidget *parent)
         return;
     }
 
-    // Start preview thread
-    previewWorker_ = new PreviewWorker(visioner_, 0);
-    previewThread_ = new QThread(this);
-    previewWorker_->moveToThread(previewThread_);
-    connect(previewWorker_, &PreviewWorker::frameReady, this, &Widget::on_frame_ready_);
-    connect(previewThread_, &QThread::started, previewWorker_, &PreviewWorker::start);
-    previewThread_->start();
+    // Start preview
+    start_preview_();
 
     set_status_("系统就绪", "#4ecca3");
 }
@@ -84,16 +83,8 @@ Widget::~Widget()
         visioner_->camera_stream_ctrl(0, false);
     }
 
-    // Stop preview worker and wait for thread
-    if (previewWorker_) {
-        previewWorker_->stop();
-    }
-    if (previewThread_ && previewThread_->isRunning()) {
-        previewThread_->quit();
-        previewThread_->wait(3000);
-    }
-    delete previewWorker_;
-    previewWorker_ = nullptr;
+    // Stop preview
+    stop_preview_();
 
     // Cleanup streamer (remove_camera stops all internal threads)
     if (streamer_) {
@@ -125,6 +116,54 @@ bool Widget::init_camera_()
     }
 
     return true;
+}
+
+void Widget::start_preview_()
+{
+    if (previewWorker_) return;  // already running
+
+    previewWorker_ = new PreviewWorker(visioner_, 0);
+    previewThread_ = new QThread(this);
+    previewWorker_->moveToThread(previewThread_);
+    connect(previewWorker_, &PreviewWorker::frameReady, this, &Widget::on_frame_ready_);
+    connect(previewThread_, &QThread::started, previewWorker_, &PreviewWorker::start);
+    previewThread_->start();
+    previewActive_ = true;
+}
+
+void Widget::stop_preview_()
+{
+    if (!previewWorker_) return;  // already stopped
+
+    previewWorker_->stop();
+    if (previewThread_ && previewThread_->isRunning()) {
+        previewThread_->quit();
+        previewThread_->wait(3000);
+    }
+    delete previewWorker_;
+    previewWorker_ = nullptr;
+    delete previewThread_;
+    previewThread_ = nullptr;
+    previewActive_ = false;
+}
+
+void Widget::on_btn_toggle_preview_()
+{
+    if (previewActive_) {
+        stop_preview_();
+        ui->btnTogglePreview->setText("启动预览");
+        ui->btnTogglePreview->setStyleSheet(
+            "font-size: 16px; background-color: #555566; color: #999999; border: none; border-radius: 6px; padding: 0 12px;");
+        ui->previewLabel->setText("预览已关闭");
+        set_status_("预览已关闭", "#888899");
+    } else {
+        start_preview_();
+        ui->btnTogglePreview->setText("关闭预览");
+        ui->btnTogglePreview->setStyleSheet(
+            "font-size: 16px; background-color: #e67e22; color: #ffffff; border: none; border-radius: 6px; padding: 0 12px;");
+        ui->previewLabel->setText("等待相机...");
+        set_status_("预览已开启", "#4ecca3");
+    }
 }
 
 void Widget::on_frame_ready_(const QImage& image)

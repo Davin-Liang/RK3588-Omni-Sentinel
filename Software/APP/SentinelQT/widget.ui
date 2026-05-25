@@ -59,6 +59,15 @@
        <item><property name="text"><string>720p</string></property></item>
       </widget>
      </item>
+     <item>
+      <widget class="QPushButton" name="btnTogglePreview">
+       <property name="text"><string>关闭预览</string></property>
+       <property name="minimumSize"><size><width>0</width><height>44</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 16px; background-color: #e67e22; color: #ffffff; border: none; border-radius: 6px; padding: 0 12px;</string>
+       </property>
+      </widget>
+     </item>
     </layout>
    </item>
    <item>

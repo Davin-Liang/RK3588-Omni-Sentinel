@@ -34,6 +34,7 @@ private slots:
     void on_btn_stop_stream_();
     void on_btn_start_record_();
     void on_btn_stop_record_();
+    void on_btn_toggle_preview_();
 
 private:
     Ui::Widget *ui;
@@ -50,9 +51,12 @@ private:
 
     int frameCount_;
     uint64_t lastFpsTsUs_;
+    bool previewActive_;
 
     static Widget* instance_;
     bool init_camera_();
+    void start_preview_();
+    void stop_preview_();
     void update_button_states_();
     void set_status_(const QString& msg, const QString& color);
 };
