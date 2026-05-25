@@ -28,8 +28,13 @@
    </item>
    <item>
     <widget class="QLabel" name="previewLabel">
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+       <horstretch>0</horstretch><verstretch>1</verstretch>
+      </sizepolicy>
+     </property>
      <property name="minimumSize">
-      <size><width>640</width><height>360</height></size>
+      <size><width>320</width><height>200</height></size>
      </property>
      <property name="alignment"><set>Qt::AlignCenter</set></property>
      <property name="styleSheet">
