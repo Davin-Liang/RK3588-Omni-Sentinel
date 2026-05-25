@@ -176,6 +176,18 @@ bool SentinelVisioner::camera_stream_ctrl(int camNum, bool isOpen) {
     if (isOpen) {
         if (ctx->isStreaming) return true;
 
+        // 0. 重新注册 epoll (STREAMOFF 后驱动可能清除内部事件源)
+        if (ctx->epollFd >= 0 && ctx->camFd >= 0) {
+            epoll_ctl(ctx->epollFd, EPOLL_CTL_DEL, ctx->camFd, nullptr); // ignore error
+            struct epoll_event ev = {};
+            ev.events = EPOLLIN;
+            ev.data.fd = ctx->camFd;
+            if (epoll_ctl(ctx->epollFd, EPOLL_CTL_ADD, ctx->camFd, &ev) < 0) {
+                std::cerr << "epoll_ctl re-add failed: " << strerror(errno) << std::endl;
+                return false;
+            }
+        }
+
         // 1. 重新入队所有缓冲区 (STREAMOFF 后驱动清空了队列)
         for (int i = 0; i < ctx->bufferCount; ++i) {
             struct v4l2_buffer buf = {};
@@ -279,6 +291,16 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                 int currentDmaFd = ctx->buffers[buf.index].dmaFd;
                 // 获取最新一帧图像数据的时间戳
                 uint64_t timestampUs = (uint64_t)buf.timestamp.tv_sec * 1000000LL + buf.timestamp.tv_usec;
+
+                // 暂停模式: 跳过所有 RGA 处理和队列推送，只归还 buffer
+                if (ctx->isPaused.load()) {
+                    if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                        perror("[Thread] VIDIOC_QBUF requeue failed");
+                        ctx->isThreadRunning = false;
+                        break;
+                    }
+                    continue;
+                }
                 
                 /* 从内存池获取空闲的 DMA 块 */
                 DmaBuffer_t* targetNpuBuf = ctx->npuRgbPool->get_buffer();
@@ -358,6 +380,13 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
     }
 
     std::cout << "[Thread] Camera " << camNum << " capture thread exited." << std::endl;
+}
+
+void SentinelVisioner::camera_pause(int camNum, bool paused) {
+    auto it = _cameraContextMap.find(camNum);
+    if (it == _cameraContextMap.end()) return;
+    it->second->isPaused.store(paused);
+    std::cout << "Camera " << camNum << (paused ? " PAUSED." : " RESUMED.") << std::endl;
 }
 
 void SentinelVisioner::release_camera_resources_(CameraContext* ctx) {

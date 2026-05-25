@@ -246,10 +246,8 @@ void Widget::on_btn_record_()
 
 void Widget::on_btn_system_()
 {
-    fprintf(stderr, "[SentinelQT] on_btn_system_ systemRunning=%d previewActive=%d\n",
-            systemRunning_, previewActive_);
     if (systemRunning_) {
-        // Stop everything: recording, streaming, preview, camera
+        // Stop recording and streaming first
         if (streamer_->is_recording(0)) {
             streamer_->stop_record(0);
             recordTimer_->stop();
@@ -261,7 +259,8 @@ void Widget::on_btn_system_()
         if (previewActive_) {
             stop_preview_();
         }
-        visioner_->camera_stream_ctrl(0, false);
+        // Pause RGA processing (hardware stream stays active)
+        visioner_->camera_pause(0, true);
 
         systemRunning_ = false;
         ui->btnStream->setEnabled(false);
@@ -273,10 +272,10 @@ void Widget::on_btn_system_()
         ui->previewLabel->setText("系统已停止");
         set_status_("系统已停止", "#888899");
     } else {
-        // Start camera
-        visioner_->camera_stream_ctrl(0, true);
+        // Resume RGA processing
+        visioner_->camera_pause(0, false);
 
-        // Start preview (use toggle state tracking, not button text)
+        // Start preview
         if (!previewActive_) {
             start_preview_();
             ui->btnTogglePreview->setText("关闭预览");

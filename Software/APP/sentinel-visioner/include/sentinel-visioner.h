@@ -45,6 +45,7 @@ struct CameraContext {
 
     std::unique_ptr<std::thread> captureThread;
     std::atomic<bool> isThreadRunning;
+    std::atomic<bool> isPaused;
 
     std::unique_ptr<DmaBufferPool> npuRgbPool;      ///< NPU RGB888 内存池
     std::unique_ptr<DmaBufferPool> origCopyPool;    ///< 原始大图(NV12) 拷贝池
@@ -53,7 +54,7 @@ struct CameraContext {
     ThreadSafeQueue<NpuPreview> previewTaskQueue;   ///< 供 NPU/预览消费者消费的任务队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; ///< 供推流/录像等后处理消费的原图队列
 
-    CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false) {}
+    CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false), isPaused(false) {}
 };
 
 class SentinelVisioner {
@@ -80,6 +81,13 @@ public:
      * @return: true 操作成功 / false 操作失败
      */
     bool camera_stream_ctrl(int camNum, bool isOpen);
+
+    /**
+     * @brief: 暂停/恢复摄像头的 RGA 处理和队列输出 (硬件流保持，仅跳过处理)
+     * @param: camNum - 摄像头编号
+     * @param: paused - true: 暂停处理; false: 恢复处理
+     */
+    void camera_pause(int camNum, bool paused);
 
     /**
      * @brief: 阻塞等待并获取打包好的 NPU 推理和预览图像数据
