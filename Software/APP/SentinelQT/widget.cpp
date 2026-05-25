@@ -6,10 +6,8 @@
 #include "preview_worker.h"
 
 #include <QCoreApplication>
-#include <QDir>
 #include <QThread>
 #include <QTimer>
-#include <QProcess>
 #include <cstring>
 #include <cstdio>
 
@@ -34,7 +32,6 @@ Widget::Widget(QWidget *parent)
     , previewThread_(nullptr)
     , config_(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
     , recordTimer_(nullptr)
-    , playerProcess_(nullptr)
     , frameCount_(0)
     , lastFpsTsUs_(0)
     , previewActive_(true)
@@ -44,9 +41,6 @@ Widget::Widget(QWidget *parent)
 
     rtspUrl_ = config_.value("Stream/rtspUrl", "rtsp://192.168.1.100:8554/live/cam0").toString();
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
-
-    // Populate file list
-    refresh_file_list_();
 
     // Resolution combo
     int res = config_.value("Record/resolution", 1080).toInt();
@@ -59,12 +53,6 @@ Widget::Widget(QWidget *parent)
     // Button connections
     connect(ui->btnTogglePreview, &QPushButton::clicked,
             this, &Widget::on_btn_toggle_preview_);
-    connect(ui->btnPlayRecord, &QPushButton::clicked,
-            this, &Widget::on_btn_play_record_);
-    connect(ui->btnRefreshFiles, &QPushButton::clicked,
-            this, &Widget::on_btn_refresh_files_);
-    connect(ui->btnStopPlay, &QPushButton::clicked,
-            this, &Widget::on_btn_stop_play_);
     connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
     connect(ui->btnStopStream,  &QPushButton::clicked, this, &Widget::on_btn_stop_stream_);
     connect(ui->btnStartRecord, &QPushButton::clicked, this, &Widget::on_btn_start_record_);
@@ -90,12 +78,6 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
-    if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
-        playerProcess_->terminate();
-        playerProcess_->waitForFinished(3000);
-    }
-    delete playerProcess_;
-
     if (visioner_) {
         visioner_->camera_stream_ctrl(0, false);
     }
@@ -277,102 +259,6 @@ void Widget::update_record_info_()
             .arg(h, 2, 10, QChar('0'))
             .arg(m, 2, 10, QChar('0'))
             .arg(s, 2, 10, QChar('0')));
-}
-
-// ---- Playback ----
-
-void Widget::refresh_file_list_()
-{
-    QString current = ui->fileCombo->currentText();
-    ui->fileCombo->clear();
-
-    QDir dir(recordDir_);
-    QStringList filters;
-    filters << "*.mp4";
-    QStringList files = dir.entryList(filters, QDir::Files, QDir::Time);
-
-    if (files.isEmpty()) {
-        ui->fileCombo->addItem("(无录像文件)");
-        return;
-    }
-
-    ui->fileCombo->addItems(files);
-
-    int idx = ui->fileCombo->findText(current);
-    if (idx >= 0) ui->fileCombo->setCurrentIndex(idx);
-}
-
-void Widget::on_btn_refresh_files_()
-{
-    refresh_file_list_();
-    set_status_("文件列表已刷新", "#888899");
-}
-
-void Widget::on_btn_play_record_()
-{
-    QString selected = ui->fileCombo->currentText();
-    if (selected.isEmpty() || selected.startsWith("(")) {
-        set_status_("请先选择一个录像文件", "#e74c3c");
-        return;
-    }
-
-    QString filePath = recordDir_ + "/" + selected;
-
-    if (streamer_->is_recording(0)) {
-        set_status_("请先停止录像再播放", "#e74c3c");
-        return;
-    }
-
-    if (previewActive_) {
-        stop_preview_();
-        ui->btnTogglePreview->setText("启动预览");
-        ui->btnTogglePreview->setStyleSheet(
-            "font-size: 16px; background-color: #555566; color: #999999;"
-            " border: none; border-radius: 6px; padding: 0 12px;");
-        ui->previewLabel->setText("播放中...");
-    }
-
-    if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
-        playerProcess_->terminate();
-        playerProcess_->waitForFinished(1000);
-    }
-
-    if (!playerProcess_) {
-        playerProcess_ = new QProcess(this);
-        connect(playerProcess_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this](int, QProcess::ExitStatus) {
-            ui->btnStopPlay->setEnabled(false);
-            if (!previewActive_) {
-                start_preview_();
-                ui->btnTogglePreview->setText("关闭预览");
-                ui->btnTogglePreview->setStyleSheet(
-                    "font-size: 16px; background-color: #e67e22; color: #ffffff;"
-                    " border: none; border-radius: 6px; padding: 0 12px;");
-                ui->previewLabel->setText("等待相机...");
-            }
-            set_status_("播放结束", "#888899");
-        });
-    }
-
-    QStringList args;
-    args << "-fs" << "-autoexit" << "-infbuf" << filePath;
-
-    playerProcess_->start("ffplay", args);
-    ui->btnStopPlay->setEnabled(true);
-    set_status_("播放中: " + selected, "#9b59b6");
-}
-
-void Widget::on_btn_stop_play_()
-{
-    if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
-        playerProcess_->terminate();
-        playerProcess_->waitForFinished(2000);
-        if (playerProcess_->state() == QProcess::Running) {
-            playerProcess_->kill();
-            playerProcess_->waitForFinished(1000);
-        }
-    }
-    ui->btnStopPlay->setEnabled(false);
 }
 
 // ---- Streamer events ----

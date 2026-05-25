@@ -12,7 +12,6 @@ class SentinelStreamer;
 class PreviewWorker;
 class QThread;
 class QTimer;
-class QProcess;
 enum class StreamerEvent;
 
 QT_BEGIN_NAMESPACE
@@ -38,9 +37,6 @@ private slots:
     void on_btn_start_record_();
     void on_btn_stop_record_();
     void on_btn_toggle_preview_();
-    void on_btn_play_record_();
-    void on_btn_refresh_files_();
-    void on_btn_stop_play_();
     void update_record_info_();
 
 private:
@@ -60,8 +56,6 @@ private:
     QDateTime recordStartTime_;
     QString currentRecordPath_;
 
-    QProcess* playerProcess_;
-
     int frameCount_;
     uint64_t lastFpsTsUs_;
     bool previewActive_;
@@ -70,7 +64,6 @@ private:
     bool init_camera_();
     void start_preview_();
     void stop_preview_();
-    void refresh_file_list_();
     void update_button_states_();
     void set_status_(const QString& msg, const QString& color);
 };
