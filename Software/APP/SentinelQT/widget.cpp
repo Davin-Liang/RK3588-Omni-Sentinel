@@ -7,13 +7,13 @@
 
 #include <QCoreApplication>
 #include <QThread>
-#include <QDateTime>
+#include <QTimer>
+#include <QProcess>
 #include <cstring>
 #include <cstdio>
 
 Widget* Widget::instance_ = nullptr;
 
-// StreamerCallback runs in streamer's internal thread, cross to main thread via invokeMethod
 static void streamer_callback_(int camNum, StreamerEvent event, const char* detail)
 {
     Widget* w = Widget::instance();
@@ -32,6 +32,8 @@ Widget::Widget(QWidget *parent)
     , previewWorker_(nullptr)
     , previewThread_(nullptr)
     , config_(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
+    , recordTimer_(nullptr)
+    , playerProcess_(nullptr)
     , frameCount_(0)
     , lastFpsTsUs_(0)
     , previewActive_(true)
@@ -39,11 +41,10 @@ Widget::Widget(QWidget *parent)
     instance_ = this;
     ui->setupUi(this);
 
-    // Read config
     rtspUrl_ = config_.value("Stream/rtspUrl", "rtsp://192.168.1.100:8554/live/cam0").toString();
-    recordPath_ = config_.value("Record/filePath", "/mnt/sdcard/record.mp4").toString();
+    recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
 
-    // Init resolution combo from config, save on change
+    // Resolution combo
     int res = config_.value("Record/resolution", 1080).toInt();
     ui->resCombo->setCurrentIndex(res == 720 ? 1 : 0);
     connect(ui->resCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -51,16 +52,20 @@ Widget::Widget(QWidget *parent)
         config_.setValue("Record/resolution", idx == 1 ? 720 : 1080);
     });
 
+    // Button connections
     connect(ui->btnTogglePreview, &QPushButton::clicked,
             this, &Widget::on_btn_toggle_preview_);
-
-    // Button signal-slot connections
+    connect(ui->btnPlayRecord, &QPushButton::clicked,
+            this, &Widget::on_btn_play_record_);
     connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
     connect(ui->btnStopStream,  &QPushButton::clicked, this, &Widget::on_btn_stop_stream_);
     connect(ui->btnStartRecord, &QPushButton::clicked, this, &Widget::on_btn_start_record_);
     connect(ui->btnStopRecord,  &QPushButton::clicked, this, &Widget::on_btn_stop_record_);
 
-    // Initialize camera
+    // Recording elapsed-time timer
+    recordTimer_ = new QTimer(this);
+    connect(recordTimer_, &QTimer::timeout, this, &Widget::update_record_info_);
+
     if (!init_camera_()) {
         set_status_("相机初始化失败!", "#e74c3c");
         ui->btnStartStream->setEnabled(false);
@@ -70,7 +75,6 @@ Widget::Widget(QWidget *parent)
         return;
     }
 
-    // Start preview
     start_preview_();
 
     set_status_("系统就绪", "#4ecca3");
@@ -78,15 +82,18 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
-    // Stop camera first: capture thread stops, no more frames to queue
+    if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
+        playerProcess_->terminate();
+        playerProcess_->waitForFinished(3000);
+    }
+    delete playerProcess_;
+
     if (visioner_) {
         visioner_->camera_stream_ctrl(0, false);
     }
 
-    // Stop preview
     stop_preview_();
 
-    // Cleanup streamer (remove_camera stops all internal threads)
     if (streamer_) {
         streamer_->remove_camera(0);
     }
@@ -118,9 +125,11 @@ bool Widget::init_camera_()
     return true;
 }
 
+// ---- Preview ----
+
 void Widget::start_preview_()
 {
-    if (previewWorker_) return;  // already running
+    if (previewWorker_) return;
 
     previewWorker_ = new PreviewWorker(visioner_, 0);
     previewThread_ = new QThread(this);
@@ -133,7 +142,7 @@ void Widget::start_preview_()
 
 void Widget::stop_preview_()
 {
-    if (!previewWorker_) return;  // already stopped
+    if (!previewWorker_) return;
 
     previewWorker_->stop();
     if (previewThread_ && previewThread_->isRunning()) {
@@ -153,22 +162,25 @@ void Widget::on_btn_toggle_preview_()
         stop_preview_();
         ui->btnTogglePreview->setText("启动预览");
         ui->btnTogglePreview->setStyleSheet(
-            "font-size: 16px; background-color: #555566; color: #999999; border: none; border-radius: 6px; padding: 0 12px;");
+            "font-size: 16px; background-color: #555566; color: #999999;"
+            " border: none; border-radius: 6px; padding: 0 12px;");
         ui->previewLabel->setText("预览已关闭");
         set_status_("预览已关闭", "#888899");
     } else {
         start_preview_();
         ui->btnTogglePreview->setText("关闭预览");
         ui->btnTogglePreview->setStyleSheet(
-            "font-size: 16px; background-color: #e67e22; color: #ffffff; border: none; border-radius: 6px; padding: 0 12px;");
+            "font-size: 16px; background-color: #e67e22; color: #ffffff;"
+            " border: none; border-radius: 6px; padding: 0 12px;");
         ui->previewLabel->setText("等待相机...");
         set_status_("预览已开启", "#4ecca3");
     }
 }
 
+// ---- Frame display ----
+
 void Widget::on_frame_ready_(const QImage& image)
 {
-    // FPS counter
     frameCount_++;
     if (frameCount_ % 30 == 0) {
         struct timespec ts;
@@ -181,13 +193,14 @@ void Widget::on_frame_ready_(const QImage& image)
         lastFpsTsUs_ = nowUs;
     }
 
-    // Scale and display
     ui->previewLabel->setPixmap(
         QPixmap::fromImage(image).scaled(
             ui->previewLabel->size(),
             Qt::KeepAspectRatio,
             Qt::SmoothTransformation));
 }
+
+// ---- Stream ----
 
 void Widget::on_btn_start_stream_()
 {
@@ -208,15 +221,24 @@ void Widget::on_btn_stop_stream_()
     }
 }
 
+// ---- Record ----
+
 void Widget::on_btn_start_record_()
 {
     RecordResolution recordRes = (ui->resCombo->currentIndex() == 1)
         ? RecordResolution::RES_720P
         : RecordResolution::RES_1080P;
 
-    QByteArray path = recordPath_.toUtf8();
+    QString resText = (recordRes == RecordResolution::RES_720P) ? "720p" : "1080p";
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    currentRecordPath_ = recordDir_ + "/record_" + timestamp + ".mp4";
+
+    QByteArray path = currentRecordPath_.toUtf8();
     if (streamer_->start_record(0, path.constData(), recordRes)) {
-        set_status_("录像中: " + recordPath_, "#4ecca3");
+        recordStartTime_ = QDateTime::currentDateTime();
+        recordTimer_->start(1000);
+        update_record_info_();
+        set_status_("录像中: " + currentRecordPath_, "#4ecca3");
         update_button_states_();
     } else {
         set_status_("录像启动失败!", "#e74c3c");
@@ -226,10 +248,55 @@ void Widget::on_btn_start_record_()
 void Widget::on_btn_stop_record_()
 {
     if (streamer_->stop_record(0)) {
-        set_status_("录像已停止", "#888899");
+        recordTimer_->stop();
+        ui->recordInfoLabel->clear();
+        set_status_("录像已停止: " + currentRecordPath_, "#888899");
         update_button_states_();
     }
 }
+
+void Widget::update_record_info_()
+{
+    qint64 elapsed = recordStartTime_.secsTo(QDateTime::currentDateTime());
+    int h = elapsed / 3600;
+    int m = (elapsed % 3600) / 60;
+    int s = elapsed % 60;
+
+    QString resText = (ui->resCombo->currentIndex() == 1) ? "720p" : "1080p";
+    ui->recordInfoLabel->setText(
+        QString("● REC  %1  %2:%3:%4")
+            .arg(resText)
+            .arg(h, 2, 10, QChar('0'))
+            .arg(m, 2, 10, QChar('0'))
+            .arg(s, 2, 10, QChar('0')));
+}
+
+// ---- Playback ----
+
+void Widget::on_btn_play_record_()
+{
+    if (currentRecordPath_.isEmpty()) {
+        set_status_("没有可播放的录像文件", "#e74c3c");
+        return;
+    }
+
+    if (playerProcess_ && playerProcess_->state() == QProcess::Running) {
+        playerProcess_->terminate();
+        playerProcess_->waitForFinished(1000);
+    }
+
+    if (!playerProcess_) {
+        playerProcess_ = new QProcess(this);
+    }
+
+    QStringList args;
+    args << "-fs" << "-autoexit" << currentRecordPath_;
+
+    playerProcess_->start("ffplay", args);
+    set_status_("播放中: " + currentRecordPath_, "#9b59b6");
+}
+
+// ---- Streamer events ----
 
 void Widget::on_streamer_event(int /*camNum*/, StreamerEvent event, const QString& detail)
 {
@@ -254,6 +321,8 @@ void Widget::on_streamer_event(int /*camNum*/, StreamerEvent event, const QStrin
     }
 }
 
+// ---- Button states ----
+
 void Widget::update_button_states_()
 {
     bool streaming = streamer_->is_streaming(0);
@@ -264,7 +333,6 @@ void Widget::update_button_states_()
     ui->btnStartRecord->setEnabled(!recording);
     ui->btnStopRecord->setEnabled(recording);
 
-    // Update button styles to match state
     ui->btnStartStream->setStyleSheet(streaming
         ? "font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;"
         : "font-size: 18px; background-color: #00d2ff; color: #1a1a2e; border: none; border-radius: 8px;");

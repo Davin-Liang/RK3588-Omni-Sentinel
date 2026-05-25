@@ -4,12 +4,15 @@
 #include <QWidget>
 #include <QImage>
 #include <QSettings>
+#include <QDateTime>
 #include <memory>
 
 class SentinelVisioner;
 class SentinelStreamer;
 class PreviewWorker;
 class QThread;
+class QTimer;
+class QProcess;
 enum class StreamerEvent;
 
 QT_BEGIN_NAMESPACE
@@ -35,6 +38,8 @@ private slots:
     void on_btn_start_record_();
     void on_btn_stop_record_();
     void on_btn_toggle_preview_();
+    void on_btn_play_record_();
+    void update_record_info_();
 
 private:
     Ui::Widget *ui;
@@ -47,7 +52,13 @@ private:
     QSettings config_;
 
     QString rtspUrl_;
-    QString recordPath_;
+    QString recordDir_;
+
+    QTimer* recordTimer_;
+    QDateTime recordStartTime_;
+    QString currentRecordPath_;
+
+    QProcess* playerProcess_;
 
     int frameCount_;
     uint64_t lastFpsTsUs_;
