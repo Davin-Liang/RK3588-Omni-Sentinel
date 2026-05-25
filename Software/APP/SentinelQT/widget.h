@@ -37,6 +37,7 @@ private slots:
     void on_btn_system_();
     void on_btn_toggle_preview_();
     void update_clock_();
+    void update_cpu_();
     void update_record_info_();
 
 private:
@@ -60,6 +61,8 @@ private:
     int frameCount_;
     uint64_t lastFpsTsUs_;
     bool previewActive_;
+    uint64_t prevCpuTotal_;
+    uint64_t prevCpuIdle_;
     bool systemRunning_;
 
     static Widget* instance_;

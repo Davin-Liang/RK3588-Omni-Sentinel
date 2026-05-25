@@ -36,6 +36,8 @@ Widget::Widget(QWidget *parent)
     , frameCount_(0)
     , lastFpsTsUs_(0)
     , previewActive_(true)
+    , prevCpuTotal_(0)
+    , prevCpuIdle_(0)
     , systemRunning_(true)
 {
     instance_ = this;
@@ -62,8 +64,10 @@ Widget::Widget(QWidget *parent)
     // Clock timer
     clockTimer_ = new QTimer(this);
     connect(clockTimer_, &QTimer::timeout, this, &Widget::update_clock_);
+    connect(clockTimer_, &QTimer::timeout, this, &Widget::update_cpu_);
     clockTimer_->start(1000);
     update_clock_();
+    update_cpu_();
 
     // Recording elapsed-time timer
     recordTimer_ = new QTimer(this);
@@ -313,6 +317,30 @@ void Widget::on_btn_system_()
 void Widget::update_clock_()
 {
     ui->clockLabel->setText(QDateTime::currentDateTime().toString("HH:mm:ss"));
+}
+
+void Widget::update_cpu_()
+{
+    FILE* fp = fopen("/proc/stat", "r");
+    if (!fp) return;
+
+    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+    int n = fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+    fclose(fp);
+    if (n < 4) return;
+
+    uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
+    uint64_t totalDelta = total - prevCpuTotal_;
+    uint64_t idleDelta  = idle  - prevCpuIdle_;
+
+    if (prevCpuTotal_ > 0 && totalDelta > 0) {
+        int usage = (int)(100 - (idleDelta * 100 / totalDelta));
+        ui->cpuLabel->setText(QString("CPU %1%").arg(usage));
+    }
+
+    prevCpuTotal_ = total;
+    prevCpuIdle_  = idle;
 }
 
 void Widget::update_record_info_()
