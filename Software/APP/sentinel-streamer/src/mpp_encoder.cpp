@@ -47,7 +47,7 @@ bool mpp_encoder_open(AVCodecContext** outCtx, int width, int height, int bitRat
     ctx->width     = width;
     ctx->height    = height;
     ctx->time_base = AVRational{1, 90000};
-    ctx->framerate = AVRational{15, 1};
+    ctx->framerate = AVRational{30, 1};
     ctx->gop_size  = 15;
     ctx->bit_rate  = bitRate;
     ctx->max_b_frames = 0;
