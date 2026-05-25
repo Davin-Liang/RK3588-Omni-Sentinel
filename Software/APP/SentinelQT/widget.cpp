@@ -6,10 +6,16 @@
 #include "preview_worker.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QThread>
 #include <QTimer>
+#include <QMessageBox>
 #include <cstring>
 #include <cstdio>
+
+extern "C" {
+#include <libavformat/avformat.h>
+}
 
 Widget* Widget::instance_ = nullptr;
 
@@ -57,6 +63,12 @@ Widget::Widget(QWidget *parent)
     // Button connections
     connect(ui->btnTogglePreview, &QPushButton::clicked,
             this, &Widget::on_btn_toggle_preview_);
+    connect(ui->btnVideos, &QPushButton::clicked,
+            this, &Widget::on_btn_videos_);
+    connect(ui->btnBackToMain, &QPushButton::clicked,
+            this, &Widget::on_btn_back_);
+    connect(ui->btnRefreshVideos, &QPushButton::clicked,
+            this, &Widget::on_btn_refresh_videos_);
     connect(ui->btnStream, &QPushButton::clicked, this, &Widget::on_btn_stream_);
     connect(ui->btnRecord, &QPushButton::clicked, this, &Widget::on_btn_record_);
     connect(ui->btnSystem, &QPushButton::clicked, this, &Widget::on_btn_system_);
@@ -476,6 +488,111 @@ void Widget::update_button_states_()
             " QPushButton:hover { background-color: #388bfd; }"
             " QPushButton:pressed { background-color: #1158c7; }");
     }
+}
+
+// ---- Video Management ----
+
+void Widget::on_btn_videos_()
+{
+    scan_videos_();
+    ui->stackedWidget->setCurrentIndex(1);
+}
+
+void Widget::on_btn_back_()
+{
+    ui->stackedWidget->setCurrentIndex(0);
+}
+
+void Widget::on_btn_refresh_videos_()
+{
+    scan_videos_();
+    ui->videoStatusLabel->setText("列表已刷新");
+}
+
+static QString format_duration_(int64_t durationUs)
+{
+    if (durationUs <= 0) return "--:--";
+    int64_t totalSec = durationUs / 1000000;
+    int h = totalSec / 3600;
+    int m = (totalSec % 3600) / 60;
+    int s = totalSec % 60;
+    if (h > 0)
+        return QString("%1:%2:%3").arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
+    return QString("%1:%2").arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
+}
+
+void Widget::scan_videos_()
+{
+    QTableWidget* table = ui->videoTable;
+    table->setRowCount(0);
+
+    QDir dir(recordDir_);
+    QStringList files = dir.entryList({"*.mp4"}, QDir::Files, QDir::Time);
+
+    if (files.isEmpty()) {
+        ui->videoStatusLabel->setText("没有录像文件");
+        return;
+    }
+
+    table->setRowCount(files.size());
+
+    for (int row = 0; row < files.size(); ++row) {
+        QString filePath = recordDir_ + "/" + files[row];
+
+        // Filename
+        QTableWidgetItem* nameItem = new QTableWidgetItem(files[row]);
+        table->setItem(row, 0, nameItem);
+
+        // Read metadata via libavformat
+        QString resText = "--";
+        QString durText = "--:--";
+
+        AVFormatContext* ctx = avformat_alloc_context();
+        if (ctx && avformat_open_input(&ctx, filePath.toUtf8().constData(), nullptr, nullptr) == 0) {
+            avformat_find_stream_info(ctx, nullptr);
+            int vs = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+            if (vs >= 0) {
+                int w = ctx->streams[vs]->codecpar->width;
+                int h = ctx->streams[vs]->codecpar->height;
+                resText = QString("%1×%2").arg(w).arg(h);
+            }
+            durText = format_duration_(ctx->duration);
+            avformat_close_input(&ctx);
+        }
+
+        QTableWidgetItem* resItem = new QTableWidgetItem(resText);
+        resItem->setTextAlignment(Qt::AlignCenter);
+        table->setItem(row, 1, resItem);
+
+        QTableWidgetItem* durItem = new QTableWidgetItem(durText);
+        durItem->setTextAlignment(Qt::AlignCenter);
+        table->setItem(row, 2, durItem);
+
+        // Delete button
+        QPushButton* delBtn = new QPushButton("删除");
+        delBtn->setStyleSheet(
+            "font-size: 13px; color: #2d3535; background-color: #F5F0D7;"
+            " border: 1px solid #f85149; border-radius: 4px; padding: 2px 12px;");
+        connect(delBtn, &QPushButton::clicked, this, [this, filePath, row]() {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this, "确认删除",
+                "确定要删除这个录像文件吗？\n" + filePath,
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply == QMessageBox::Yes) {
+                QFile::remove(filePath);
+                scan_videos_();
+                ui->videoStatusLabel->setText("已删除");
+            }
+        });
+        table->setCellWidget(row, 3, delBtn);
+    }
+
+    table->resizeColumnsToContents();
+    // Stretch filename column
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+
+    ui->videoStatusLabel->setText(
+        QString("共 %1 个录像文件").arg(files.size()));
 }
 
 void Widget::set_status_(const QString& msg, const QString& color)
