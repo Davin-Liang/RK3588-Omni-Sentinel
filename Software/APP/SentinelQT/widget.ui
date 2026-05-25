@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Widget</class>
+ <widget class="QWidget" name="Widget">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>1024</width><height>600</height></rect>
+  </property>
+  <property name="windowTitle">
+   <string>Omni Sentinel</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">background-color: #1a1a2e; color: #e0e0e0;</string>
+  </property>
+  <layout class="QVBoxLayout" name="rootLayout">
+   <property name="spacing"><number>8</number></property>
+   <property name="leftMargin"><number>12</number></property>
+   <property name="topMargin"><number>12</number></property>
+   <property name="rightMargin"><number>12</number></property>
+   <property name="bottomMargin"><number>12</number></property>
+   <item>
+    <widget class="QLabel" name="previewLabel">
+     <property name="minimumSize">
+      <size><width>640</width><height>360</height></size>
+     </property>
+     <property name="alignment"><set>Qt::AlignCenter</set></property>
+     <property name="styleSheet">
+      <string notr="true">background-color: #000000; border: 2px solid #333355; border-radius: 6px;</string>
+     </property>
+     <property name="text"><string>等待相机...</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="fpsLabel">
+     <property name="text"><string>FPS: -- | 1920x1080</string></property>
+     <property name="alignment"><set>Qt::AlignCenter</set></property>
+     <property name="styleSheet">
+      <string notr="true">font-size: 16px; color: #888899; padding: 4px;</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="btnLayout">
+     <property name="spacing"><number>12</number></property>
+     <item>
+      <widget class="QPushButton" name="btnStartStream">
+       <property name="text"><string>启动推流</string></property>
+       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 18px; background-color: #00d2ff; color: #1a1a2e; border: none; border-radius: 8px;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnStopStream">
+       <property name="text"><string>停止推流</string></property>
+       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="enabled"><bool>false</bool></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnStartRecord">
+       <property name="text"><string>启动录像</string></property>
+       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btnStopRecord">
+       <property name="text"><string>停止录像</string></property>
+       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
+       <property name="enabled"><bool>false</bool></property>
+       <property name="styleSheet">
+        <string notr="true">font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="statusLabel">
+     <property name="text"><string>系统就绪</string></property>
+     <property name="alignment"><set>Qt::AlignCenter</set></property>
+     <property name="styleSheet">
+      <string notr="true">font-size: 14px; color: #4ecca3; padding: 6px;</string>
+     </property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
