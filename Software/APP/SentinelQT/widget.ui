@@ -88,7 +88,7 @@
     <layout class="QHBoxLayout" name="btnLayout">
      <property name="spacing"><number>12</number></property>
      <item>
-      <widget class="QPushButton" name="btnStartStream">
+      <widget class="QPushButton" name="btnStream">
        <property name="text"><string>启动推流</string></property>
        <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
        <property name="styleSheet">
@@ -97,31 +97,11 @@
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="btnStopStream">
-       <property name="text"><string>停止推流</string></property>
-       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
-       <property name="enabled"><bool>false</bool></property>
-       <property name="styleSheet">
-        <string notr="true">font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="btnStartRecord">
+      <widget class="QPushButton" name="btnRecord">
        <property name="text"><string>启动录像</string></property>
        <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
        <property name="styleSheet">
         <string notr="true">font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="btnStopRecord">
-       <property name="text"><string>停止录像</string></property>
-       <property name="minimumSize"><size><width>0</width><height>56</height></size></property>
-       <property name="enabled"><bool>false</bool></property>
-       <property name="styleSheet">
-        <string notr="true">font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;</string>
        </property>
       </widget>
      </item>

@@ -32,10 +32,8 @@ public:
 
 private slots:
     void on_frame_ready_(const QImage& image);
-    void on_btn_start_stream_();
-    void on_btn_stop_stream_();
-    void on_btn_start_record_();
-    void on_btn_stop_record_();
+    void on_btn_stream_();
+    void on_btn_record_();
     void on_btn_toggle_preview_();
     void update_record_info_();
 

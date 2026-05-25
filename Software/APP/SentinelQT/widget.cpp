@@ -53,10 +53,8 @@ Widget::Widget(QWidget *parent)
     // Button connections
     connect(ui->btnTogglePreview, &QPushButton::clicked,
             this, &Widget::on_btn_toggle_preview_);
-    connect(ui->btnStartStream, &QPushButton::clicked, this, &Widget::on_btn_start_stream_);
-    connect(ui->btnStopStream,  &QPushButton::clicked, this, &Widget::on_btn_stop_stream_);
-    connect(ui->btnStartRecord, &QPushButton::clicked, this, &Widget::on_btn_start_record_);
-    connect(ui->btnStopRecord,  &QPushButton::clicked, this, &Widget::on_btn_stop_record_);
+    connect(ui->btnStream, &QPushButton::clicked, this, &Widget::on_btn_stream_);
+    connect(ui->btnRecord, &QPushButton::clicked, this, &Widget::on_btn_record_);
 
     // Recording elapsed-time timer
     recordTimer_ = new QTimer(this);
@@ -64,10 +62,8 @@ Widget::Widget(QWidget *parent)
 
     if (!init_camera_()) {
         set_status_("相机初始化失败!", "#e74c3c");
-        ui->btnStartStream->setEnabled(false);
-        ui->btnStopStream->setEnabled(false);
-        ui->btnStartRecord->setEnabled(false);
-        ui->btnStopRecord->setEnabled(false);
+        ui->btnStream->setEnabled(false);
+        ui->btnRecord->setEnabled(false);
         return;
     }
 
@@ -192,56 +188,53 @@ void Widget::on_frame_ready_(const QImage& image)
 
 // ---- Stream ----
 
-void Widget::on_btn_start_stream_()
+void Widget::on_btn_stream_()
 {
-    QByteArray url = rtspUrl_.toUtf8();
-    if (streamer_->start_stream(0, url.constData())) {
-        set_status_("推流中: " + rtspUrl_, "#00d2ff");
-        update_button_states_();
+    if (streamer_->is_streaming(0)) {
+        if (streamer_->stop_stream(0)) {
+            set_status_("推流已停止", "#888899");
+            update_button_states_();
+        }
     } else {
-        set_status_("推流启动失败!", "#e74c3c");
-    }
-}
-
-void Widget::on_btn_stop_stream_()
-{
-    if (streamer_->stop_stream(0)) {
-        set_status_("推流已停止", "#888899");
-        update_button_states_();
+        QByteArray url = rtspUrl_.toUtf8();
+        if (streamer_->start_stream(0, url.constData())) {
+            set_status_("推流中: " + rtspUrl_, "#00d2ff");
+            update_button_states_();
+        } else {
+            set_status_("推流启动失败!", "#e74c3c");
+        }
     }
 }
 
 // ---- Record ----
 
-void Widget::on_btn_start_record_()
+void Widget::on_btn_record_()
 {
-    RecordResolution recordRes = (ui->resCombo->currentIndex() == 1)
-        ? RecordResolution::RES_720P
-        : RecordResolution::RES_1080P;
-
-    QString resText = (recordRes == RecordResolution::RES_720P) ? "720p" : "1080p";
-    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-    currentRecordPath_ = recordDir_ + "/record_" + timestamp + ".mp4";
-
-    QByteArray path = currentRecordPath_.toUtf8();
-    if (streamer_->start_record(0, path.constData(), recordRes)) {
-        recordStartTime_ = QDateTime::currentDateTime();
-        recordTimer_->start(1000);
-        update_record_info_();
-        set_status_("录像中: " + currentRecordPath_, "#4ecca3");
-        update_button_states_();
+    if (streamer_->is_recording(0)) {
+        if (streamer_->stop_record(0)) {
+            recordTimer_->stop();
+            ui->recordInfoLabel->clear();
+            set_status_("录像已停止: " + currentRecordPath_, "#888899");
+            update_button_states_();
+        }
     } else {
-        set_status_("录像启动失败!", "#e74c3c");
-    }
-}
+        RecordResolution recordRes = (ui->resCombo->currentIndex() == 1)
+            ? RecordResolution::RES_720P
+            : RecordResolution::RES_1080P;
 
-void Widget::on_btn_stop_record_()
-{
-    if (streamer_->stop_record(0)) {
-        recordTimer_->stop();
-        ui->recordInfoLabel->clear();
-        set_status_("录像已停止: " + currentRecordPath_, "#888899");
-        update_button_states_();
+        QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+        currentRecordPath_ = recordDir_ + "/record_" + timestamp + ".mp4";
+
+        QByteArray path = currentRecordPath_.toUtf8();
+        if (streamer_->start_record(0, path.constData(), recordRes)) {
+            recordStartTime_ = QDateTime::currentDateTime();
+            recordTimer_->start(1000);
+            update_record_info_();
+            set_status_("录像中: " + currentRecordPath_, "#4ecca3");
+            update_button_states_();
+        } else {
+            set_status_("录像启动失败!", "#e74c3c");
+        }
     }
 }
 
@@ -293,23 +286,25 @@ void Widget::update_button_states_()
     bool streaming = streamer_->is_streaming(0);
     bool recording = streamer_->is_recording(0);
 
-    ui->btnStartStream->setEnabled(!streaming);
-    ui->btnStopStream->setEnabled(streaming);
-    ui->btnStartRecord->setEnabled(!recording);
-    ui->btnStopRecord->setEnabled(recording);
+    if (streaming) {
+        ui->btnStream->setText("停止推流");
+        ui->btnStream->setStyleSheet(
+            "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;");
+    } else {
+        ui->btnStream->setText("启动推流");
+        ui->btnStream->setStyleSheet(
+            "font-size: 18px; background-color: #00d2ff; color: #1a1a2e; border: none; border-radius: 8px;");
+    }
 
-    ui->btnStartStream->setStyleSheet(streaming
-        ? "font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;"
-        : "font-size: 18px; background-color: #00d2ff; color: #1a1a2e; border: none; border-radius: 8px;");
-    ui->btnStopStream->setStyleSheet(streaming
-        ? "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;"
-        : "font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;");
-    ui->btnStartRecord->setStyleSheet(recording
-        ? "font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;"
-        : "font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;");
-    ui->btnStopRecord->setStyleSheet(recording
-        ? "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;"
-        : "font-size: 18px; background-color: #555566; color: #999999; border: none; border-radius: 8px;");
+    if (recording) {
+        ui->btnRecord->setText("停止录像");
+        ui->btnRecord->setStyleSheet(
+            "font-size: 18px; background-color: #e74c3c; color: #ffffff; border: none; border-radius: 8px;");
+    } else {
+        ui->btnRecord->setText("启动录像");
+        ui->btnRecord->setStyleSheet(
+            "font-size: 18px; background-color: #4ecca3; color: #1a1a2e; border: none; border-radius: 8px;");
+    }
 }
 
 void Widget::set_status_(const QString& msg, const QString& color)
