@@ -152,7 +152,7 @@ void Widget::on_btn_toggle_preview_()
         stop_preview_();
         ui->btnTogglePreview->setText("启动预览");
         ui->btnTogglePreview->setStyleSheet(
-            "font-size: 13px; color: #3fb950; background-color: #0d1117;"
+            "font-size: 13px; color: #1a7a2e; background-color: #F5F0D7;"
             " border: 1px solid #3fb950; border-radius: 6px; padding: 0 16px;");
         ui->previewLabel->setText("预览已关闭");
         set_status_("预览已关闭", "#8b949e");
@@ -160,7 +160,7 @@ void Widget::on_btn_toggle_preview_()
         start_preview_();
         ui->btnTogglePreview->setText("关闭预览");
         ui->btnTogglePreview->setStyleSheet(
-            "font-size: 13px; color: #d29922; background-color: #0d1117;"
+            "font-size: 13px; color: #b08800; background-color: #F5F0D7;"
             " border: 1px solid #d29922; border-radius: 6px; padding: 0 16px;");
         ui->previewLabel->setText("等待相机...");
         set_status_("预览已开启", "#58a6ff");
@@ -283,7 +283,7 @@ void Widget::on_btn_system_()
             start_preview_();
             ui->btnTogglePreview->setText("关闭预览");
             ui->btnTogglePreview->setStyleSheet(
-                "font-size: 13px; color: #d29922; background-color: #0d1117;"
+                "font-size: 13px; color: #b08800; background-color: #F5F0D7;"
                 " border: 1px solid #d29922; border-radius: 6px; padding: 0 16px;");
         }
 
