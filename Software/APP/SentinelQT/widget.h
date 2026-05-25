@@ -36,6 +36,7 @@ private slots:
     void on_btn_record_();
     void on_btn_system_();
     void on_btn_toggle_preview_();
+    void update_clock_();
     void update_record_info_();
 
 private:
@@ -51,6 +52,7 @@ private:
     QString rtspUrl_;
     QString recordDir_;
 
+    QTimer* clockTimer_;
     QTimer* recordTimer_;
     QDateTime recordStartTime_;
     QString currentRecordPath_;

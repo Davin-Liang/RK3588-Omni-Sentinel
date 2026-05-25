@@ -31,6 +31,7 @@ Widget::Widget(QWidget *parent)
     , previewWorker_(nullptr)
     , previewThread_(nullptr)
     , config_(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
+    , clockTimer_(nullptr)
     , recordTimer_(nullptr)
     , frameCount_(0)
     , lastFpsTsUs_(0)
@@ -57,6 +58,12 @@ Widget::Widget(QWidget *parent)
     connect(ui->btnStream, &QPushButton::clicked, this, &Widget::on_btn_stream_);
     connect(ui->btnRecord, &QPushButton::clicked, this, &Widget::on_btn_record_);
     connect(ui->btnSystem, &QPushButton::clicked, this, &Widget::on_btn_system_);
+
+    // Clock timer
+    clockTimer_ = new QTimer(this);
+    connect(clockTimer_, &QTimer::timeout, this, &Widget::update_clock_);
+    clockTimer_->start(1000);
+    update_clock_();
 
     // Recording elapsed-time timer
     recordTimer_ = new QTimer(this);
@@ -155,7 +162,7 @@ void Widget::on_btn_toggle_preview_()
             "font-size: 13px; color: #1a7a2e; background-color: #F5F0D7;"
             " border: 1px solid #3fb950; border-radius: 6px; padding: 0 16px;");
         ui->previewLabel->setText("预览已关闭");
-        set_status_("预览已关闭", "#8b949e");
+        set_status_("预览已关闭", "#ffffff");
     } else {
         start_preview_();
         ui->btnTogglePreview->setText("关闭预览");
@@ -196,7 +203,7 @@ void Widget::on_btn_stream_()
 {
     if (streamer_->is_streaming(0)) {
         if (streamer_->stop_stream(0)) {
-            set_status_("推流已停止", "#8b949e");
+            set_status_("推流已停止", "#ffffff");
             update_button_states_();
         }
     } else {
@@ -218,7 +225,7 @@ void Widget::on_btn_record_()
         if (streamer_->stop_record(0)) {
             recordTimer_->stop();
             ui->recordInfoLabel->clear();
-            set_status_("录像已停止: " + currentRecordPath_, "#8b949e");
+            set_status_("录像已停止: " + currentRecordPath_, "#ffffff");
             update_button_states_();
         }
     } else {
@@ -273,7 +280,7 @@ void Widget::on_btn_system_()
             " QPushButton:hover { background-color: #2ea043; }"
             " QPushButton:pressed { background-color: #196c2e; }");
         ui->previewLabel->setText("系统已停止");
-        set_status_("系统已停止", "#8b949e");
+        set_status_("系统已停止", "#ffffff");
     } else {
         // Resume RGA processing
         visioner_->camera_pause(0, false);
@@ -303,6 +310,11 @@ void Widget::on_btn_system_()
     }
 }
 
+void Widget::update_clock_()
+{
+    ui->clockLabel->setText(QDateTime::currentDateTime().toString("HH:mm:ss"));
+}
+
 void Widget::update_record_info_()
 {
     qint64 elapsed = recordStartTime_.secsTo(QDateTime::currentDateTime());
@@ -328,14 +340,14 @@ void Widget::on_streamer_event(int /*camNum*/, StreamerEvent event, const QStrin
         set_status_("推流中: " + detail, "#58a6ff");
         break;
     case StreamerEvent::STREAM_STOPPED:
-        set_status_("推流已停止", "#8b949e");
+        set_status_("推流已停止", "#ffffff");
         update_button_states_();
         break;
     case StreamerEvent::RECORD_STARTED:
         set_status_("录像中: " + detail, "#3fb950");
         break;
     case StreamerEvent::RECORD_STOPPED:
-        set_status_("录像已停止", "#8b949e");
+        set_status_("录像已停止", "#ffffff");
         update_button_states_();
         break;
     case StreamerEvent::ERROR:
