@@ -41,6 +41,7 @@ struct StreamerContext {
     std::atomic<bool> threadRunning{false};
     bool streamEnabled;
     bool recordEnabled;
+    uint64_t baselineTsUs;  // 录制/推流开始时的系统时间，PTS 以此为基准
     StreamOsdMode osdMode;
 
     // 录像参数
@@ -71,6 +72,7 @@ struct StreamerContext {
         , threadRunning(false)
         , streamEnabled(false)
         , recordEnabled(false)
+        , baselineTsUs(0)
         , osdMode(StreamOsdMode::WITHOUT_OSD)
         , recordResolution(RecordResolution::RES_1080P)
         , scale720pPool(nullptr)
@@ -91,9 +93,11 @@ static void stream_thread_func_(StreamerContext* ctx)
 {
     fprintf(stderr, "[SentinelStreamer] cam=%d stream thread started\n", ctx->camNum);
 
-    uint64_t firstTsUs = 0;  // 首帧时间戳，所有后续帧减它做 PTS 归零
+    uint64_t firstTsUs = ctx->baselineTsUs;
     uint64_t lastLogTs = 0;
     int frameCount = 0;
+
+    fprintf(stderr, "[SentinelStreamer] baselineTsUs=%llu\n", (unsigned long long)firstTsUs);
 
     while (ctx->threadRunning.load(std::memory_order_acquire)) {
         // 步骤 1: 获取原始 1080p NV12 帧
@@ -101,19 +105,15 @@ static void stream_thread_func_(StreamerContext* ctx)
         if (!origBuf) continue;
 
         uint64_t tsUs = origBuf->timestampUs;
-        if (firstTsUs == 0) {
-            firstTsUs = tsUs;
-            fprintf(stderr, "[SentinelStreamer] firstTsUs=%llu\n", (unsigned long long)firstTsUs);
+
+        // 跳过队列中积压的旧帧（时间戳在录制开始之前）
+        if (tsUs < firstTsUs) {
+            ctx->visioner->release_orig_copy_buffer(ctx->camNum, origBuf);
+            continue;
         }
 
-        // 真实时间戳 → MPEG 时基 (90000)，减首帧偏移归零
+        // 真实时间戳 → MPEG 时基 (90000)，减基准偏移归零
         int64_t pts = static_cast<int64_t>(tsUs - firstTsUs) * 90000 / 1000000;
-
-        if (frameCount < 5 || frameCount % 30 == 0) {
-            fprintf(stderr, "[SentinelStreamer] frame=%d tsUs=%llu delta=%llu pts=%lld\n",
-                    frameCount, (unsigned long long)tsUs,
-                    (unsigned long long)(tsUs - firstTsUs), (long long)pts);
-        }
 
         // ----------------------------------------------------------------
         // 步骤 2: RGA 缩放 1080p → 720p (推流和/或 720p 录像共用)
@@ -345,6 +345,9 @@ bool SentinelStreamer::start_stream(int camNum, const char* rtspUrl)
     ctx->streamEnabled = true;
 
     if (!ctx->threadRunning.load(std::memory_order_acquire)) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ctx->baselineTsUs = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
         ctx->threadRunning.store(true, std::memory_order_release);
         ctx->workerThread = std::thread(stream_thread_func_, ctx);
     }
@@ -485,6 +488,11 @@ bool SentinelStreamer::start_record(int camNum, const char* filePath,
     }
 
     ctx->recordEnabled = true;
+
+    // 每次开始录像时更新基准时间戳，确保新文件 PTS 从 0 开始
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ctx->baselineTsUs = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
 
     if (!ctx->threadRunning.load(std::memory_order_acquire)) {
         ctx->threadRunning.store(true, std::memory_order_release);
