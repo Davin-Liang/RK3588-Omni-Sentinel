@@ -176,7 +176,24 @@ bool SentinelVisioner::camera_stream_ctrl(int camNum, bool isOpen) {
     if (isOpen) {
         if (ctx->isStreaming) return true;
 
-        // 1. 开启视频流
+        // 1. 重新入队所有缓冲区 (STREAMOFF 后驱动清空了队列)
+        for (int i = 0; i < ctx->bufferCount; ++i) {
+            struct v4l2_buffer buf = {};
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = i;
+
+            struct v4l2_plane planes[1] = {};
+            buf.m.planes = planes;
+            buf.length = 1;
+
+            if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                std::cerr << "VIDIOC_QBUF re-queue failed: " << strerror(errno) << std::endl;
+                return false;
+            }
+        }
+
+        // 2. 开启视频流
         if (ioctl(ctx->camFd, VIDIOC_STREAMON, &type) < 0) {
             std::cerr << "VIDIOC_STREAMON failed: " << strerror(errno) << std::endl;
             return false;

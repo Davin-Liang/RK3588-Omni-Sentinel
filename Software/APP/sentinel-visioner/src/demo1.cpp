@@ -10,7 +10,7 @@
 std::atomic<bool> g_is_running(true);
 
 // ============================================================================
-// 消费者线程 1：负责 NPU 推理 与 OSD 画框 (消费 npuTaskQueue)
+// 消费者线程 1：负责 NPU 推理与预览 (消费 previewTaskQueue)
 // ============================================================================
 void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum) {
     std::cout << "[NPU Thread] Started for Camera " << camNum << " - Waiting for data..." << std::endl;
@@ -20,8 +20,8 @@ void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum) {
     auto start_time = std::chrono::steady_clock::now(); 
 
     while (g_is_running) {
-        // 1. 阻塞等待：获取 NPU 专用小图和 OSD 720P 底图
-        NpuOSD task = visioner->wait_get_npuOSD(camNum);
+        // 1. 阻塞等待：获取 NPU 专用小图和 1080P 预览图像
+        NpuPreview task = visioner->wait_get_preview(camNum);
 
         if (task.npuImage != nullptr) {
             total_frame_count++;
@@ -53,14 +53,13 @@ void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum) {
             // 2. 模拟 NPU 推理 (使用 task.npuImage)
             // auto results = yolo_infer(task.npuImage->dmaFd);
 
-            // 3. OSD 绘制
-            if (task.osdImage != nullptr) {
-                // 模拟根据 NPU 结果在 720P 图像上画框
-                // imfill(task.osdImage, ...);
+            // 3. 预览处理
+            if (task.previewImage != nullptr) {
+                // 模拟 QT 界面直接使用 1080P RGB888 图像渲染
             }
 
             // 4. 【极度重要】：用完之后释放结构体中的所有 DMA 内存
-            visioner->release_npuOSD(camNum, &task);
+            visioner->release_preview(camNum, &task);
         } else {
             // 如果拿到 nullptr，说明可能是由于唤醒或退出，稍微休眠防止 CPU 空转
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -146,8 +145,8 @@ int main(int argc, char* argv[]) {
     g_is_running = false; 
 
     // c. 唤醒可能卡在 wait_get_xxx 的队列
-    NpuOSD dummy_task = {nullptr, nullptr};
-    visioner.release_npuOSD(camNum, &dummy_task); 
+    NpuPreview dummy_task = {nullptr, nullptr};
+    visioner.release_preview(camNum, &dummy_task);
     visioner.release_orig_copy_buffer(camNum, nullptr);
 
     // d. 回收线程

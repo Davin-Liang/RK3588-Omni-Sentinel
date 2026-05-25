@@ -74,21 +74,21 @@ make install
 #include <thread>
 #include "sentinel-visioner.h"
 
-// 消费者 1：负责 NPU 推理 与 OSD 画框
-void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum) {
+// 消费者 1：负责 NPU 推理与预览显示
+void npu_preview_consumer_thread(SentinelVisioner* visioner, int camNum) {
     while (true) { // (实际应用中替换为全局运行标志)
-        // 1. 阻塞等待：获取打包好的 NPU RGB888小图 和 720P OSD底图
-        NpuOSD task = visioner->wait_get_npuOSD(camNum);
+        // 1. 阻塞等待：获取打包好的 NPU RGB888小图 和 1080P 预览图像
+        NpuPreview task = visioner->wait_get_preview(camNum);
         if (task.npuImage == nullptr) continue; // 退出或虚假唤醒拦截
 
         // 2. 硬件加速送进 NPU 运算
         // auto results = do_yolo_inference(task.npuImage->dmaFd);
 
-        // 3. 将推理结果绘制在独立的 720P NV12 图像上
-        // imfill_boxes(task.osdImage->dmaFd, results);
+        // 3. 直接在 1080P RGB888 预览图像上显示
+        // qt_render(task.previewImage->virtAddr);
 
         // 4. 【必须】交还 DMA 内存，避免内存干涸
-        visioner->release_npuOSD(camNum, &task);
+        visioner->release_preview(camNum, &task);
     }
 }
 
@@ -156,5 +156,5 @@ int main() {
 ## ⚠️ 避坑与注意事项
 
 1. **绝对的归还机制** ：无论是在发生错误分支、丢弃数据分支，还是处理完成分支，都 **必须** 调用对应的 `release_` 接口归还 `DmaBuffer_t`。内存池的枯竭将导致底层 V4L2 引擎因无可用缓冲块而发生致命级 `Drop Frame`。
-2. **带框推流策略（OSD）** ：NPU 推理使用的 `RGB888` 缓冲区块通常为满足检测模型强制加入了 Letterbox 灰边，不应直接用于界面展示。若需带框视频推流，请在附带的 `task.osdImage` (干净的 720P) 底图上进行框体绘制（如调用 `imfill`）。
+2. **预览图像用途**：NPU 推理使用的 `RGB888` 缓冲区块通常为满足检测模型强制加入了 Letterbox 灰边，不应直接用于界面展示。若需带框视频推流，请使用 `task.previewImage` (干净的 1080P RGB888) 底图进行框体绘制。
 3. **驱动日志拦截** ：若发生 `[RGA Error] Invalid DMA fd` 报错，通常意味着底层视频流启动失败或捕获了坏帧。程序已内置防雪崩机制，会立刻切断后续处理并归还错乱内存，请优先排查硬件接线与 V4L2 `VIDIOC_S_FMT` 协商结果。
