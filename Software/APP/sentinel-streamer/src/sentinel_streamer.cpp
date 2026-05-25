@@ -101,10 +101,19 @@ static void stream_thread_func_(StreamerContext* ctx)
         if (!origBuf) continue;
 
         uint64_t tsUs = origBuf->timestampUs;
-        if (firstTsUs == 0) firstTsUs = tsUs;
+        if (firstTsUs == 0) {
+            firstTsUs = tsUs;
+            fprintf(stderr, "[SentinelStreamer] firstTsUs=%llu\n", (unsigned long long)firstTsUs);
+        }
 
         // 真实时间戳 → MPEG 时基 (90000)，减首帧偏移归零
         int64_t pts = static_cast<int64_t>(tsUs - firstTsUs) * 90000 / 1000000;
+
+        if (frameCount < 5 || frameCount % 30 == 0) {
+            fprintf(stderr, "[SentinelStreamer] frame=%d tsUs=%llu delta=%llu pts=%lld\n",
+                    frameCount, (unsigned long long)tsUs,
+                    (unsigned long long)(tsUs - firstTsUs), (long long)pts);
+        }
 
         // ----------------------------------------------------------------
         // 步骤 2: RGA 缩放 1080p → 720p (推流和/或 720p 录像共用)
