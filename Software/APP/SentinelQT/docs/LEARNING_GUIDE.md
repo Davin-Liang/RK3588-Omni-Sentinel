@@ -1,115 +1,177 @@
-# SentinelQT 学习指南
+# SentinelQT — 学习指南
 
-记录开发过程中的关键设计决策、踩坑经验和知识沉淀。
+## 目标
 
-## 第一层：基础决策
+面试时能说清：做了什么、为什么这么设计、踩过什么坑。
 
-### 决策 1: QWidget vs QMainWindow
+---
 
-选择 `QWidget`，不是 `QMainWindow`。
+## 第一层：能说清"做了什么"（面试讲项目用）
 
-- RK3588 + 触摸屏 = 嵌入式 HMI，要全屏无边框。QMainWindow 自带的菜单栏/工具栏/状态栏/停靠窗口全是无用负担
-- `setWindowFlags(Qt::FramelessWindowHint)` + `showFullScreen()` 直接全屏，绕过窗口管理器
-- 更轻量，布局完全自由
+### 一句话概括
 
-### 决策 2: eglfs vs wayland
+> 基于 Qt5 Widgets 的 RK3588 嵌入式触屏 HMI，集成 sentinel-visioner (相机采集) 和 sentinel-streamer (推流/录像)，通过 QStackedWidget 双页布局提供预览监控、推流录像控制和视频文件管理。
 
-使用 `-platform eglfs`，不走 Wayland。
+### 架构图（能画出来）
 
-- RK3588 的 Mali GPU 通过 eglfs 直接渲染到 DRM/KMS，零中间层
-- Buildroot 默认的 Weston 会独占 DRM master，先 `killall -9 weston` 再启 Qt
-- eglfs 独占 DRM 设备的限制：ffplay 等 SDL2 应用无法同时运行（DRM master 冲突），应用内播放需要用 Qt Multimedia 或 MPP 解码
+```
+RK3588 触屏
+    │
+    ▼
+QApplication (eglfs, 全屏无边框)
+    │
+    └─ QStackedWidget
+        ├── Page 0: 主控页面
+        │   ├── 标题栏 (温度/CPU/RGA/NPU 监控 + 时钟)
+        │   ├── 预览区 (1080p RGB888 实时画面)
+        │   ├── 状态栏 (FPS + 录制状态)
+        │   └── 控制行 (推流/录像/系统 三复用按钮)
+        │
+        └── Page 1: 视频管理页面
+            └── QTableWidget (文件名/分辨率/时长/删除)
 
-### 决策 3: QStackedWidget 双页布局
+底层组件:
+    ├── SentinelVisioner visioner_   (相机采集 + RGA 预处理)
+    ├── SentinelStreamer streamer_   (RTSP推流 + MP4录像)
+    └── PreviewWorker (子线程)       (try_get_preview → QImage 帧投递)
+```
 
-主页面和视频管理页用 `QStackedWidget` 切换，不用多窗口或弹出对话框。
-
-- 1024×600 触屏，弹出窗口影响操作
-- 两个页面共享同一套底层组件（visioner/streamer），无需跨窗口传引用
-- 视频管理页返回时相机预览等状态完全保留
-
-## 第二层：线程与异步
-
-### 决策 4: QThread + moveToThread vs std::thread
-
-PreviewWorker 使用 Qt 线程模型：`QThread + moveToThread + 信号槽`。
-
-- 信号槽天然支持跨线程安全投递（`Qt::QueuedConnection` 自动序列化 QImage）
-- `QThread::quit()/wait()` 提供优雅退出机制
-- 相比 std::thread，Qt 线程与事件循环集成更好，调试更直观
-
-### 决策 5: StreamerCallback 跨线程桥接
-
-SentinelStreamer 的回调是 C 风格函数指针，运行在 streamer 内部线程。
+### 关键代码（背下来）
 
 ```cpp
+// Widget 持有 visioner 和 streamer，构造即启动相机 + 预览
+Widget::Widget() {
+    visioner_ = new SentinelVisioner();
+    streamer_ = new SentinelStreamer();
+    visioner_->add_camera("/dev/video11", 1920, 1080, 8, 0);
+    visioner_->camera_stream_ctrl(0, true);
+    streamer_->add_camera(0, visioner_);
+    streamer_->set_callback(streamer_callback_);
+    start_preview_();  // 启动子线程拉帧
+}
+
+// 推流/录像复用式按钮：同一按钮根据状态启停
+void on_btn_stream_() {
+    if (streamer_->is_streaming(0))
+        streamer_->stop_stream(0);
+    else
+        streamer_->start_stream(0, rtspUrl_.toUtf8().constData());
+}
+```
+
+---
+
+## 第二层：能解释"为什么这么设计"（面试追问用）
+
+### 决策 1：为什么用 QStackedWidget 双页，不用多窗口？
+
+| 方案 | 多窗口 / QDialog | QStackedWidget（我们用的） |
+|------|-----------------|--------------------------|
+| 触屏体验 | 弹窗遮挡，需手动关闭 | 页面切换，返回即恢复原状态 |
+| 状态保持 | 弹窗关闭后需重建 | 两个页面共享同一套 visioner/streamer |
+| 实现复杂度 | 管理多个窗口生命周期 | 一行 `setCurrentIndex(0/1)` |
+
+**教训**: 嵌入式触屏上弹窗会让用户困惑，页面内切换更自然。
+
+### 决策 2：预览为什么用独立子线程 + try_get_preview 超时轮询？
+
+```
+主线程 (UI 不阻塞)           PreviewWorker 子线程
+    │                              │
+    ├─ start_preview_()            ├─ while(running_) {
+    │   ├─ new QThread             │    task = try_get_preview(cam, 200ms)
+    │   ├─ moveToThread            │    QImage(virtAddr, 1920, 1080, RGB888)
+    │   └─ thread->start()  ────→  │    emit frameReady(img.copy())
+    │                              │    release_preview()
+    │                              │  }
+    ├─ on_frame_ready_(QImage) ←───┘
+    │   └─ previewLabel->setPixmap()
+```
+
+- `wait_get_preview()` 内部用 `pop()` 无限阻塞，相机停产后线程永远卡死 → **必须用超时版**
+- `try_get_preview(cam, 200)` 每次超时检查 `running_` 标志，200ms 内响应退出
+- QImage 构造用 `virtAddr` 直接引用 DMA 内存，`.copy()` 深拷贝后立即 `release_preview()` 归还
+
+### 决策 3：为什么系统暂停用 camera_pause 而不是 STREAMOFF？
+
+```
+STREAMOFF 方案（有问题）:
+  camera_stream_ctrl(false) → V4L2 管线关闭 → 再 STREAMON → RK3588 ISP 无法恢复
+
+camera_pause 方案（我们用的）:
+  camera_pause(true) → capture 线程跳过 RGA，仅做 QBUF 循环 → 硬件流保持
+  camera_pause(false) → 立即恢复 RGA 处理，帧马上可用
+```
+
+**教训**: RK3588 ISP 驱动的 MIPI 管线在 STREAMOFF 后需要完整重初始化，仅靠 STREAMON 不够。保持硬件流是最稳妥的做法。
+
+### 决策 4：StreamerCallback 怎么安全跨到 Qt 主线程？
+
+```cpp
+// streamer 回调在内部线程调用，不能直接操作 UI
 static void streamer_callback_(int camNum, StreamerEvent event, const char* detail) {
-    Widget* w = Widget::instance();
-    QString detailStr = detail ? QString::fromUtf8(detail) : QString();
-    QMetaObject::invokeMethod(w, [=]() {
-        w->on_streamer_event(camNum, event, detailStr);
+    Widget* w = Widget::instance();                              // ① 静态单例桥接
+    QString s = detail ? QString::fromUtf8(detail) : QString();  // ② C串立即转QString
+    QMetaObject::invokeMethod(w, [=]() {                         // ③ 排队到主线程
+        w->on_streamer_event(camNum, event, s);
     }, Qt::QueuedConnection);
 }
 ```
 
-关键设计点：
-- **C 字符串立即转 QString**：`detail` 是栈上指针，回调返回后失效，必须在 `invokeMethod` 前复制
-- **static 单例桥接**：C 回调无 this 指针，通过 `Widget::instance()` 找到对象
-- **QueuedConnection 强制排队**：确保 lambda 在主线程事件循环中执行，避免 streamer 线程直接操作 UI
+三个关键点对应三个常见 bug：
+- ① 无对象指针 → 用静态单例
+- ② 栈上临时字符串 → 回调返回前转 QString（所有权转移）
+- ③ 直接调 UI 方法 → `QueuedConnection` 确保在主线程事件循环执行
 
-### 决策 6: try_get_preview 超时轮询 vs wait_get_preview 无限阻塞
+---
 
-预览线程使用 `try_get_preview(camNum, 200)` 而非 `wait_get_preview()`。
+## 第三层：能讲清 bug 和教训（面试加分项）
 
-- `wait_get_preview` 内部用 `ThreadSafeQueue::pop()` 无限阻塞，产帧停止后线程永远挂起
-- `try_get_preview` 带 200ms 超时，每次超时检查 `std::atomic<bool> running_`，确保 200ms 内响应退出
-- 代价：CPU 在无帧时每 200ms 唤醒一次（可忽略不计）
+### 从 BUG_RECORD.md 选 3 个最有代表性的
 
-### 决策 7: 析构顺序
+**1. 预览线程关闭死锁**
 
-组件析构必须严格逆序，否则 use-after-free：
+- 现象：点"关闭系统"后程序卡死，`kill -9` 才能退出
+- 原因：`PreviewWorker::start()` 用 `wait_get_preview()` 拉帧，内部 `pop()` 无限阻塞。相机停产后队列为空，线程永久卡在 `pop()` 内，`running_ = false` 永远检查不到
+- 修复：SentinelVisioner 新增 `try_get_preview(cam, timeoutMs)`，PreviewWorker 改用 200ms 超时轮询
+- **面试话术**: "条件变量的 `wait()` 没有超时就是定时炸弹。我们在 SentinelVisioner 里加了 `try_pop` 超时版接口，确保退出信号最多 200ms 内被响应"
 
-```
-1. camera_stream_ctrl(false)    ← 最先停相机，停止所有帧源
-2. stop_preview_()              ← 再停消费者线程（队列不再有新帧）
-3. streamer_->remove_camera(0)  ← 清理推流/录像线程
-4. delete streamer_ / visioner_ ← 最后释放硬件抽象层
-```
+**2. config.ini 相对路径找不到**
 
-违反此顺序会导致 worker 线程访问已释放的 visioner_ → SIGSEGV。
+- 现象：改 `config.ini` 内容不生效，程序始终用默认值 `192.168.1.100`
+- 原因：`QSettings("config.ini", IniFormat)` 用相对路径，查找位置取决于 `$PWD` 而非可执行文件目录。板端 `cd /tmp && /mnt/nfs/install/SentinelQT` 就找不到
+- 修复：`QCoreApplication::applicationDirPath() + "/config.ini"` 始终从二进制同目录读
+- **面试话术**: "Qt 的相对路径 QSettings 在当前工作目录下找文件，嵌入式环境的工作目录不可控。用 applicationDirPath 绑定二进制位置是最可靠的做法"
 
-## 第三层：RK3588 平台特有问题
+**3. 析构顺序错误导致 use-after-free**
 
-### 决策 8: camera_pause vs STREAMOFF
+- 现象：退出程序偶发 SIGSEGV
+- 原因：析构时先 `delete visioner_`，但 PreviewWorker 子线程可能还在 `try_get_preview` 里访问它
+- 修复：析构顺序改为 `camera_stream_ctrl(false)` → `stop_preview_()` → `join()` → `delete streamer_/visioner_`
+- **面试话术**: "多线程下的析构顺序是个硬约束——必须先停帧源，再停消费者，最后释放资源。违反顺序 = use-after-free，偶发崩溃最难排查"
 
-系统暂停/恢复使用 `camera_pause()` 而非 `camera_stream_ctrl(false/true)`。
+---
 
-- RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复（MIPI 管线需要完整重初始化）
-- `camera_pause` 保持 V4L2 流运行，capture 线程仅跳过 RGA 处理和队列推送，buffer 仍在驱动和用户态间循环
-- 代价："暂停"期间 DMA buffer 仍在占用（约 8 个 1080p NV12 buffer ≈ 24MB），但对于 8GB RK3588 可忽略
+## 怎么对着代码学
 
-### 决策 9: DebugFS 权限
+**别死记硬背。跟一遍数据流：**
 
-RGA/NPU 利用率读取需要 root 权限。
+1. 打开 `widget.cpp`，从构造函数开始
+2. 走一遍 `init_camera_()` → 理解相机和 streamer 怎么注册
+3. 走一遍 `start_preview_()` → 理解 PreviewWorker 怎么创建和启动
+4. 在 `preview_worker.cpp` 的 `start()` 跟一帧的完整生命周期
+5. 看 `on_btn_stream_()` / `on_btn_system_()` → 理解启停流程
+6. 回到 `widget.cpp` 的析构函数 → 理解逆序释放
 
-- `/sys/kernel/debug/rkrga/load` 和 `/sys/kernel/debug/rknpu/load` 仅 root 可读
-- 非 root 运行时显示 `--%`（降级处理，不报错）
-- 生产环境可配置 sudo 或调整 debugfs 挂载权限
+**重点函数入口:**
 
-## 第四层：UI 设计经验
-
-### 决策 10: 复用式按钮 vs 分离式按钮
-
-推流和录像用单个复用按钮，不用启动/停止分离。
-
-- 触屏空间有限（1024×600），每个像素都要精打细算
-- 状态互斥（同时只能推或不推），分离按钮必然有一个始终禁用，浪费空间
-- `update_button_states_()` 动态切换文字和颜色，视觉反馈清晰
-
-### 决策 11: 标题栏左右对称居中
-
-标题居中需要左右两侧控件等宽：
-
-- `hwLabel` 和 `clockLabel` 设为相同 fixed width（260px）
-- 中间 `titleLabel` 两侧 stretch=1 的 spacer 均分剩余空间
-- 两侧不等宽时标题视觉偏移，用户会注意到不对称
+| 函数 | 作用 |
+|------|------|
+| `Widget::Widget()` / `~Widget()` | 理解完整生命周期和析构顺序 |
+| `start_preview_()` / `stop_preview_()` | 理解子线程创建/销毁 |
+| `PreviewWorker::start()` | 理解一帧怎么从 DMA → QImage → 信号 |
+| `on_btn_stream_()` / `on_btn_record_()` | 理解复用式按钮逻辑 |
+| `on_btn_system_()` | 理解 camera_pause 暂停/恢复 |
+| `scan_videos_()` | 理解 libavformat 读取视频元数据 |
+| `update_hw_usage_()` | 理解 CPU/RGA/NPU/温度四个数据源 |
+| `streamer_callback_()` | 理解跨线程回调安全投递 |
