@@ -104,13 +104,15 @@ SentinelQT (QT5 嵌入式触控界面)
 
 ### sentinel-visioner — 多路视觉流水线
 
-"一分三"零拷贝扇出：一路 1080P V4L2 输入，经 RGA 硬件裂变为三路独立数据流：
+"一分三"零拷贝扇出：一路 V4L2 输入（MIPI CSI 或 USB UVC），经 RGA 硬件裂变为三路独立数据流：
 1. RGB888 640×640 NPU 推理小图（带 Letterbox 灰边 + EIS 防抖偏移）
 2. RGB888 1920×1080 预览图像（供 QT 界面渲染）
-3. NV12 1920×1080 原始推流副本
+3. NV12 1920×1080 原始推流副本（同格式 RGA 拷贝）
 
-- **CameraContext**: 每路相机状态（包括 3 个 DmaBufferPool、2 个 ThreadSafeQueue、epoll fd 等）
-- **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd（无 mmap），连续 3 次 RGA 调度
+支持两种相机类型混合接入，通过 `CameraType` 枚举区分（`ISP_CAM` / `USB_CAM`）：
+
+- **CameraContext**: 每路相机状态。ISP 包含 3 个 DmaBufferPool，USB 非 NV12 时额外一个 `usbConvertPool`（YUYV→NV12 转换）
+- **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd。ISP 路径 MPLANE + NV12 直通；USB 路径单平面，先协商 NV12/YUYV 格式（NV12 不支持时回退 YUYV + RGA 转换），统一为 NV12 后执行 3 次 RGA 调度。MPLANE/单平面的 `v4l2_plane` 和 `v4l2_buf_type` 按 `ctx->v4l2BufType` 条件化
 - **消费者线程**: 通过 `wait_get_preview()` / `try_get_preview(camNum, timeoutMs)` / `wait_get_orig_copy_buffer()` 拉取，条件变量休眠（空闲 CPU 0.0%）。**必须调用对应的 `release_*()` 归还 DMA 缓冲区**
 - **camera_pause**: `camera_pause(camNum, paused)` 可在不执行 STREAMOFF 的前提下暂停/恢复 RGA 处理，避免 RK3588 ISP 管线重建问题
 - **ThreadSafeQueue**: 泛型阻塞队列模板（`include/ThreadSafeQueue.h`），`std::mutex` + `std::condition_variable`
@@ -169,7 +171,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 
 - 所有组件 C++14 标准，非 ROS，零外部运行时依赖
 - 交叉编译器指向 aarch64，在 x86 开发机上运行编译
-- 设备名硬编码：雷达 `/dev/sentinel_lidar`，相机 `/dev/video11`
+- 设备名默认值：雷达 `/dev/sentinel_lidar`，ISP 相机 `/dev/video11`，USB 相机 `/dev/video21`（均支持命令行覆盖）
 - DMA 缓冲区遵循严格的"获取-使用-归还"生命周期，未归还将导致内核态内存枯竭和丢帧
 - 时间戳统一使用 `CLOCK_MONOTONIC`，不同组件间通过此时间域实现传感器融合对齐
 - 各开发者在自己的分支上工作，勿交叉修改他人负责的组件
