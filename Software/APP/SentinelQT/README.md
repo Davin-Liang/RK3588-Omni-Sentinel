@@ -50,6 +50,23 @@ export QT5_PREFIX=$CROSS_COMPILE_PATH/aarch64-buildroot-linux-gnu/sysroot/usr/li
 
 默认推流地址 `rtsp://127.0.0.1:8554/live/cam0`，VLC 或 ffplay 连接同一地址即可拉流。
 
+## 板端运行
+
+RK3588 的 Buildroot 默认使用 Weston (Wayland 合成器) 管理显示，与 Qt eglfs 冲突，需先停止：
+
+```bash
+# 1. 停止 Weston
+killall -9 weston
+
+# 2. 以 root 权限启动（debugfs 文件需 root 读取）
+sudo ./SentinelQT -platform eglfs
+
+# 3. 永久禁用 Weston 开机自启（可选）
+mv /etc/init.d/S50weston /etc/init.d/disabled.S50weston
+```
+
+`-platform eglfs` 让 Qt 直接通过 DRM/KMS 渲染，绕过 Wayland，获得最佳性能和全屏体验。
+
 ## 配置文件
 
 `config.ini` 格式：
