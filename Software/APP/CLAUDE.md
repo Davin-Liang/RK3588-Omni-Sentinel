@@ -315,3 +315,25 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - 结尾附"重点函数入口"表格，方便新人定位代码
 
 参考：`sentinel-streamer/docs/LEARNING_GUIDE.md`、`SentinelQT/docs/LEARNING_GUIDE.md`
+
+### docs/DEMO-INSTRUCTIONS.md — 演示程序说明
+
+面向**测试者 / 使用者**，回答"有哪些 Demo、怎么跑、预期结果是什么"。
+
+结构：
+- 环境准备与通用编译要求（硬件平台、内核版本、依赖库、设备节点）
+- 每个 Demo 独立一节：
+  - 源文件（精确到 `.cpp`）
+  - 演示目标（验证什么功能）
+  - 线程架构说明（启动哪些线程、各自职责）
+  - 运行步骤（编译命令 + 板端命令行参数）
+  - 预期输出（终端打印的关键日志示例）
+- 末尾附新增 Demo 文档模板
+
+写法：
+- 板端命令直接给出可用参数和默认值
+- 终端输出用代码块展示关键行（心跳日志、FPS、延迟数据）
+- 环境依赖写在最前面统一说明，每个 Demo 不重复
+- 无 Demo 的组件（如纯 UI）可不写此文档
+
+参考：`sentinel-visioner/docs/DEMO-INSTRUCTIONS.md`、`sentinel-streamer/docs/DEMO-INSTRUCTIONS.md`
