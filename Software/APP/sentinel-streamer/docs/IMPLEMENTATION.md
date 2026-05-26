@@ -177,19 +177,21 @@ main thread                     stream thread (每路 1 个)
 
 ## 6. PTS 管理
 
-使用 **硬件时间戳减首帧偏移**，兼容任意帧率、无波动累积：
+使用 **录制启动时的系统时钟作为 PTS 基准**，跳过队列积压旧帧，兼容任意帧率：
 
 ```
-首帧: firstTsUs = origBuf->timestampUs
-每帧: pts = (timestampUs - firstTsUs) × 90000 / 1000000
+启动录制: baselineTsUs = clock_gettime(CLOCK_MONOTONIC)
+每帧检查: if (timestampUs < baselineTsUs) skip  // 跳过录制前积压的旧帧
+每帧 PTS: pts = (timestampUs - baselineTsUs) × 90000 / 1000000
 ```
 
 | 项目 | 值 |
 |------|-----|
 | PTS 来源 | `DmaBuffer_t::timestampUs`（V4L2 `CLOCK_MONOTONIC`） |
-| 归零方式 | 首帧时间戳做偏移量 |
+| 归零基准 | 录制按钮按下时的系统时钟 `baselineTsUs` |
+| 旧帧过滤 | `tsUs < baselineTsUs` 的帧直接跳过并归还 DMA 缓冲 |
 | 编码器 time_base | `{1, 90000}` (MPEG 标准时基) |
-| pkt->pts/dts | 编码器不传则手动设为 `sentPts` |
+| pkt->pts/dts | **始终**强制覆盖为 `sentPts`（不依赖 `AV_NOPTS_VALUE`） |
 | pkt->duration | 不设，由 FFmpeg 根据帧间 PTS 自动计算 |
 
 ---
