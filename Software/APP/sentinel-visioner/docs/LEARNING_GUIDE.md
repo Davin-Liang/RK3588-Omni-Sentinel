@@ -202,6 +202,42 @@ if (task.npuImage == nullptr && !running_) break;  // 超时或退出
 
 ---
 
+### 决策 7：为什么用 CameraType 枚举而不是自动探测相机类型？
+
+| 对比维度 | 自动探测（替代方案） | 显式指定 CameraType（我们的方案） |
+|----------|---------------------|---------------------------------|
+| 实现方式 | `VIDIOC_QUERYCAP` 获取 driver name，匹配 "uvcvideo" vs "rkisp" | 调用者传入 `CameraType::ISP_CAM` 或 `CameraType::USB_CAM` |
+| 依赖 | 依赖驱动的 name 字段稳定不变，第三方 USB 驱动可能不以 "uvcvideo" 命名 | 无外部依赖，逻辑完全在应用层 |
+| 确定性 | 驱动名匹配失败会导致误判，USB 相机被当作 ISP 初始化 → 必崩 | 调用者自己知道插的是什么，100% 确定 |
+| 边缘场景 | 同是 USB 但走不同协议（UVC vs gspca），驱动名不同；未来 MIPI→USB bridge 的 driver name 不可预测 | 所有边缘场景由调用者处理，库内逻辑简单 |
+| 代码复杂度 | 需要维护驱动名匹配表，每次新硬件都要更新 | 一个 enum + 两路分支，代码量极少 |
+
+**核心逻辑**：
+
+```cpp
+enum class CameraType { ISP_CAM, USB_CAM };
+
+// 调用者显式指定，库内据此分流
+ctx->v4l2BufType = (camType == CameraType::ISP_CAM)
+    ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+    : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+```
+
+**面试话术**: "自动探测看起来很智能，但在嵌入式异构相机场景下是个陷阱。不同 USB 芯片的驱动名不一样，甚至同一个摄像头在不同内核版本下 driver name 都可能变化。我们用显式指定——调用者插的什么相机自己清楚，库内只负责按类型走不同 V4L2 初始化路径。这样做代码量极少，没有任何外部依赖，边缘场景不会出现归类错误导致的崩溃。"
+
+### 决策 8：为什么 USB 先尝试 NV12 而不是直接上 YUYV？
+
+| 对比维度 | 统一 YUYV 路径（替代方案） | NV12 优先 + YUYV 回退（我们的方案） |
+|----------|-------------------------|---------------------------------|
+| 最优路径 | 每帧多一次 RGA YUYV→NV12 转换，无论摄像头是否支持 NV12 | 摄像头原生支持 NV12 时零额外开销 |
+| 代码复杂度 | 少一个分支 | 多一次 `VIDIOC_S_FMT` 重试 + 条件化 convert pool 分配 |
+| 实际效果 | 市面上越来越多 USB 摄像头原生支持 NV12（UVC 1.5+） | 自适应：NV12 时路径等同 ISP，YUYV 时自动加一层 RGA |
+| RGA 负载 | 多一次 RGA 调用（每帧约 1-3ms） | NV12 时 RGA 负载不变，YUYV 时多一次 |
+
+**面试话术**: "USB UVC 规范 1.5 之后越来越多的摄像头支持 NV12 原生输出，这是趋势。如果一刀切走 YUYV，等于给所有相机都加了一层不必要的 RGA 转换——这在多路相机场景下会累加 RGA 负载。我们的方案是先尝试 NV12，失败了再回退 YUYV。对用户来说完全透明，但性能上 NV12 时零额外开销。"
+
+---
+
 ## 第三层：能讲清 bug 和教训（面试加分项）
 
 ### Bug 1：ThreadSafeQueue 缺少 `<condition_variable>` 头文件

@@ -6,9 +6,11 @@
 
 ## 目录
 
-1. [环境准备与通用编译要求](https://www.google.com/search?q=%23%E7%8E%AF%E5%A2%83%E5%87%86%E5%A4%87%E4%B8%8E%E9%80%9A%E7%94%A8%E7%BC%96%E8%AF%91%E8%A6%81%E6%B1%82&authuser=1)
-2. [Demo 01: 基础零拷贝流水线与多线程压测](https://www.google.com/search?q=%23demo-01-%E5%9F%BA%E7%A1%80%E9%9B%B6%E6%8B%B7%E8%B4%9D%E6%B5%81%E6%B0%B4%E7%BA%BF%E4%B8%8E%E5%A4%9A%E7%BA%BF%E7%A8%8B%E5%8E%8B%E6%B5%8B&authuser=1)
-3. [新增 Demo 文档模板 (规范)](https://www.google.com/search?q=%23%E6%96%B0%E5%A2%9E-demo-%E6%96%87%E6%A1%A3%E6%A8%A1%E6%9D%BF&authuser=1)
+1. [环境准备与通用编译要求](#环境准备与通用编译要求)
+2. [Demo 01: 基础零拷贝流水线与多线程压测](#demo-01-基础零拷贝流水线与多线程压测)
+3. [Demo 02: USB 相机单独测试](#demo-02-usb-相机单独测试)
+4. [Demo 03: ISP + USB 双路混合测试](#demo-03-isp--usb-双路混合测试)
+5. [新增 Demo 文档模板 (规范)](#新增-demo-文档模板)
 
 ---
 
@@ -148,6 +150,144 @@ Camera 0 (/dev/video11) added successfully.
 ![fd_leak_test](https://file+.vscode-resource.vscode-cdn.net/c%3A/Users/Changxinyue/Desktop/L1angGM/Project/RK3588-Omni-Sentinel/Software/APP/sentinel-visioner/docs/assets/demo1_fd_leak_test.png)
 
 *(图：实测 `watch` 高频监控输出，证实进程 Fd 数量绝对恒定，实现了极其安全的零泄漏)*
+
+---
+
+## Demo 02: USB 相机单独测试
+
+ **源文件** : `src/demo2.cpp`
+
+### 1. 演示目标
+
+验证 `SentinelVisioner` 对 USB UVC 摄像头的接入能力。测试内容涵盖：
+
+* USB 相机 V4L2 单平面（Single-Planar）初始化路径
+* NV12 / YUYV 像素格式自动协商（优先 NV12，不支持时回退 YUYV + RGA 硬件转换）
+* 统一 NV12 下游管线：确认 USB 帧与 ISP 帧经相同 RGA 三操作（NPU 缩放、预览转换、原图拷贝）输出至消费队列
+* 多消费者线程（NPU 推理 + 推流）在 USB 输入下的稳定性
+
+### 2. 线程架构说明
+
+与 Demo 01 完全一致的线程模型，区别在于捕获线程内部根据 USB 相机实际输出格式，按需插入一次 RGA YUYV→NV12 格式转换：
+
+* **Main Thread**: 初始化、挂载 USB 相机（`CameraType::USB_CAM`）、生命周期管理
+* **Capture Thread**: `epoll` 监听 → DQBUF → (若 YUYV: RGA YUYV→NV12) → RGA×3 分发 → 归还 V4L2 buffer
+* **NPU & Preview Consumer**: 阻塞获取 RGB888 小图 + 1080P 预览
+* **Stream Consumer**: 阻塞获取 NV12 原图拷贝
+
+### 3. 运行方法
+
+编译后拷贝至开发板，确认 USB 摄像头已接入（`v4l2-ctl --list-devices` 可见 `uvcvideo` 条目）。
+
+**Bash**
+
+```
+# 全默认（/dev/video0, 640x480, 30 秒）
+./sentinel_visioner_demo2
+
+# 指定设备、分辨率和时长
+./sentinel_visioner_demo2 /dev/video21 1280 720 60
+```
+
+命令行参数：`<device> [width] [height] [run_seconds]`
+
+### 4. 预期观测结果
+
+**启动阶段**（两种可能）：
+
+若 USB 相机原生支持 NV12（无需额外转换）：
+```
+Camera 0 (/dev/video21) added successfully.
+```
+
+若 USB 相机仅支持 YUYV（自动回退 + RGA 转换）：
+```
+[USB Cam] NV12 unsupported, using YUYV.
+Camera 0 (/dev/video21) added successfully.
+```
+
+**运行阶段心跳日志**（与 Demo 01 格式一致）：
+```
+[NPU Pipeline Cam 0] Total: 30 frames | FPS: 29.97 | Latency: 15 ms
+[Stream Pipeline Cam 0] Successfully processed 30 frames. Latest TS: 123456789 us
+```
+
+### 5. 实测基准 (Benchmarks)
+
+*（待数据收集后填写）*
+
+---
+
+## Demo 03: ISP + USB 双路混合测试
+
+ **源文件** : `src/demo3.cpp`
+
+### 1. 演示目标
+
+验证 `SentinelVisioner` 同时管理 MIPI CSI（ISP）和 USB UVC 两种不同类型相机的能力。测试内容涵盖：
+
+* 两路相机独立 V4L2 初始化（ISP: MPLANE, USB: Single-Planar），互不干扰
+* 两路相机各自的捕获线程、DMA 内存池、输出队列完全隔离
+* 混合类型下四消费者线程（每路 NPU + Stream）的并发稳定性
+* 验证 `CameraContext` 按 `camNum` 索引的正确隔离
+
+### 2. 线程架构说明
+
+共 **6 个线程**（2 个捕获 + 4 个消费者），无共享状态：
+
+```
+Main Thread (camNum=0 ISP + camNum=1 USB)
+├── ISP Capture Thread       # epoll + DQBUF → RGA×3 → 推队列 → QBUF
+├── USB Capture Thread       # epoll + DQBUF → (YUYV→NV12) → RGA×3 → 推队列 → QBUF
+├── ISP NPU Consumer         # wait_get_preview(0)
+├── ISP Stream Consumer      # wait_get_orig_copy_buffer(0)
+├── USB NPU Consumer         # wait_get_preview(1)
+└── USB Stream Consumer      # wait_get_orig_copy_buffer(1)
+```
+
+### 3. 运行方法
+
+编译后拷贝至开发板，确认 ISP 和 USB 相机均已接入。
+
+**Bash**
+
+```
+# 全默认（ISP: /dev/video11 1080p, USB: /dev/video21 640x480, 30 秒）
+./sentinel_visioner_demo3
+
+# 自定义设备
+./sentinel_visioner_demo3 /dev/video11 /dev/video21 60
+#                          ↑ ISP设备     ↑ USB设备     ↑ 运行秒数
+```
+
+### 4. 预期观测结果
+
+**启动阶段**：
+```
+========================================
+Dual Camera Test
+  ISP Cam : /dev/video11 1920x1080 (camNum=0)
+  USB Cam : /dev/video21 640x480 (camNum=1)
+  Runtime : 30s
+========================================
+Camera 0 (/dev/video11) added successfully.
+Camera 1 (/dev/video21) added successfully.
+Camera 0 capture thread STARTED.
+Camera 1 capture thread STARTED.
+All cameras and consumers started.
+```
+
+**运行阶段心跳日志**（两路独立打印，颜色区分）：
+```
+[NPU Cam 0 ISP] Total: 30 frames | FPS: 13.97 | Latency: 64 ms    # 绿色
+[NPU Cam 1 USB] Total: 30 frames | FPS: 29.97 | Latency: 18 ms    # 绿色
+[Stream Cam 0 ISP] Processed 30 frames. Latest TS: xxx us          # 蓝色
+[Stream Cam 1 USB] Processed 30 frames. Latest TS: xxx us          # 蓝色
+```
+
+### 5. 实测基准 (Benchmarks)
+
+*（待数据收集后填写）*
 
 ---
 

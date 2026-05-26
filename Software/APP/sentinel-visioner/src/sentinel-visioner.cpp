@@ -20,8 +20,8 @@ SentinelVisioner::~SentinelVisioner() {
     _cameraContextMap.clear();
 }
 
-bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height, 
-                                  int bufferCount, int camNum) {
+bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height,
+                                  int bufferCount, int camNum, CameraType camType) {
     if (_cameraContextMap.find(camNum) != _cameraContextMap.end()) {
         std::cerr << "Camera number " << camNum << " already exists!" << std::endl;
         return false;
@@ -33,27 +33,10 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
     ctx->width = width;
     ctx->height = height;
     ctx->bufferCount = bufferCount;
-
-    /* 初始化 NPU 内存池 (640x640 RGB) */
-    ctx->npuRgbPool = std::make_unique<DmaBufferPool>();
-    if (!ctx->npuRgbPool->alloc_pool(bufferCount, 640, 640, BufferFormat::RGB888)) {
-        std::cerr << "初始化 NPU 内存池失败!———— " << camNum << std::endl;
-        return false;
-    }
-
-    /* 初始化 原始图像拷贝 内存池 (保持和摄像头输出一致 ———— NV12) */
-    ctx->origCopyPool = std::make_unique<DmaBufferPool>();
-    if (!ctx->origCopyPool->alloc_pool(bufferCount, width, height, BufferFormat::NV12)) {
-        std::cerr << "初始化原始图像拷贝内存池失败!————" << camNum << std::endl;
-        return false;
-    }
-
-    /* 初始化 1080P RGB888 预览图像 内存池 */
-    ctx->previewPool = std::make_unique<DmaBufferPool>();
-    if (!ctx->previewPool->alloc_pool(bufferCount, width, height, BufferFormat::RGB888)) {
-        std::cerr << "初始化 1080P 预览图像内存池失败!————" << camNum << std::endl;
-        return false;
-    }
+    ctx->camType = camType;
+    ctx->v4l2BufType = (camType == CameraType::ISP_CAM)
+        ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+        : V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
     // 打开设备节点
     ctx->camFd = open(deviceName.c_str(), O_RDWR | O_NONBLOCK);
@@ -62,23 +45,105 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
         return false;
     }
 
-    // 设置图像格式 (假设默认使用 NV12 格式)
+    // 设置图像格式
     struct v4l2_format fmt = {};
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    fmt.fmt.pix.width = width;
-    fmt.fmt.pix.height = height;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12; 
-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+    fmt.type = ctx->v4l2BufType;
+
+    if (camType == CameraType::ISP_CAM) {
+        fmt.fmt.pix_mp.width = width;
+        fmt.fmt.pix_mp.height = height;
+        fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+        fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+    } else {
+        fmt.fmt.pix.width = width;
+        fmt.fmt.pix.height = height;
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+        fmt.fmt.pix.field = V4L2_FIELD_NONE;
+    }
 
     if (ioctl(ctx->camFd, VIDIOC_S_FMT, &fmt) < 0) {
-        std::cerr << "VIDIOC_S_FMT failed: " << strerror(errno) << std::endl;
+        if (camType == CameraType::USB_CAM) {
+            // NV12 不支持，回退到 YUYV
+            fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+            if (ioctl(ctx->camFd, VIDIOC_S_FMT, &fmt) < 0) {
+                std::cerr << "VIDIOC_S_FMT failed for both NV12 and YUYV: "
+                          << strerror(errno) << std::endl;
+                release_camera_resources_(ctx.get());
+                return false;
+            }
+            std::cout << "[USB Cam] NV12 unsupported, using YUYV." << std::endl;
+        } else {
+            std::cerr << "VIDIOC_S_FMT failed: " << strerror(errno) << std::endl;
+            release_camera_resources_(ctx.get());
+            return false;
+        }
+    }
+
+    // 回读实际协商后的格式和分辨率
+    if (ioctl(ctx->camFd, VIDIOC_G_FMT, &fmt) == 0) {
+        if (camType == CameraType::ISP_CAM) {
+            ctx->actualPixelFormat = fmt.fmt.pix_mp.pixelformat;
+            int actualW = fmt.fmt.pix_mp.width;
+            int actualH = fmt.fmt.pix_mp.height;
+            if (actualW != width || actualH != height) {
+                std::cout << "[ISP Cam] Resolution negotiated: " << actualW << "x" << actualH
+                          << " (requested " << width << "x" << height << ")" << std::endl;
+                ctx->width = actualW;
+                ctx->height = actualH;
+            }
+        } else {
+            ctx->actualPixelFormat = fmt.fmt.pix.pixelformat;
+            int actualW = fmt.fmt.pix.width;
+            int actualH = fmt.fmt.pix.height;
+            if (actualW != width || actualH != height) {
+                std::cout << "[USB Cam] Resolution negotiated: " << actualW << "x" << actualH
+                          << " (requested " << width << "x" << height << ")" << std::endl;
+                ctx->width = actualW;
+                ctx->height = actualH;
+            }
+        }
+    } else {
+        // G_FMT 失败，使用请求值
+        ctx->actualPixelFormat = (camType == CameraType::ISP_CAM)
+            ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_YUYV;
+    }
+
+    // USB YUYV 需要中间 NV12 转换缓冲池
+    if (ctx->actualPixelFormat == V4L2_PIX_FMT_YUYV) {
+        ctx->usbConvertPool = std::make_unique<DmaBufferPool>();
+        if (!ctx->usbConvertPool->alloc_pool(bufferCount, ctx->width, ctx->height,
+                                              BufferFormat::NV12)) {
+            std::cerr << "USB convert pool allocation failed!" << std::endl;
+            release_camera_resources_(ctx.get());
+            return false;
+        }
+    }
+
+    // 初始化 DMA 内存池（在格式协商之后，使用实际分辨率）
+    ctx->npuRgbPool = std::make_unique<DmaBufferPool>();
+    if (!ctx->npuRgbPool->alloc_pool(bufferCount, 640, 640, BufferFormat::RGB888)) {
+        std::cerr << "初始化 NPU 内存池失败!———— " << camNum << std::endl;
+        release_camera_resources_(ctx.get());
+        return false;
+    }
+
+    ctx->origCopyPool = std::make_unique<DmaBufferPool>();
+    if (!ctx->origCopyPool->alloc_pool(bufferCount, ctx->width, ctx->height, BufferFormat::NV12)) {
+        std::cerr << "初始化原始图像拷贝内存池失败!————" << camNum << std::endl;
+        release_camera_resources_(ctx.get());
+        return false;
+    }
+
+    ctx->previewPool = std::make_unique<DmaBufferPool>();
+    if (!ctx->previewPool->alloc_pool(bufferCount, ctx->width, ctx->height, BufferFormat::RGB888)) {
+        std::cerr << "初始化 1080P 预览图像内存池失败!————" << camNum << std::endl;
         release_camera_resources_(ctx.get());
         return false;
     }
 
     // --- 尝试设置帧率为 30 FPS ---
     struct v4l2_streamparm streamparm = {};
-    streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    streamparm.type = ctx->v4l2BufType;
     streamparm.parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
     streamparm.parm.capture.timeperframe.numerator = 1;
     streamparm.parm.capture.timeperframe.denominator = 30; // 想要 30 帧
@@ -93,7 +158,7 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
     // 请求分配内存 (MMAP 模式用于导出 DMA fd)
     struct v4l2_requestbuffers req = {};
     req.count = bufferCount;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    req.type = ctx->v4l2BufType;
     req.memory = V4L2_MEMORY_MMAP;
 
     if (ioctl(ctx->camFd, VIDIOC_REQBUFS, &req) < 0) {
@@ -110,7 +175,7 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
         ctx->buffers[i].index = i;
 
         struct v4l2_exportbuffer expbuf = {};
-        expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        expbuf.type = ctx->v4l2BufType;
         expbuf.index = i;
         expbuf.flags = O_CLOEXEC | O_RDWR;
 
@@ -122,14 +187,15 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
         ctx->buffers[i].dmaFd = expbuf.fd;
 
         struct v4l2_buffer buf = {};
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        buf.type = ctx->v4l2BufType;
         buf.memory = V4L2_MEMORY_MMAP;
         buf.index = i;
 
-        // --- MPLANE 必须加这个 planes 数组 ---
         struct v4l2_plane planes[1] = {};
-        buf.m.planes = planes;
-        buf.length = 1;
+        if (ctx->v4l2BufType == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+            buf.m.planes = planes;
+            buf.length = 1;
+        }
 
         if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
             std::cerr << "VIDIOC_QBUF failed: " << strerror(errno) << std::endl;
@@ -171,7 +237,7 @@ bool SentinelVisioner::camera_stream_ctrl(int camNum, bool isOpen) {
     }
 
     CameraContext* ctx = it->second.get();
-    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    int type = ctx->v4l2BufType;
 
     if (isOpen) {
         if (ctx->isStreaming) return true;
@@ -242,13 +308,14 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                 
                 // 1. 数据就绪，执行出队 (DQBUF)
                 struct v4l2_buffer buf = {};
-                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+                buf.type = ctx->v4l2BufType;
                 buf.memory = V4L2_MEMORY_MMAP;
-                
-                // --- MPLANE 必须加这个 planes 数组 ---
+
                 struct v4l2_plane planes[1] = {};
-                buf.m.planes = planes;
-                buf.length = 1;
+                if (ctx->v4l2BufType == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+                    buf.m.planes = planes;
+                    buf.length = 1;
+                }
 
                 if (ioctl(ctx->camFd, VIDIOC_DQBUF, &buf) < 0) {
                     if (errno == EAGAIN) continue;
@@ -262,8 +329,40 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                 // 获取最新一帧图像数据的时间戳
                 uint64_t timestampUs = (uint64_t)buf.timestamp.tv_sec * 1000000LL + buf.timestamp.tv_usec;
 
+                // USB YUYV→NV12 格式转换
+                int nv12DmaFd = currentDmaFd;
+                DmaBuffer_t* convBufToRelease = nullptr;
+                if (ctx->actualPixelFormat == V4L2_PIX_FMT_YUYV) {
+                    DmaBuffer_t* convBuf = ctx->usbConvertPool->get_buffer();
+                    if (convBuf == nullptr) {
+                        std::cerr << "[Thread] USB convert pool empty! Dropping frame." << std::endl;
+                        if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                            perror("[Thread] VIDIOC_QBUF requeue failed");
+                            ctx->isThreadRunning = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    convBuf->timestampUs = timestampUs;
+                    if (!rga_yuyv_to_nv12_(currentDmaFd, ctx->width, ctx->height, convBuf)) {
+                        std::cerr << "[RGA Error] YUYV->NV12 conversion failed!" << std::endl;
+                        ctx->usbConvertPool->release_buffer(convBuf);
+                        if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                            perror("[Thread] VIDIOC_QBUF requeue failed");
+                            ctx->isThreadRunning = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    nv12DmaFd = convBuf->dmaFd;
+                    convBufToRelease = convBuf;
+                }
+
                 // 暂停模式: 跳过所有 RGA 处理和队列推送，只归还 buffer
                 if (ctx->isPaused.load()) {
+                    if (convBufToRelease != nullptr) {
+                        ctx->usbConvertPool->release_buffer(convBufToRelease);
+                    }
                     if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
                         perror("[Thread] VIDIOC_QBUF requeue failed");
                         ctx->isThreadRunning = false;
@@ -289,14 +388,14 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     auto start_time = std::chrono::high_resolution_clock::now();
 
                     // 操作 A: RGA 缩放并转码给 NPU (1080P NV12 -> 640 RGB888)
-                    bool npuOk = rga_process_to_rgb_(currentDmaFd, ctx->width, ctx->height,
+                    bool npuOk = rga_process_to_rgb_(nv12DmaFd, ctx->width, ctx->height,
                                                     targetNpuBuf, currentHorizOffset,
                                                     currentVertOffset);
 
                     // 操作 B: RGA 转码 (1080P NV12 -> 1080P RGB888 预览)
                     bool previewOk = true;
                     if (targetPreviewBuf != nullptr) {
-                        previewOk = rga_convert_to_rgb_full_(currentDmaFd, ctx->width, ctx->height,
+                        previewOk = rga_convert_to_rgb_full_(nv12DmaFd, ctx->width, ctx->height,
                                                               targetPreviewBuf);
                     }
 
@@ -328,7 +427,7 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     // 记录时间戳
                     targetOrigBuf->timestampUs = timestampUs;
 
-                    bool copyOk = rga_copy_buffer_(currentDmaFd, ctx->width, ctx->height, 
+                    bool copyOk = rga_copy_buffer_(nv12DmaFd, ctx->width, ctx->height,
                                                     targetOrigBuf);
 
                     if (copyOk) {
@@ -337,6 +436,11 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                         std::cerr << "[RGA Error] 拷贝图像失败，立即归还避免内存泄漏." << std::endl;
                         ctx->origCopyPool->release_buffer(targetOrigBuf);
                     }
+                }
+
+                // 归还 USB 转换缓冲
+                if (convBufToRelease != nullptr) {
+                    ctx->usbConvertPool->release_buffer(convBufToRelease);
                 }
 
                 // RGA（或其他）处理完毕后，将该 Buffer 重新入队交还给摄像头驱动
@@ -395,6 +499,11 @@ void SentinelVisioner::release_camera_resources_(CameraContext* ctx) {
     if (ctx->previewPool) {
         ctx->previewPool->destroy_pool();
         ctx->previewPool.reset();
+    }
+
+    if (ctx->usbConvertPool) {
+        ctx->usbConvertPool->destroy_pool();
+        ctx->usbConvertPool.reset();
     }
 }
 
@@ -597,4 +706,51 @@ bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height, DmaBuf
     releasebuffer_handle(rga_handle_dst);
 
     return ret_rga == IM_STATUS_SUCCESS;
+}
+
+bool SentinelVisioner::rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
+                                          DmaBuffer_t* dstBuf) {
+    if (srcFd <= 0 || !dstBuf || dstBuf->dmaFd <= 0) {
+        std::cerr << "[RGA Error] Invalid DMA fd for YUYV->NV12!" << std::endl;
+        return false;
+    }
+
+    int srcFmt = RK_FORMAT_YUYV_422;
+    int dstFmt = RK_FORMAT_YCrCb_420_SP;
+
+    im_handle_param_t in_param = { srcWidth, srcHeight, srcFmt };
+    rga_buffer_handle_t rga_handle_src = importbuffer_fd(srcFd, &in_param);
+    if (rga_handle_src <= 0) return false;
+
+    im_handle_param_t dst_param = { dstBuf->width, dstBuf->height, dstFmt };
+    rga_buffer_handle_t rga_handle_dst = importbuffer_fd(dstBuf->dmaFd, &dst_param);
+    if (rga_handle_dst <= 0) {
+        releasebuffer_handle(rga_handle_src);
+        return false;
+    }
+
+    rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, srcWidth, srcHeight,
+                                                  srcFmt, srcWidth, srcHeight);
+    rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height,
+                                                  dstFmt, dstBuf->width, dstBuf->height);
+
+    im_rect srect = { 0, 0, srcWidth, srcHeight };
+    im_rect drect = { 0, 0, dstBuf->width, dstBuf->height };
+
+    rga_buffer_t pat;
+    memset(&pat, 0, sizeof(rga_buffer_t));
+    im_rect prect;
+    memset(&prect, 0, sizeof(im_rect));
+
+    IM_STATUS ret_rga = improcess(rga_buf_src, rga_buf_dst, pat, srect, drect, prect, 0);
+
+    releasebuffer_handle(rga_handle_src);
+    releasebuffer_handle(rga_handle_dst);
+
+    if (ret_rga <= 0) {
+        std::cerr << "[RGA Error] YUYV_422 -> NV12 failed: "
+                  << imStrError(ret_rga) << std::endl;
+        return false;
+    }
+    return true;
 }

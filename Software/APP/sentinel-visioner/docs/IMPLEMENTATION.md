@@ -4,6 +4,8 @@
 
 SentinelVisioner 是 RK3588-Omni-Sentinel 平台的多路视觉流水线组件，实现"一分三"零拷贝扇出架构：一路 1080P V4L2 输入，经 RGA 硬件裂变为三路独立数据流——NPU 推理小图、1080P RGB888 预览图像、1080P NV12 原始推流副本。三路数据流各自使用独立的 DMA 缓冲池，通过阻塞队列交付下游消费者，全程零 CPU 像素拷贝。
 
+支持两种摄像头类型混合接入：MIPI CSI（RK3588 ISP，MPLANE + NV12）和 USB UVC（Single-Planar，NV12/YUYV 自动协商，YUYV 时由 RGA 硬件转换为 NV12 后统一送入下游管线）。
+
 ---
 
 ## 2. 架构总览
@@ -107,12 +109,18 @@ struct CameraContext {
     std::atomic<bool> isThreadRunning;            // 线程退出标志
     std::atomic<bool> isPaused;                   // 暂停标志（跳过 RGA，仅 QBUF）
 
-    std::unique_ptr<DmaBufferPool> npuRgbPool;    // NPU 推理小图池 (640×640 RGB888)
-    std::unique_ptr<DmaBufferPool> origCopyPool;  // 原始推流拷贝池 (1920×1080 NV12)
-    std::unique_ptr<DmaBufferPool> previewPool;   // 预览图像池 (1920×1080 RGB888)
+    std::unique_ptr<DmaBufferPool> npuRgbPool;      // NPU 推理小图池 (640×640 RGB888)
+    std::unique_ptr<DmaBufferPool> origCopyPool;    // 原始推流拷贝池 (NV12)
+    std::unique_ptr<DmaBufferPool> previewPool;     // 预览图像池 (RGB888)
+    std::unique_ptr<DmaBufferPool> usbConvertPool;  // USB YUYV→NV12 中间转换池 (NV12)
 
     ThreadSafeQueue<NpuPreview> previewTaskQueue;   // 预览/NPU 任务队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; // 推流/录像原图队列
+
+    // 相机类型相关 (仅 USB 时部分字段有效)
+    CameraType camType;               // ISP_CAM 或 USB_CAM
+    int v4l2BufType;                  // V4L2 buffer type (MPLANE 或 SINGLE_PLANAR)
+    unsigned int actualPixelFormat;   // 实际协商后的像素格式
 };
 ```
 
@@ -139,7 +147,8 @@ public:
 
     // 初始化与生命周期
     bool add_camera(std::string& deviceName, int width, int height,
-                    int bufferCount, int camNum);
+                    int bufferCount, int camNum,
+                    CameraType camType = CameraType::ISP_CAM);
     bool camera_stream_ctrl(int camNum, bool isOpen);
     void camera_pause(int camNum, bool paused);
 
@@ -167,6 +176,8 @@ private:
                                    DmaBuffer_t* dstBuf);
     bool rga_copy_buffer_(int srcFd, int width, int height,
                           DmaBuffer_t* dstBuf);
+    bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
+                           DmaBuffer_t* dstBuf);
 };
 ```
 
@@ -323,6 +334,11 @@ capture_thread_func_(camNum)
        │    │
        │    └─ isPaused? ──── YES → VIDIOC_QBUF → continue
        │
+       ├─ [USB YUYV→NV12] 若 actualPixelFormat == YUYV
+       │    ├─ usbConvertPool->get_buffer() → convBuf
+       │    ├─ rga_yuyv_to_nv12_(currentDmaFd, W, H, convBuf)
+       │    └─ nv12DmaFd = convBuf->dmaFd (后续操作改用此 fd)
+       │
        ├─ [操作 A] npuRgbPool->get_buffer() → targetNpuBuf
        │    ├─ rga_process_to_rgb_(currentDmaFd, 1920, 1080, targetNpuBuf, EIS_offset)
        │    │   (1080P NV12 → 640×640 RGB888, 缩放+Letterbox灰边+EIS平移)
@@ -476,34 +492,40 @@ release_orig_copy_buffer(camNum, buf)
 ## 10. 完整初始化流程: add_camera
 
 ```
-add_camera(deviceName, width, height, bufferCount, camNum)
+add_camera(deviceName, width, height, bufferCount, camNum, camType)
   │
   ├─ 检查 camNum 是否已存在 → 重复则返回 false
   │
-  ├─ 1. 创建 CameraContext，填充基础参数
+  ├─ 1. 创建 CameraContext，设置 camType 和 v4l2BufType
+  │     ISP_CAM → V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+  │     USB_CAM → V4L2_BUF_TYPE_VIDEO_CAPTURE (单平面)
   │
-  ├─ 2. 创建三个 DmaBufferPool (均使用 bufferCount 块)
+  ├─ 2. open(deviceName, O_RDWR | O_NONBLOCK) → camFd
+  │
+  ├─ 3. 格式协商 (V4L2_BUF_TYPE 随 camType 而定)
+  │     ISP: 直接 VIDIOC_S_FMT(NV12, MPLANE)
+  │     USB: VIDIOC_S_FMT(NV12) → 失败则回退 VIDIOC_S_FMT(YUYV)
+  │          都失败 → release + return false
+  │     VIDIOC_G_FMT 回读实际格式和分辨率，更新 ctx->width / ctx->height
+  │
+  ├─ 4. USB YUYV 时分配 usbConvertPool (NV12, 同分辨率, bufferCount 块)
+  │
+  ├─ 5. 创建三个 DmaBufferPool (使用 ctx->width / ctx->height)
   │    ├─ npuRgbPool   (640,  640,  RGB888)
-  │    ├─ origCopyPool (1920, 1080, NV12)
-  │    └─ previewPool  (1920, 1080, RGB888)
+  │    ├─ origCopyPool (ctx->w, ctx->h, NV12)
+  │    └─ previewPool  (ctx->w, ctx->h, RGB888)
   │
-  ├─ 3. open(deviceName, O_RDWR | O_NONBLOCK) → camFd
+  ├─ 6. VIDIOC_S_PARM (尝试设置 30 FPS，失败忽略)
   │
-  ├─ 4. VIDIOC_S_FMT (V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-  │    设置 NV12, 1920×1080, FIELD_NONE
+  ├─ 7. VIDIOC_REQBUFS (V4L2_MEMORY_MMAP, bufferCount 个)
   │
-  ├─ 5. VIDIOC_S_PARM (尝试设置 30 FPS，失败忽略)
+  ├─ 8. 循环 bufferCount 次:
+  │    ├─ VIDIOC_EXPBUF → 导出 DMA fd
+  │    └─ VIDIOC_QBUF → 压入内核队列 (MPLANE 时条件化设置 m.planes)
   │
-  ├─ 6. VIDIOC_REQBUFS (V4L2_MEMORY_MMAP, bufferCount 个)
+  ├─ 9. epoll_create1 + epoll_ctl(EPOLL_CTL_ADD, camFd, EPOLLIN)
   │
-  ├─ 7. 循环 bufferCount 次:
-  │    ├─ VIDIOC_EXPBUF → 导出 DMA fd 存入 ctx->buffers[i].dmaFd
-  │    └─ VIDIOC_QBUF → 将空 buffer 压入内核队列
-  │
-  ├─ 8. epoll_create1 + epoll_ctl(EPOLL_CTL_ADD, camFd, EPOLLIN)
-  │
-  └─ 9. _cameraContextMap[camNum] = std::move(ctx)
-        返回 true
+  └─ 10. _cameraContextMap[camNum] = std::move(ctx), 返回 true
 ```
 
 **易踩坑的细节**:
@@ -603,7 +625,8 @@ release_camera_resources_(ctx)
   │
   ├─ 销毁 npuRgbPool:   destroy_pool() + reset()
   ├─ 销毁 origCopyPool: destroy_pool() + reset()
-  └─ 销毁 previewPool:  destroy_pool() + reset()
+  ├─ 销毁 previewPool:  destroy_pool() + reset()
+  └─ 销毁 usbConvertPool: destroy_pool() + reset() (若存在)
 ```
 
 **调用时机**:
@@ -644,7 +667,68 @@ release_camera_resources_(ctx)
 
 ---
 
-## 15. 性能特征
+## 15. USB 相机支持（CameraType 枚举）
+
+### 15.1 设计思路
+
+USB UVC 摄像头与 MIPI CSI 摄像头的 V4L2 接口在三个层面不同：
+
+| 差异点 | ISP (MIPI CSI) | USB (UVC) |
+|--------|---------------|-----------|
+| Buffer 类型 | `V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE` | `V4L2_BUF_TYPE_VIDEO_CAPTURE` (单平面) |
+| 像素格式 | NV12 (ISP 硬件输出) | YUYV 或 NV12 (因摄像头而异) |
+| planes 数组 | QBUF/DQBUF 必须设置 `v4l2_plane` | 不需要，设了反而出错 |
+
+设计策略：调用者通过 `CameraType` 枚举显式指定相机类型，库内据此分流初始化路径。USB 相机优先尝试 NV12 原生格式（零额外 RGA 开销），不支持时回退 YUYV + RGA 硬件转换。无论哪种路径，最终都产出 NV12 喂入统一的三 RGA 下游管线。
+
+### 15.2 格式协商流程
+
+```
+add_camera(dev, w, h, bufCnt, camNum, USB_CAM)
+  │
+  ├─ v4l2BufType = V4L2_BUF_TYPE_VIDEO_CAPTURE (单平面)
+  │
+  ├─ VIDIOC_S_FMT(NV12)
+  │    ├─ 成功 → actualPixelFormat = NV12, 无 usbConvertPool
+  │    └─ 失败 → VIDIOC_S_FMT(YUYV)
+  │              ├─ 成功 → actualPixelFormat = YUYV, 分配 usbConvertPool
+  │              └─ 失败 → return false
+  │
+  └─ VIDIOC_G_FMT 回读实际格式和分辨率
+```
+
+### 15.3 捕获线程中的 YUYV→NV12 转换
+
+当 `actualPixelFormat == V4L2_PIX_FMT_YUYV` 时，捕获线程在 DQBUF 后、三个 RGA 操作前插入一次格式转换：
+
+```
+VIDIOC_DQBUF → currentDmaFd (YUYV)
+  │
+  ├─ usbConvertPool->get_buffer() → convBuf
+  ├─ rga_yuyv_to_nv12_(currentDmaFd, width, height, convBuf)
+  │    RGA: RK_FORMAT_YUYV_422 → RK_FORMAT_YCrCb_420_SP (1:1, 无缩放)
+  ├─ nv12DmaFd = convBuf->dmaFd
+  │
+  ├─ 操作 A/B/C 使用 nv12DmaFd (NV12) 作为源
+  │
+  └─ usbConvertPool->release_buffer(convBuf)
+       VIDIOC_QBUF
+```
+
+转换失败或 convert pool 干涸时：释放已分配的转换缓冲，归还 V4L2 buffer，丢弃当前帧。不向下游队列投递任何脏数据。
+
+### 15.4 错误处理补充
+
+| 场景 | 处理方式 |
+|------|---------|
+| USB 相机拒绝 NV12 且拒绝 YUYV | `add_camera()` 返回 false，打印错误信息 |
+| USB convert pool 干涸 | 丢弃当前帧，QBUF 归还 V4L2 buffer，打印警告 |
+| RGA YUYV→NV12 转换失败 | 释放 convert buffer、QBUF、continue |
+| 暂停模式下的 convert buffer | 暂停前先释放 convert buffer，再 QBUF |
+
+---
+
+## 16. 性能特征
 
 | 指标 | 数据 | 说明 |
 |------|------|------|
@@ -658,7 +742,7 @@ release_camera_resources_(ctx)
 
 ---
 
-## 16. 代码入口点速查
+## 17. 代码入口点速查
 
 | 功能 | 函数 | 文件:行号 |
 |------|------|-----------|
@@ -668,7 +752,8 @@ release_camera_resources_(ctx)
 | 暂停/恢复 | `camera_pause()` | `sentinel-visioner.cpp:355` |
 | NPU 小图 RGA | `rga_process_to_rgb_()` | `sentinel-visioner.cpp:456` |
 | 预览转换 RGA | `rga_convert_to_rgb_full_()` | `sentinel-visioner.cpp:526` |
-| 拷贝 RGA | `rga_copy_buffer_()` | `sentinel-visioner.cpp:573` |
-| 资源清理 | `release_camera_resources_()` | `sentinel-visioner.cpp:362` |
+| 拷贝 RGA | `rga_copy_buffer_()` | `sentinel-visioner.cpp` |
+| YUYV→NV12 RGA | `rga_yuyv_to_nv12_()` | `sentinel-visioner.cpp` |
+| 资源清理 | `release_camera_resources_()` | `sentinel-visioner.cpp` |
 | 阻塞队列 | `ThreadSafeQueue::pop/push` | `ThreadSafeQueue.h:10/46` |
 | 超时队列 | `ThreadSafeQueue::try_pop` | `ThreadSafeQueue.h:31` |

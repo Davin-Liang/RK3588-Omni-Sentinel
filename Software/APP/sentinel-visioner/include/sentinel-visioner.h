@@ -31,6 +31,14 @@ struct NpuPreview {
     DmaBuffer_t* previewImage; ///< 指向供预览的 1920x1080 RGB888 图像 (可能为 nullptr)
 };
 
+/**
+ * @brief 摄像头类型枚举，区分 MIPI CSI/ISP 摄像头和 USB UVC 摄像头
+ */
+enum class CameraType {
+    ISP_CAM,  ///< MIPI CSI 摄像头 (默认，使用 MPLANE + NV12)
+    USB_CAM   ///< USB UVC 摄像头 (使用单平面 + NV12/YUYV 协商)
+};
+
 // 内部结构体，用于保存单路摄像头的完整上下文信息
 struct CameraContext {
     int camNum;
@@ -47,14 +55,22 @@ struct CameraContext {
     std::atomic<bool> isThreadRunning;
     std::atomic<bool> isPaused;
 
+    CameraType camType;                             ///< 摄像头类型
+    int v4l2BufType;                                ///< V4L2 buffer type (MPLANE 或 SINGLE_PLANAR)
+    unsigned int actualPixelFormat;                 ///< 实际协商后的 V4L2 pixel format
+
     std::unique_ptr<DmaBufferPool> npuRgbPool;      ///< NPU RGB888 内存池
     std::unique_ptr<DmaBufferPool> origCopyPool;    ///< 原始大图(NV12) 拷贝池
     std::unique_ptr<DmaBufferPool> previewPool;      ///< 1080P RGB888 预览图像内存池
+    std::unique_ptr<DmaBufferPool> usbConvertPool;  ///< USB YUYV→NV12 中间转换缓冲池
 
     ThreadSafeQueue<NpuPreview> previewTaskQueue;   ///< 供 NPU/预览消费者消费的任务队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; ///< 供推流/录像等后处理消费的原图队列
 
-    CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false), isPaused(false) {}
+    CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false),
+        isPaused(false), camType(CameraType::ISP_CAM),
+        v4l2BufType(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE),
+        actualPixelFormat(V4L2_PIX_FMT_NV12) {}
 };
 
 class SentinelVisioner {
@@ -71,8 +87,9 @@ public:
      * @param: camNum - 摄像头全局逻辑编号
      * @return: true 添加成功 / false 添加失败
      */
-    bool add_camera(std::string& deviceName, int width, int height, 
-                    int bufferCount, int camNum);
+    bool add_camera(std::string& deviceName, int width, int height,
+                    int bufferCount, int camNum,
+                    CameraType camType = CameraType::ISP_CAM);
 
     /**
      * @brief: 开启/关闭特定摄像头的视频流及捕获线程
@@ -138,4 +155,6 @@ private:
     bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf);
 
     bool rga_copy_buffer_(int srcFd, int width, int height, DmaBuffer_t* dstBuf);
+
+    bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf);
 };
