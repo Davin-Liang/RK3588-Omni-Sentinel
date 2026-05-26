@@ -337,3 +337,51 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - 无 Demo 的组件（如纯 UI）可不写此文档
 
 参考：`sentinel-visioner/docs/DEMO-INSTRUCTIONS.md`、`sentinel-streamer/docs/DEMO-INSTRUCTIONS.md`
+
+## 飞书文档
+
+项目核心技术手册：https://my.feishu.cn/docx/WDmEd9HnKo8eg1xAlN9cwez6nUb
+
+### 文档结构
+
+5 个 H1 章节（按组件），每章 9 个 H2 小节：
+
+| 节号 | 节名 | 内容 |
+|------|------|------|
+| 1 | 组件概览 | 一句话概括 + 功能列表 + 在系统中的角色 |
+| 2 | 架构设计 | ASCII 框图 + 模块关系 + 线程模型表格 |
+| 3 | 核心数据流 | 一帧数据的完整生命周期，分步展开 |
+| 4 | 关键代码示例 | 最小可运行代码（构造→启动→使用→停止→清理） |
+| 5 | 设计决策剖析 | 3-5 个决策对比表格 + 面试话术 |
+| 6 | 性能基准数据 | CPU/内存/延迟/FPS 表格 |
+| 7 | Bug 故事与面试话术 | 精选 3 个最有代表性的 bug（现象/原因/解决/面试话术） |
+| 8 | API 接口参考 | 公共方法表格 |
+| 9 | 编译部署与系统集成 | 交叉编译命令 + 依赖 + 组件间关系 + 注意事项 callout |
+
+### 更新文档注意事项
+
+1. **认证**：写入操作需要 user 身份（`--as user`），需先完成飞书授权。若报 `need_user_authorization`，执行：
+   ```bash
+   lark-cli auth login --domain docs --no-wait --json
+   # 将输出的 verification_url 发给用户，授权完成后执行：
+   lark-cli auth login --device-code <device_code>
+   ```
+2. **读取文档**：优先使用局部读取策略
+   ```bash
+   # 先看目录
+   lark-cli docs +fetch --api-version v2 --as user --doc "<url>" --scope outline --max-depth 2
+   # 精读某章节
+   lark-cli docs +fetch --api-version v2 --as user --doc "<url>" --scope section --start-block-id <标题id>
+   ```
+3. **更新策略**：精准编辑优于全量覆盖
+   - 修改单个段落：`block_replace --block-id <id> --content "<p>新内容</p>"`
+   - 追加新章节：`block_insert_after --block-id -1 --content "<h1>新章节</h1>..."`
+   - 全文重写（当前 5 章全部重建时）：`overwrite --content @file.xml`
+4. **格式**：使用 XML 格式，支持 callout/table/grid/code block 等富文本元素
+   - 核心结论 → `<callout emoji="💡" background-color="light-blue" border-color="blue">`
+   - 注意事项 → `<callout emoji="⚠️" background-color="light-red" border-color="red">`
+   - 设计决策对比 → `<table>` + 表头 `background-color="light-gray"`
+   - 代码示例 → `<pre lang="cpp" caption="说明">`
+5. **风格统一**：每个 H2 下至少 1 个非纯文本 block；连续纯文本 ≤ 3 段；不同 H2 间用 `<hr/>` 分隔；开头用 callout front-load 结论
+6. **内容来源**：每章 9 节内容从对应组件的 README.md、docs/IMPLEMENTATION.md、docs/LEARNING_GUIDE.md、BUG_RECORD.md 中提取精炼
+7. **新增组件章节时**：严格按照上述 9 节结构创建 H1 章节，内容从组件文档中提取，缺少 LEARNING_GUIDE 的组件（如 sentinel-lslidarer）需从 README + CLAUDE.md 推导设计决策和 bug 故事

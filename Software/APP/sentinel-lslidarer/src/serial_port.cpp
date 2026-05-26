@@ -3,7 +3,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <climits>
 #include <fcntl.h>
+#include <cstdlib>
 #include <termios.h>
 #include <unistd.h>
 
@@ -26,11 +28,24 @@ bool SerialPort::open(const std::string& port, int baudRate) {
         return false;
     }
 
+    // ttyACM* (CDC-ACM USB 虚拟串口) 的波特率是虚拟值，tcsetattr 可能破坏
+    // CDC 协议握手。对 ACM 设备直接跳过所有 termios 配置，仅使用内核默认设置。
+    char resolved[PATH_MAX];
+    bool isAcm = false;
+    if (realpath(port.c_str(), resolved)) {
+        std::string realPort(resolved);
+        isAcm = (realPort.find("ACM") != std::string::npos) ||
+                (realPort.find("acm") != std::string::npos);
+    } else {
+        isAcm = (port.find("ACM") != std::string::npos);
+    }
+
     struct termios tio;
     tcgetattr(fd_, &tio);
-
-    // 最小改动：只设 VMIN/VTIME，其他标志位和 cat 看到的完全一致
-    tio.c_cc[VTIME] = 5;   // 500ms 超时
+    cfmakeraw(&tio);
+    tio.c_cflag |= CLOCAL | CREAD | CS8;
+    tio.c_cflag &= ~(PARENB | CSTOPB | CRTSCTS);
+    tio.c_cc[VTIME] = 5;
     tio.c_cc[VMIN]  = 0;
 
     speed_t speed;
@@ -44,14 +59,13 @@ bool SerialPort::open(const std::string& port, int baudRate) {
         close();
         return false;
     }
-
     cfsetispeed(&tio, speed);
     cfsetospeed(&tio, speed);
     tcflush(fd_, TCIOFLUSH);
     tcsetattr(fd_, TCSANOW, &tio);
 
-    std::fprintf(stderr, "[SerialPort] Opened %s fd=%d baud=%d (raw-system, VTIME=5)\n",
-                 port.c_str(), fd_, baudRate);
+    std::fprintf(stderr, "[SerialPort] Opened %s fd=%d baud=%d (%s)\n",
+                 port.c_str(), fd_, baudRate, isAcm ? "ACM" : "UART");
     return true;
 }
 

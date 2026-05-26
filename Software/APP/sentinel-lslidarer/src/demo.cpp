@@ -11,6 +11,7 @@
 
 #include "sentinel_lslidarer.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -26,11 +27,13 @@ int main() {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    std::printf("=== SentinelLslidarer Demo ===\n");
+    std::printf("=== SentinelLslidarer Demo (build: %s %s) ===\n", __DATE__, __TIME__);
 
-    // 1. 创建实例并加载默认配置
+    // 1. 创建实例并加载配置（关闭角度屏蔽以查看全圈点云）
     SentinelLslidarer lidar;
     LidarConfig config;
+    config.angleDisableMin = 0;
+    config.angleDisableMax = 0;
     if (!lidar.load_config(config)) {
         std::fprintf(stderr, "Failed to load config.\n");
         return 1;
@@ -85,6 +88,26 @@ int main() {
                                 static_cast<double>(frame.points[frame.pointsCount - 1].x),
                                 static_cast<double>(frame.points[frame.pointsCount - 1].y),
                                 static_cast<double>(frame.points[frame.pointsCount - 1].intensity));
+
+                    // 打印后方 20° 的点（方位角 170°-190°）
+                    int rearCount = 0;
+                    constexpr double kDegToRad = M_PI / 180.0;
+                    for (uint32_t i = 0; i < frame.pointsCount; ++i) {
+                        double az = std::atan2(frame.points[i].y, frame.points[i].x) / kDegToRad;
+                        if (az < -170.0 || az > 170.0) {  // 后方 20°: ±[170°, 180°]
+                            if (rearCount < 5) {  // 最多打印 5 个
+                                std::printf("  rear[%d]: az=%.1f° x=%.3f y=%.3f d=%.3f i=%.0f\n",
+                                            i, az,
+                                            static_cast<double>(frame.points[i].x),
+                                            static_cast<double>(frame.points[i].y),
+                                            std::sqrt(frame.points[i].x * frame.points[i].x +
+                                                      frame.points[i].y * frame.points[i].y),
+                                            static_cast<double>(frame.points[i].intensity));
+                            }
+                            ++rearCount;
+                        }
+                    }
+                    std::printf("  rear 20° total: %d points\n", rearCount);
                 }
             } else {
                 std::printf("[frame] get_closest_frame failed.\n");

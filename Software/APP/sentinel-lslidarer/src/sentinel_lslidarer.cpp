@@ -53,15 +53,16 @@ bool SentinelLslidarer::start() {
 void SentinelLslidarer::stop() {
     running_.store(false, std::memory_order_release);
 
+    // 先关串口，释放阻塞在 ::read() 中的 reader 线程
+    if (serialPort_) {
+        serialPort_->close();
+    }
+
     if (readerThread_.joinable()) {
         readerThread_.join();
     }
 
-    if (serialPort_) {
-        serialPort_->close();
-        serialPort_.reset();
-    }
-
+    serialPort_.reset();
     ringBuffer_.reset();
 }
 
