@@ -1,0 +1,141 @@
+# SentinelQT 实现文档
+
+## 1. 架构总览
+
+```
+SentinelQT 进程
+├── 主线程 (Qt Event Loop)
+│   ├── Widget (QStackedWidget 双页布局)
+│   │   ├── Page 0: 主控页面 (预览 + 控制 + 监控)
+│   │   └── Page 1: 视频管理页面 (QTableWidget + libavformat)
+│   ├── SentinelVisioner visioner_      // 相机采集管线
+│   ├── SentinelStreamer streamer_      // 推流/录像
+│   └── QTimer × 2 (clock + record)
+│
+├── PreviewWorker 子线程
+│   └── 循环: try_get_preview(200ms) → QImage → emit frameReady() → release_preview()
+│
+└── SentinelStreamer 内部线程
+    └── 消费 processTaskQueue → RGA缩放 → MPP编码 → RTSP/MP4
+```
+
+## 2. 线程模型
+
+### 2.1 PreviewWorker (子线程预览拉帧)
+
+- **创建**: `PreviewWorker(visioner_, camNum)` 构造于主线程，`moveToThread(previewThread_)` 移至子线程
+- **启动**: `QThread::started` 信号 → `PreviewWorker::start()` 槽（DirectConnection，在子线程执行）
+- **拉帧循环**: `try_get_preview(camNum, 200)` 带 200ms 超时轮询，避免 `wait_get_preview` 的无限阻塞 `pop()`
+- **帧投递**: `emit frameReady(QImage)` → AutoConnection 自动转为 QueuedConnection（跨线程），主线程 `on_frame_ready_` 处理
+- **退出**: `stop()` 设置 `std::atomic<bool> running_ = false` → 下次超时检查退出 → `QThread::quit()/wait()`
+
+### 2.2 StreamerCallback 跨线程通知
+
+`SentinelStreamer` 的回调在 streamer 内部线程调用，需安全跨越到 Qt 主线程：
+
+```cpp
+static void streamer_callback_(int camNum, StreamerEvent event, const char* detail) {
+    Widget* w = Widget::instance();
+    QString detailStr = detail ? QString::fromUtf8(detail) : QString();
+    QMetaObject::invokeMethod(w, [=]() {
+        w->on_streamer_event(camNum, event, detailStr);
+    }, Qt::QueuedConnection);
+}
+```
+
+关键点：
+- C 字符串 `detail` 在回调返回前转为 `QString`（所有权转移）
+- `Qt::QueuedConnection` 确保 lambda 在主线程事件循环中执行
+- `Widget::instance()` 静态单例指针桥接 C 风格回调与 C++ 对象
+
+### 2.3 析构顺序
+
+```
+~Widget():
+  1. visioner_->camera_stream_ctrl(0, false)  // 先停相机捕获线程
+  2. stop_preview_()                            // 再停预览线程
+  3. streamer_->remove_camera(0)               // 清理推流/录像
+  4. delete streamer_ / visioner_ / ui          // 最后释放资源
+```
+
+## 3. 核心实现细节
+
+### 3.1 预览管线
+
+```
+V4L2 capture thread
+  → RGA: NV12 → 1080p RGB888 (rga_convert_to_rgb_full_)
+  → previewTaskQueue.push(NpuPreview{npuImage, previewImage})
+
+PreviewWorker 子线程
+  → try_get_preview(200ms) → NpuPreview
+  → QImage(previewImage->virtAddr, 1920, 1080, RGB888)  // 零拷贝引用
+  → emit frameReady(img.copy())                           // 深拷贝后立即归还 DMA
+  → release_preview()
+
+主线程 on_frame_ready_
+  → QPixmap::fromImage(image).scaled(labelSize, KeepAspectRatio)
+  → previewLabel->setPixmap()
+```
+
+### 3.2 系统暂停/恢复 (camera_pause)
+
+RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止硬件流：
+
+```
+关闭系统:
+  1. stop_record / stop_stream    (停止编码和输出)
+  2. stop_preview_()               (停止预览线程)
+  3. camera_pause(0, true)         (capture 线程跳过 RGA，仅 QBUF 循环)
+
+启动系统:
+  1. camera_pause(0, false)        (恢复 RGA 处理，帧立即产生)
+  2. start_preview_()              (重启预览线程)
+  3. 启用推流/录像按钮
+```
+
+`camera_pause` 实现：capture 线程检查 `ctx->isPaused`，为 true 时跳过所有 RGA 操作和队列推送，仅将 buffer 归还 V4L2 驱动。
+
+### 3.3 视频管理子页面
+
+- **页面切换**: `QStackedWidget::setCurrentIndex(0/1)`
+- **文件扫描**: `QDir::entryList("*.mp4", QDir::Time)` 按时间倒序
+- **元数据读取**: `avformat_open_input → avformat_find_stream_info → codecpar->width/height, container duration`
+- **时长换算**: 容器 `duration` 为 `AV_TIME_BASE` (微秒)，直接可用；流 `duration` 为 `time_base` 单位，需 `av_rescale_q` 转换
+- **删除**: `QFile::remove` + `QMessageBox::question` 确认对话框
+- **表头自适应**: 文件名列 `QHeaderView::Stretch`，其余列 `resizeColumnsToContents`
+
+### 3.4 硬件监控
+
+每秒由 `clockTimer_` 触发 `update_hw_usage_()`：
+
+| 指标 | 数据源 | 解析方式 |
+|------|--------|----------|
+| CPU | `/proc/stat` | 相邻采样 total/idle 差分，`100 - idleDelta*100/totalDelta` |
+| RGA | `/sys/kernel/debug/rkrga/load` | 逐行 `sscanf("load = %d%%")` 取 3 核 |
+| NPU | `/sys/kernel/debug/rknpu/load` | `sscanf("Core0: %d%%, Core1: %d%%, Core2: %d%%")` |
+| 温度 | `/sys/class/thermal/thermal_zone0/temp` | 整数值 / 1000 ℃ |
+
+### 3.5 按钮复用式设计
+
+每个控制按钮（推流/录像）为单一 `QPushButton`，点击时根据 `is_streaming()/is_recording()` 判断当前状态执行启/停操作。`update_button_states_()` 动态切换文字和样式：
+
+- 推流停止时: "启动推流" 绿色 `#238636`
+- 推流进行时: "停止推流" 红色 `#da3633`
+- 录像停止时: "启动录像" 蓝色 `#1f6feb`
+- 录像进行时: "停止录像" 红色 `#da3633`
+
+## 4. 配置文件
+
+`config.ini` 使用 `QSettings::IniFormat`，路径为 `QCoreApplication::applicationDirPath() + "/config.ini"`，确保与可执行文件同目录：
+
+```ini
+[Stream]
+rtspUrl=rtsp://127.0.0.1:8554/live/cam0
+
+[Record]
+dir=/mnt/sdcard
+resolution=1080
+```
+
+界面修改分辨率时通过 `config_.setValue()` 即时写回文件。
