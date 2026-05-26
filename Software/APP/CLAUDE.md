@@ -29,7 +29,7 @@ make install
 
 ### 交叉编译器
 
-- `sentinel-lslidarer` / `sentinel-visioner`: `aarch64-buildroot-linux-gnu`
+- `sentinel-lslidarer` / `sentinel-visioner` / `SentinelQT`: `aarch64-buildroot-linux-gnu`
 - `dma-buffer-pool`: `aarch64-linux-gnu` (Linaro GCC 6.3.1)
 
 环境变量 `CROSS_COMPILE_PATH` 可覆盖默认工具链路径（仅 `sentinel-lslidarer` 的 build.sh 支持此环境变量）。
@@ -40,6 +40,7 @@ make install
 cd sentinel-visioner && ./build.sh     # 视觉管线
 cd sentinel-lslidarer && ./build.sh    # 激光雷达驱动
 cd dma-buffer-pool && ./build.sh       # DMA 内存池
+cd SentinelQT && ./build.sh            # QT5 触控界面
 ```
 
 注意 `sentinel-visioner` 通过相对路径 `../dma-buffer-pool` 和 `../3rdparty/librga` 引用依赖，需保持目录树结构不变。
@@ -69,6 +70,12 @@ sentinel-streamer (推流与录像组件)
   ├── dma-buffer-pool (720p 中间缩放缓冲池)
   ├── 3rdparty/librga (1080p→720p NV12 硬件缩放)
   └── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
+
+SentinelQT (QT5 嵌入式触控界面)
+  ├── sentinel-visioner (预览帧获取 + RGA 预处理)
+  ├── sentinel-streamer (推流/录像启停控制)
+  ├── Qt5 Widgets (QStackedWidget 双页布局)
+  └── config.ini (运行时配置)
 ```
 
 ### sentinel-lslidarer — 镭神 N10Plus 单线雷达驱动
@@ -99,12 +106,13 @@ sentinel-streamer (推流与录像组件)
 
 "一分三"零拷贝扇出：一路 1080P V4L2 输入，经 RGA 硬件裂变为三路独立数据流：
 1. RGB888 640×640 NPU 推理小图（带 Letterbox 灰边 + EIS 防抖偏移）
-2. NV12 1280×720 OSD 叠加底图
+2. RGB888 1920×1080 预览图像（供 QT 界面渲染）
 3. NV12 1920×1080 原始推流副本
 
 - **CameraContext**: 每路相机状态（包括 3 个 DmaBufferPool、2 个 ThreadSafeQueue、epoll fd 等）
 - **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd（无 mmap），连续 3 次 RGA 调度
-- **消费者线程**: 通过 `wait_get_npuOSD()` / `wait_get_orig_copy_buffer()` 阻塞拉取，条件变量休眠（空闲 CPU 0.0%）。**必须调用对应的 `release_*()` 归还 DMA 缓冲区**
+- **消费者线程**: 通过 `wait_get_preview()` / `try_get_preview(camNum, timeoutMs)` / `wait_get_orig_copy_buffer()` 拉取，条件变量休眠（空闲 CPU 0.0%）。**必须调用对应的 `release_*()` 归还 DMA 缓冲区**
+- **camera_pause**: `camera_pause(camNum, paused)` 可在不执行 STREAMOFF 的前提下暂停/恢复 RGA 处理，避免 RK3588 ISP 管线重建问题
 - **ThreadSafeQueue**: 泛型阻塞队列模板（`include/ThreadSafeQueue.h`），`std::mutex` + `std::condition_variable`
 
 唯一公共头文件: `include/sentinel-visioner.h`，API 类: `SentinelVisioner`
@@ -140,6 +148,22 @@ sentinel-streamer (推流与录像组件)
 | `libdrm` | DRM 头文件 + `libdrm.so`（allocator 通过 dlopen 使用） |
 | `allocator` | DMA/DRM 底层分配器，CMake OBJECT 库（非 .a） |
 | `ffmpeg` | FFmpeg 动态库 (`libavcodec.so` 等，nyanmisaka/ffmpeg-rockchip 分支交叉编译) |
+
+### SentinelQT — QT5 嵌入式触控界面
+
+RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner 和 SentinelStreamer 的上层集成者。
+
+- **技术栈**: Qt5 Widgets，QStackedWidget 双页布局（主控页 / 视频管理页），全屏无边框
+- **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 1080p RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
+- **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI
+- **录像控制**: 启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名
+- **视频管理**: QTableWidget 列表展示录制文件（libavformat 读分辨率/时长），支持删除
+- **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）
+- **系统暂停**: `camera_pause(camNum, paused)` 暂停 RGA 处理，硬件流保持，避免 STREAMOFF 重建管线
+- **线程模型**: PreviewWorker 独立 QThread + std::atomic<bool> 启停控制；主线程处理 UI 和定时器；析构逆序释放
+- **配置**: `config.ini` QSettings IniFormat，运行时修改分辨率即时写回
+
+关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`main.cpp`（入口）、`config.ini`（配置）、`build.sh`（构建脚本）
 
 ## 关键约定
 

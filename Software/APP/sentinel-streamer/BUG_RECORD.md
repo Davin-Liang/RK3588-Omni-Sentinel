@@ -139,3 +139,43 @@ export PKG_CONFIG=pkg-config
 ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 ./configure ... --disable-doc
 ```
+
+---
+
+## 13. MPP 编码器内部 PTS 覆盖导致录像时长异常
+
+**现象**: 录像时长与实际录制时长严重不符（如录 7s 显示 24s，录 5s 显示 11s）。
+
+**原因**: `encode_and_mux` 中原本只在 `pkt->pts == AV_NOPTS_VALUE` 时才用 `sentPts` 覆盖。MPP 硬件编码器内部会重新打时间戳（非空值），导致写入 MP4 的 PTS 为编码器内部时钟值而非我们计算的正确值。
+
+**解决**: 始终强制覆盖 PTS/DTS：`pkt->pts = sentPts; pkt->dts = sentPts;`，不再依赖 `AV_NOPTS_VALUE` 判断。
+
+---
+
+## 14. 录制开始前队列积压旧帧导致 PTS 基准偏移
+
+**现象**: 录制前相机已在运行（预览中），点击录制后视频前几秒时间戳跳变，总时长偏长。
+
+**原因**: `processTaskQueue` 在录制开始前已积压旧帧（捕获线程持续推送）。录制线程启动时，队列中第一个帧的时间戳是几秒前的旧值，`firstTsUs` 基于此旧值归零 PTS，导致所有帧 PTS 整体偏移。
+
+**解决**: PTS 基准改为录制按钮按下时的 `clock_gettime(CLOCK_MONOTONIC)` 系统时间（`baselineTsUs`），不再使用首帧时间戳。同时跳过队列中 `tsUs < baselineTsUs` 的积压旧帧。
+
+---
+
+## 15. 队列积压旧帧未丢弃
+
+**现象**: 同 #14，录制开始瞬间队列中存在录制前捕获的旧帧。
+
+**原因**: 录制线程启动后直接从 `processTaskQueue` 拉帧，不区分新旧。
+
+**解决**: 在 `stream_thread_func_` 中检查 `tsUs < baselineTsUs`，积压旧帧直接 `release_orig_copy_buffer` 归还 DMA 缓冲池并跳过。
+
+---
+
+## 16. 移除 MPP 编码器 framerate 导致画面马赛克
+
+**现象**: 去掉 `ctx->framerate` 设置后，画面出现严重马赛克/块效应，仅第一帧（I帧）清晰。
+
+**原因**: MPP 硬件编码器依赖 `framerate` 参数进行码率控制。不设 `framerate` 时编码器码控异常，分配的码率远低于目标值，导致 P/B 帧质量急剧下降。
+
+**解决**: 恢复 `ctx->framerate = AVRational{15, 1}`（与相机实际帧率匹配），framerate 仅用于码率控制，PTS 由我们独立覆盖，互不干扰。
