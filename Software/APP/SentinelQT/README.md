@@ -1,26 +1,31 @@
 # SentinelQT
 
-基于 Qt5 Widgets 的嵌入式触屏应用程序，运行于 RK3588 ARM64 Linux 平台。集成 sentinel-visioner（相机视觉管线）和 sentinel-streamer（推流/录像），提供全触屏操作的实时监控界面。
+基于 Qt5 Widgets 的嵌入式触屏应用程序，运行于 RK3588 ARM64 Linux 平台。集成 sentinel-visioner（双路相机视觉管线）和 sentinel-streamer（推流/录像），提供全触屏操作的双路实时监控界面。
 
 ## 功能概述
 
-- **1080p 实时预览**：通过独立 RGA 管线获取 RGB888 预览图，经 `PreviewWorker` 子线程异步拉取，`QImage` → `QPixmap` 渲染到 `QLabel`。预览启停与 V4L2 硬件流解耦，关闭预览不中断底层帧捕获，NPU/推流/录像仍可照常运行。
+- **双路实时预览**：左右并排同时显示 CAM0（ISP 1080p）和 CAM1（USB 720p）预览画面。两个独立 `PreviewWorker` 各自运行在独立 QThread，通过 lambda 捕获 camNum 路由帧到对应 label。每路预览可独立开启/关闭，关闭预览不中断底层帧捕获。
 
-- **推流与录像分离控制**：基于 `SentinelStreamer` 的双编码器架构，推流（720p MPP 硬编码 → ffmpeg 子进程 RTSP）与录像（1080p/720p MPP 硬编码 → MP4）各自独立启停，互不干扰。三组复用式按钮（推流/录像/系统），一键启停，运行时按钮变色，状态一目了然。
+- **按相机独立控制**：每路相机拥有独立 4 按钮（预览切换、推流启停、录像启停、暂停/恢复）。全局系统按钮一键启停两路。按钮运行时变色，状态一目了然。
 
-- **录像分辨率可选**：设置行提供 `QComboBox` 下拉选择 1080p 或 720p，选择立即写入 `config.ini`。
+- **推流与录像分离控制**：基于 `SentinelStreamer` 的双编码器架构，每路相机独立启停 RTSP 推流（720p MPP 硬编码 → ffmpeg 子进程）和 MP4 录像（1080p/720p）。USB 相机录像强制 720p。
+
+- **录像分辨率可选**：设置行提供 `QComboBox` 下拉选择 CAM0 录像分辨率 1080p 或 720p，CAM1 固定 720p。
 
 - **视频文件管理子页面**：通过 `QStackedWidget` 切换到独立子页面，`QTableWidget` 列出录像目录下所有 `.mp4` 文件。分辨率和时长通过 libavformat 读取封装层元数据，每行附带"删除"按钮（含二次确认对话框）。
 
-- **系统暂停/恢复**：`camera_pause(true/false)` 暂停/恢复 RGA 处理管线，底层 V4L2 流保持活跃不 STREAMOFF。暂停时自动停止推流、录像和预览线程，恢复时自动重启。
+- **系统暂停/恢复**：按相机独立 `camera_pause(camNum, paused)` 暂停/恢复 RGA 处理管线，底层 V4L2 流保持活跃不 STREAMOFF。暂停时自动停止该路推流、录像和预览线程。
 
 - **硬件状态监控**：标题栏左侧实时显示（1 秒刷新）：
   - **温度**：`/sys/class/thermal/thermal_zone0/temp`
   - **CPU 利用率**：`/proc/stat` 差分计算
   - **RGA 利用率**：`/sys/kernel/debug/rkrga/load`，逐核显示
   - **NPU 利用率**：`/sys/kernel/debug/rknpu/load`，逐核显示
+  - **日期时间**：标题栏右侧显示 `yyyy-MM-dd HH:mm:ss`
 
-- **时间戳文件名**：录像文件命名格式 `record_yyyyMMdd_HHmmss.mp4`，由 `QDateTime::currentDateTime()` 生成。
+- **双路状态栏**：底部状态栏自动合并两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示。
+
+- **时间戳文件名**：录像文件命名格式 `camX_record_yyyyMMdd_HHmmss.mp4`。
 
 ## 构建与部署
 
@@ -69,19 +74,31 @@ mv /etc/init.d/S50weston /etc/init.d/disabled.S50weston
 
 ## 配置文件
 
-`config.ini` 格式：
+`config.ini` 按相机分节，USB 相机分辨率上限 720p（超限自动钳位）：
 
 ```ini
-[Stream]
-rtspUrl=rtsp://127.0.0.1:8554/live/cam0
+[Camera0]
+device=/dev/video11
+width=1920
+height=1080
+streamUrl=rtsp://127.0.0.1:8554/live/cam0
+recordResolution=1080
+
+[Camera1]
+device=/dev/video21
+width=1280
+height=720
+streamUrl=rtsp://127.0.0.1:8554/live/cam1
+recordResolution=720
 
 [Record]
 dir=/mnt/sdcard
-resolution=1080
 ```
 
 | 键 | 节 | 说明 | 默认值 |
 |----|-----|------|--------|
-| `rtspUrl` | `[Stream]` | RTSP 推流目标地址 | `rtsp://127.0.0.1:8554/live/cam0` |
+| `device` | `[Camera0/1]` | V4L2 设备节点 | `/dev/video11` / `/dev/video21` |
+| `width/height` | `[Camera0/1]` | 采集分辨率（CAM1 上限 1280×720） | 1920×1080 / 1280×720 |
+| `streamUrl` | `[Camera0/1]` | RTSP 推流目标地址 | 各不同 |
+| `recordResolution` | `[Camera0/1]` | 录像分辨率（CAM1 强制 720） | 1080 / 720 |
 | `dir` | `[Record]` | 录像文件保存目录 | `/mnt/sdcard` |
-| `resolution` | `[Record]` | 默认录像分辨率，`1080` 或 `720` | `1080` |

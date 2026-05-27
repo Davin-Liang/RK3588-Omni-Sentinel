@@ -2,9 +2,11 @@
 
 ## 1. 概述
 
-SentinelVisioner 是 RK3588-Omni-Sentinel 平台的多路视觉流水线组件，实现"一分三"零拷贝扇出架构：一路 1080P V4L2 输入，经 RGA 硬件裂变为三路独立数据流——NPU 推理小图、1080P RGB888 预览图像、1080P NV12 原始推流副本。三路数据流各自使用独立的 DMA 缓冲池，通过阻塞队列交付下游消费者，全程零 CPU 像素拷贝。
+SentinelVisioner 是 RK3588-Omni-Sentinel 平台的多路视觉流水线组件，实现"一分三"零拷贝扇出架构：每路 V4L2 输入经 RGA 硬件裂变为三路独立数据流——NPU 推理小图、RGB888 预览图像、NV12 原始推流副本。三路数据流各自使用独立的 DMA 缓冲池，通过阻塞队列交付下游消费者，全程零 CPU 像素拷贝。
 
-支持两种摄像头类型混合接入：MIPI CSI（RK3588 ISP，MPLANE + NV12）和 USB UVC（Single-Planar，NV12/YUYV 自动协商，YUYV 时由 RGA 硬件转换为 NV12 后统一送入下游管线）。
+支持两路摄像头同时接入：CAM0 为 MIPI CSI（RK3588 ISP，1920x1080，MPLANE + NV12），CAM1 为 USB UVC（1280x720，Single-Planar，NV12/YUYV 自动协商）。两路相机通过 `camNum` 索引拥有完全隔离的 `CameraContext`、DMA 内存池和捕获线程。
+
+**已知问题（2026-05-27）**: USB 相机画面存在横向花屏，根因未确定。当前使用 `usbSafePool` 缓解（详见 #7 bug 记录和 2.5 节）。
 
 ---
 
@@ -56,6 +58,30 @@ SentinelVisioner 是 RK3588-Omni-Sentinel 平台的多路视觉流水线组件�
 - 每路数据流有独立的 `DmaBufferPool`，格式和分辨率按用途定制
 - 捕获线程与消费者间通过 `ThreadSafeQueue` 解耦，条件变量休眠，空闲 CPU 0%
 - 暂停机制跳过 RGA 处理但不停止 V4L2 硬件流，避免 RK3588 ISP 管线重建问题
+
+### 2.5 USB 相机安全拷贝机制
+
+USB 相机的 NV12 DMA-BUF 经 RGA 直接读取时存在横向花屏问题（根因未确定，详见 `BUG_RECORD.md` #7）。作为缓解措施，为 USB NV12 相机引入 `usbSafePool`（4 个 DMA buffer，NV12 格式）。
+
+USB NV12 相机的捕获线程流程与 ISP 不同：
+
+```
+DQBUF → sync_dma_buf_for_device → imcopy(相机BUF → usbSafePool)
+→ QBUF(立即归还相机, 约1-2ms内完成)
+→ improcess(usbSafePool → NPU, IM_SYNC)
+→ improcess(usbSafePool → 预览, IM_SYNC)
+→ imcopy(usbSafePool → origCopyPool)
+→ 释放 usbSafePool
+```
+
+关键设计：
+- 相机 DMA-BUF 仅被访问一次（`imcopy`），后续三次 RGA 操作均从 usbSafePool 读取
+- `usbSafePool` 由 `dma_heap`（`DMA_HEAP_DMA32_UNCACHE_PATCH`）分配，与 ISP 相机使用的 DMA 池同类型
+- `improcess` 全部使用 `IM_SYNC` 同步模式，确保 RGA 完成后再继续
+- `DQBUF` 后调用 `DMA_BUF_IOCTL_SYNC`（`sync_dma_buf_for_device`）刷新缓存
+- 读取 `VIDIOC_G_FMT` 的 `bytesperline` 字段，通过 `srcStride` 参数传递给 RGA 函数
+
+此机制**未完全解决**花屏问题，相关代码标注了 `safeBuf`/`safeBufToRelease` 变量名，方便后续回退。
 
 ---
 

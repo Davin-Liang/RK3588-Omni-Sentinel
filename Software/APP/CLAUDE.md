@@ -104,26 +104,30 @@ SentinelQT (QT5 嵌入式触控界面)
 
 ### sentinel-visioner — 多路视觉流水线
 
-"一分三"零拷贝扇出：一路 V4L2 输入（MIPI CSI 或 USB UVC），经 RGA 硬件裂变为三路独立数据流：
+双路"一分三"零拷贝扇出：每路 V4L2 输入（MIPI CSI 或 USB UVC），经 RGA 硬件裂变为三路独立数据流：
 1. RGB888 640×640 NPU 推理小图（带 Letterbox 灰边 + EIS 防抖偏移）
-2. RGB888 1920×1080 预览图像（供 QT 界面渲染）
-3. NV12 1920×1080 原始推流副本（同格式 RGA 拷贝）
+2. RGB888 预览图像（供 QT 界面渲染，分辨率随相机 1080p/720p）
+3. NV12 原始推流副本（同格式 RGA 拷贝）
 
-支持两种相机类型混合接入，通过 `CameraType` 枚举区分（`ISP_CAM` / `USB_CAM`）：
+支持两种相机类型混合接入，通过 `CameraType` 枚举区分（`ISP_CAM` / `USB_CAM`），两路通过 `camNum` 索引完全隔离：
 
-- **CameraContext**: 每路相机状态。ISP 包含 3 个 DmaBufferPool，USB 非 NV12 时额外一个 `usbConvertPool`（YUYV→NV12 转换）
-- **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd。ISP 路径 MPLANE + NV12 直通；USB 路径单平面，先协商 NV12/YUYV 格式（NV12 不支持时回退 YUYV + RGA 转换），统一为 NV12 后执行 3 次 RGA 调度。MPLANE/单平面的 `v4l2_plane` 和 `v4l2_buf_type` 按 `ctx->v4l2BufType` 条件化
+- **CameraContext**: 每路相机状态。包含 4~5 个 DmaBufferPool：`npuRgbPool`(640×640)、`previewPool`(全分辨率 RGB888)、`origCopyPool`(全分辨率 NV12)；USB 额外 `usbConvertPool`(YUYV→NV12) 和 `usbSafePool`(NV12 安全拷贝，4 buffer)
+- **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd。ISP 路径 MPLANE + NV12 直通；USB 路径单平面，先协商 NV12/YUYV 格式（NV12 不支持时回退 YUYV + RGA 转换）。USB NV12 先 `imcopy` 到 `usbSafePool`（缓解横向花屏问题，根因未确定），后续 RGA 操作从安全池读取。所有 `improcess` 使用 `IM_SYNC` 同步模式。
 - **消费者线程**: 通过 `wait_get_preview()` / `try_get_preview(camNum, timeoutMs)` / `wait_get_orig_copy_buffer()` 拉取，条件变量休眠（空闲 CPU 0.0%）。**必须调用对应的 `release_*()` 归还 DMA 缓冲区**
 - **camera_pause**: `camera_pause(camNum, paused)` 可在不执行 STREAMOFF 的前提下暂停/恢复 RGA 处理，避免 RK3588 ISP 管线重建问题
 - **ThreadSafeQueue**: 泛型阻塞队列模板（`include/ThreadSafeQueue.h`），`std::mutex` + `std::condition_variable`
+
+已知问题：USB 相机 NV12 画面存在横向花屏（2026-05-27），详见 `BUG_RECORD.md` #7。
 
 唯一公共头文件: `include/sentinel-visioner.h`，API 类: `SentinelVisioner`
 
 ### sentinel-streamer — 推流与录像组件
 
-作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 1080p NV12 帧 → RGA 缩放为 720p → MPP 硬件编码 H.264 → 双路输出。
+作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 NV12 帧 → RGA 缩放为 720p → MPP 硬件编码 H.264 → 双路输出。
 
 - **双编码器架构**: `streamEncCtx`（720p, 推流）和 `recordEncCtx`（1080p/720p, 录像）各自独立，惰性创建，互不干扰
+- **动态源分辨率**: RGA 缩放器 `rga_scale_nv12_to_720p(srcFd, srcWidth, srcHeight, dstFd)` 支持任意源分辨率（1080p→720p 下采样、720p→720p imcopy），不再硬编码 1080p
+- **720p 源直通录像**: 源已是 720p 时录像直接从 `origBuf` 编码（绕过 RGA 缩放），避免 identity scale 失败导致空 MP4
 - **ffmpeg 子进程推流**: `popen("ffmpeg -f h264 -i pipe:0 -c copy -f rtsp ...")` 通过管道推流，`ferror` 检测断线自动重连；子进程崩溃不影响主程序
 - **PTS 硬件时间戳**: `(timestampUs - 首帧偏移) × 90000 / 1000000`，帧率波动不影响播放速度
 - **MP4 录像**: FFmpeg API `av_write_frame` 写入 MP4，支持 1080p / 720p
@@ -156,14 +160,17 @@ SentinelQT (QT5 嵌入式触控界面)
 RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner 和 SentinelStreamer 的上层集成者。
 
 - **技术栈**: Qt5 Widgets，QStackedWidget 双页布局（主控页 / 视频管理页），全屏无边框
-- **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 1080p RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
-- **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI
-- **录像控制**: 启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名
+- **双路预览**: 左右并排 `previewLabel0` / `previewLabel1`，两个独立 PreviewWorker 各自运行在独立 QThread，通过 lambda 捕获 camNum 将 `frameReady` 信号路由到对应 label。每路预览可独立开启/关闭
+- **双路控制**: 每路相机独立 4 按钮（预览切换、推流、录像、暂停），全局系统按钮一键启停两路
+- **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
+- **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI。两路独立 RTSP URL
+- **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。USB 相机强制 720p
 - **视频管理**: QTableWidget 列表展示录制文件（libavformat 读分辨率/时长），支持删除
-- **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）
+- **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）及日期时间
 - **系统暂停**: `camera_pause(camNum, paused)` 暂停 RGA 处理，硬件流保持，避免 STREAMOFF 重建管线
-- **线程模型**: PreviewWorker 独立 QThread + std::atomic<bool> 启停控制；主线程处理 UI 和定时器；析构逆序释放
-- **配置**: `config.ini` QSettings IniFormat，运行时修改分辨率即时写回
+- **线程模型**: 两个 PreviewWorker 各自独立 QThread + std::atomic<bool> 启停控制；主线程处理 UI 和定时器；析构逆序释放
+- **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]` 两节，USB 分辨率上限 720p 钳位
 
 关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`main.cpp`（入口）、`config.ini`（配置）、`build.sh`（构建脚本）
 

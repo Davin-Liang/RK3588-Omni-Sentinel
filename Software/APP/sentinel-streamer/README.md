@@ -1,6 +1,6 @@
 # SentinelStreamer
 
-推流与录像组件。从 `SentinelVisioner` 拉取 NV12 帧，RGA 缩放 + MPP 硬件编码 H.264，ffmpeg 子进程推 RTSP，FFmpeg API 写 MP4。
+推流与录像组件。从 `SentinelVisioner` 拉取 NV12 帧（支持任意分辨率），RGA 动态缩放为 720p + MPP 硬件编码 H.264，ffmpeg 子进程推 RTSP，FFmpeg API 写 MP4。720p 源直通录像（绕过 RGA 缩放）。
 
 ---
 

@@ -58,11 +58,13 @@ struct CameraContext {
     CameraType camType;                             ///< 摄像头类型
     int v4l2BufType;                                ///< V4L2 buffer type (MPLANE 或 SINGLE_PLANAR)
     unsigned int actualPixelFormat;                 ///< 实际协商后的 V4L2 pixel format
+    int srcBytesPerLine;                            ///< USB 相机实际行跨度（字节），用于 RGA 导入正确 stride
 
     std::unique_ptr<DmaBufferPool> npuRgbPool;      ///< NPU RGB888 内存池
     std::unique_ptr<DmaBufferPool> origCopyPool;    ///< 原始大图(NV12) 拷贝池
     std::unique_ptr<DmaBufferPool> previewPool;      ///< 1080P RGB888 预览图像内存池
     std::unique_ptr<DmaBufferPool> usbConvertPool;  ///< USB YUYV→NV12 中间转换缓冲池
+    std::unique_ptr<DmaBufferPool> usbSafePool;     ///< USB NV12 安全拷贝缓冲池（RGA 兼容性）
 
     ThreadSafeQueue<NpuPreview> previewTaskQueue;   ///< 供 NPU/预览消费者消费的任务队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; ///< 供推流/录像等后处理消费的原图队列
@@ -70,7 +72,7 @@ struct CameraContext {
     CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false),
         isPaused(false), camType(CameraType::ISP_CAM),
         v4l2BufType(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE),
-        actualPixelFormat(V4L2_PIX_FMT_NV12) {}
+        actualPixelFormat(V4L2_PIX_FMT_NV12), srcBytesPerLine(0) {}
 };
 
 class SentinelVisioner {
@@ -149,12 +151,13 @@ private:
 
     void capture_thread_func_(int camNum);
 
-    bool rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight, 
+    bool rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight, int srcStride,
                              DmaBuffer_t* dstBuf, int horizontalOffset, int verticalOffset);
 
-    bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf);
+    bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, int srcStride,
+                                   DmaBuffer_t* dstBuf);
 
-    bool rga_copy_buffer_(int srcFd, int width, int height, DmaBuffer_t* dstBuf);
+    bool rga_copy_buffer_(int srcFd, int width, int height, int srcStride, DmaBuffer_t* dstBuf);
 
-    bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf);
+    bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight, int srcStride, DmaBuffer_t* dstBuf);
 };

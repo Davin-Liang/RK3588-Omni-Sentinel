@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 // RGA 缩放函数 (定义在 rga_scaler.cpp)
 // ---------------------------------------------------------------------------
-extern bool rga_scale_nv12_1080p_to_720p(int srcFd, int dstFd);
+extern bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd);
 
 // ============================================================================
 // 全局状态回调
@@ -127,7 +127,7 @@ static void stream_thread_func_(StreamerContext* ctx)
             scaleBuf = ctx->scale720pPool->get_buffer();
             if (scaleBuf) {
                 scaleBuf->timestampUs = tsUs;
-                if (!rga_scale_nv12_1080p_to_720p(origBuf->dmaFd, scaleBuf->dmaFd)) {
+                if (!rga_scale_nv12_to_720p(origBuf->dmaFd, origBuf->width, origBuf->height, scaleBuf->dmaFd)) {
                     ctx->scale720pPool->release_buffer(scaleBuf);
                     scaleBuf = nullptr;
                 }
@@ -135,21 +135,27 @@ static void stream_thread_func_(StreamerContext* ctx)
         }
 
         // ----------------------------------------------------------------
-        // 步骤 3: 编码 1080p 原始帧 → MP4 录像
-        //         avcodec_send_frame 内部 dup(dmaFd)，调用后可归还 origBuf
+        // 步骤 3: 原始帧直接编码 → MP4 录像
+        //   - 1080p 录像: 使用 origBuf
+        //   - 720p 录像且源已是 720p (如 USB 相机): 直接编码 origBuf，绕过 RGA 缩放
         // ----------------------------------------------------------------
-        if (ctx->recordEnabled &&
-            ctx->recordResolution == RecordResolution::RES_1080P &&
-            ctx->recordEncCtx)
-        {
-            encode_and_mux(ctx->recordEncCtx,
-                           origBuf->virtAddr, 1920, 1080,
-                           pts,
-                           nullptr, ctx->mp4Ctx);
+        bool srcAlready720p = (origBuf->width == 1280 && origBuf->height == 720);
+        if (ctx->recordEnabled && ctx->recordEncCtx) {
+            if (ctx->recordResolution == RecordResolution::RES_1080P) {
+                encode_and_mux(ctx->recordEncCtx,
+                               origBuf->virtAddr, origBuf->width, origBuf->height,
+                               pts,
+                               nullptr, ctx->mp4Ctx);
+            } else if (ctx->recordResolution == RecordResolution::RES_720P && srcAlready720p) {
+                encode_and_mux(ctx->recordEncCtx,
+                               origBuf->virtAddr, origBuf->width, origBuf->height,
+                               pts,
+                               nullptr, ctx->mp4Ctx);
+            }
         }
 
         // ----------------------------------------------------------------
-        // 步骤 4: 归还原始 1080p DMA 缓冲
+        // 步骤 4: 归还原始 DMA 缓冲
         // ----------------------------------------------------------------
         ctx->visioner->release_orig_copy_buffer(ctx->camNum, origBuf);
 
@@ -164,10 +170,11 @@ static void stream_thread_func_(StreamerContext* ctx)
         }
 
         // ----------------------------------------------------------------
-        // 步骤 5b: 720p MP4 录像 (recordEncCtx → MP4)
+        // 步骤 5b: 720p MP4 录像 (1080p 源 → RGA 缩放 → MP4)
         // ----------------------------------------------------------------
         if (scaleBuf && ctx->recordEnabled &&
             ctx->recordResolution == RecordResolution::RES_720P &&
+            !srcAlready720p &&
             ctx->recordEncCtx)
         {
             encode_and_mux(ctx->recordEncCtx,

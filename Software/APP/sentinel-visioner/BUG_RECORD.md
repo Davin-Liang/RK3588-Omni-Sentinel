@@ -54,6 +54,54 @@
 
 ---
 
+## 7. USB 相机 NV12 预览/推流画面横向花屏（未解决）
+
+**现象**: USB 相机（/dev/video21，1280x720，NV12 原生输出）预览和推流画面出现横向花屏（水平条纹状撕裂），相机静止时较轻微，运动时明显加剧。ISP 相机（MIPI CSI）完全正常。USB 单独运行时问题仍在，排除两路 RGA 竞争。
+
+**原因**: 未确定根因。以下是排查过程：
+
+1. **异步 RGA 导致 QBUF 后缓冲区被覆盖** — 排除：`improcess` 传入 `usage=0` 即异步模式，RGA 未完成就归还缓冲区给驱动。修复：所有 `improcess(..., 0)` → `improcess(..., IM_SYNC)`。无效。
+
+2. **DMA 缓存一致性** — 排除：USB 相机的 V4L2 MMAP 缓冲区导出为 DMA-BUF 后被 RGA 读取，可能存在 CPU 缓存残留。修复：`DQBUF` 后调用 `DMA_BUF_IOCTL_SYNC`（`sync_dma_buf_for_device`）刷新缓存。无效（V4L2 缓冲区可能是 coherent DMA，此 ioctl 为 no-op）。
+
+3. **NV12 bytesperline stride 不匹配** — 排除：USB 相机 V4L2 缓冲区可能有对齐过的 `bytesperline > width`，RGA 用 `width` 作为行跨度导致读取偏移。修复：`add_camera` 中从 `VIDIOC_G_FMT` 读取 `bytesperline`，三个 RGA 函数增加 `srcStride` 参数并用于 `importbuffer_fd` + `wrapbuffer_handle`。诊断日志显示 `bytesperline == width`（1280），无 padding。无效。
+
+4. **USB DMA 缓冲区类型与 RGA 硬件不兼容** — 推测：USB 控制器的 DMA 缓冲区可能使用不同 IOMMU 域或内存类型（vmalloc/DMA-sg），RGA 硬件直接读取产生数据错位。
+
+**当前缓解措施（workaround）**:
+
+为 USB NV12 相机新增 `usbSafePool`（4 个 DMA buffer），捕获线程流程改为：
+```
+DQBUF → sync_dma → imcopy(相机BUF → usbSafePool) → QBUF(立即归还相机)
+→ improcess(usbSafePool → NPU) → improcess(usbSafePool → 预览)
+→ imcopy(usbSafePool → origCopyPool) → 释放 usbSafePool
+```
+
+所有 RGA 格式转换操作从 `usbSafePool`（`dma_heap` 分配的 uncached DMA 缓冲区，与 ISP 相机同类型）读取，相机 DMA 缓冲区仅被访问一次（`imcopy`）。此措施**未解决**花屏，仅将 RGA 对 USB 缓冲区的直接读取次数从 3 次减少到 1 次，留待后续排查。
+
+**关键文件**:
+- `sentinel-visioner/include/sentinel-visioner.h`: `CameraContext` 新增 `usbSafePool`、`srcBytesPerLine` 字段
+- `sentinel-visioner/src/sentinel-visioner.cpp`: `add_camera` 分配 `usbSafePool`；`capture_thread_func_` 安全拷贝逻辑；三个 RGA 函数新增 `srcStride` 参数
+- `sentinel-streamer/src/rga_scaler.cpp`: 函数改为 `rga_scale_nv12_to_720p(srcFd, srcWidth, srcHeight, dstFd)` 支持动态分辨率
+- `sentinel-streamer/src/sentinel_streamer.cpp`: 720p 源录像直接用 `origBuf` 编码（绕过 RGA 缩放）
+
+**回退指南**:
+若要回退到无 workaround 的干净版本：
+1. 移除 `CameraContext::usbSafePool` 及其分配/释放代码
+2. 移除 `capture_thread_func_` 中 USB safe copy 逻辑（`safeBuf`/`safeBufToRelease`）
+3. 恢复 `rga_process_to_rgb_`/`rga_convert_to_rgb_full_`/`rga_copy_buffer_` 的 `srcStride` 参数为直接使用 `srcWidth`/`width`
+4. 恢复 `rga_scaler.cpp` 函数签名为 `rga_scale_nv12_1080p_to_720p(srcFd, dstFd)`
+5. 移除 `DMA_BUF_IOCTL_SYNC` 及 `sync_dma_buf_for_device`
+6. `improcess` 的 `IM_SYNC` 改为 `0` 可保留（同步模式无害）
+
+**待排查方向**:
+- `cat /sys/kernel/debug/dma_buf/<fd>/bufinfo` 查看 USB 相机 DMA-BUF 的实际内存类型
+- 对比 ISP 和 USB 相机的 DMA-BUF exporter（`/sys/kernel/debug/dri/0/` 相关节点）
+- 尝试 USB 相机强制使用 YUYV 格式，走 `rga_yuyv_to_nv12_` 转换路径
+- 检查 RK3588 RGA 硬件勘误表是否有 USB 相关限制
+
+---
+
 ## 6. rga_scale_nv12_to_nv12_ 被 rga_convert_to_rgb_full_ 替代
 
 **现象**: 预览画面为 720p 低分辨率 NV12 格式，色彩空间与 QT 渲染不兼容，显示异常。

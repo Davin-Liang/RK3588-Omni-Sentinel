@@ -172,6 +172,26 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 
 ---
 
+## 17. RGA 缩放器硬编码 1080p 源导致 720p 相机推流失败
+
+**现象**: USB 720p 相机（CAM1）启动推流时报 `[RgaScaler] importbuffer_fd src failed`，推流线程立即退出。
+
+**原因**: `rga_scale_nv12_1080p_to_720p()` 硬编码源分辨率为 `{1920, 1080}`，`importbuffer_fd` 向 RGA 驱动声明源 DMA-BUF 为 1080p NV12，但 USB 相机实际 DMA-BUF 为 720p，驱动校验尺寸不匹配，导入失败。
+
+**解决**: 函数改为 `rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd)`，`importbuffer_fd` 和 `wrapbuffer_handle` 使用实际源分辨率。源已是 720p 时用 `imcopy` 替代 `improcess`。
+
+---
+
+## 18. 720p 源录像产生空 MP4 文件
+
+**现象**: USB 相机（CAM1，720p）录制完成后 MP4 文件无法播放，`avformat` 读不到分辨率和时长。
+
+**原因**: 720p 录像路径通过 `scaleBuf`（RGA 缩放结果）编码。USB 相机源已是 720p，RGA identity copy 可能失败导致 `scaleBuf` 为 null，编码步骤被静默跳过，MP4 只有头尾无帧数据。
+
+**解决**: 720p 录像时检测源分辨率：源已是 720p 则直接用 `origBuf` 编码（与 1080p 路径一致），绕过 `scaleBuf`。1080p 源录 720p 仍走 RGA 缩放路径不变。
+
+---
+
 ## 16. 移除 MPP 编码器 framerate 导致画面马赛克
 
 **现象**: 去掉 `ctx->framerate` 设置后，画面出现严重马赛克/块效应，仅第一帧（I帧）清晰。

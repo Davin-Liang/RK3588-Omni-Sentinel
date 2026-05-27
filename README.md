@@ -13,18 +13,19 @@
 ## 🏗️ 系统架构
 
 ```
-                        /dev/video11 (MIPI-CSI 摄像头)
+                        /dev/video11 (MIPI-CSI ISP 1080p)
+                        /dev/video21 (USB UVC 720p)
                                │
                                ▼
                     SentinelVisioner (视觉管线)
-                    "一分三"零拷贝扇出
+                    双路"一分三"零拷贝扇出
                     ├── NPU 推理小图 (640×640 RGB888)
-                    ├── 预览大图 (1920×1080 RGB888)
-                    └── 推流副本 (1920×1080 NV12)
+                    ├── 预览大图 (RGB888, 1080p/720p)
+                    └── 推流副本 (NV12, 1080p/720p)
                          │           │            │
                          ▼           ▼            ▼
                     NPU 推理    SentinelQT    SentinelStreamer
-                    (待接入)    (触控HMI)     ├─ RGA 缩放 → MPP 编码
+                    (待接入)    (双路触控HMI)  ├─ RGA 缩放 → MPP 编码
                                               ├─ ffmpeg 子进程 → RTSP
                                               └─ FFmpeg API → MP4
 
@@ -51,10 +52,10 @@
 | 组件 | 目录 | 角色 | 依赖 |
 |------|------|------|------|
 | **SentinelLslidarer** | `Software/APP/sentinel-lslidarer/` | 镭神 N10Plus 单线雷达驱动，SWCR 无锁环形缓冲区，时间戳融合接口 | 仅 libpthread |
-| **SentinelVisioner** | `Software/APP/sentinel-visioner/` | 多路相机视觉管线，V4L2 + RGA 硬件加速"一分三"零拷贝扇出 | dma-buffer-pool, librga |
+| **SentinelVisioner** | `Software/APP/sentinel-visioner/` | 双路相机视觉管线（ISP 1080p + USB 720p），V4L2 + RGA 硬件加速"一分三"零拷贝扇出 | dma-buffer-pool, librga |
 | **LidarCameraFusion** | `Software/APP/lidar-camera-fusion/` | 视觉-雷达数据融合，Alpha-Beta 多目标跟踪，四态生命周期管理 | sentinel-lslidarer (仅头文件) |
-| **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像，MPP 硬件编码 H.264，双编码器独立架构 | sentinel-visioner, librga, ffmpeg |
-| **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，预览监控 + 推流录像控制 + 视频管理 | sentinel-visioner, sentinel-streamer, Qt5 |
+| **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像，MPP 硬件编码 H.264，双编码器独立架构，动态源分辨率 | sentinel-visioner, librga, ffmpeg |
+| **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 按相机独立推流/录像/暂停控制 + 视频管理 | sentinel-visioner, sentinel-streamer, Qt5 |
 | **DmaBufferPool** | `Software/APP/dma-buffer-pool/` | DMA 内存池，O(1) 空闲链表分配/归还 | librga, libdrm |
 
 每个组件目录下均有独立的 `README.md` 和完整文档，详见各组件的 `docs/` 目录。
@@ -66,7 +67,7 @@
 | 项目 | 规格 |
 |------|------|
 | **SoC** | Rockchip RK3588 (4×A76 + 4×A55, Mali-G610 GPU, 6 TOPS NPU) |
-| **摄像头** | MIPI-CSI (OV5647 或兼容), ISP 输出 `/dev/video11`, 1080P NV12 |
+| **摄像头** | 双路：MIPI-CSI ISP (`/dev/video11`, 1080p NV12) + USB UVC (`/dev/video21`, 720p NV12/YUYV) |
 | **激光雷达** | 镭神 N10Plus 单线 TOF, 串口 460800 baud, 10Hz, 540 点/圈 |
 | **操作系统** | Linux (Buildroot), ARM64, 无 ROS 运行时 |
 | **显示** | DSI 触屏, Qt5 eglfs 直接渲染 (DRM/KMS) |
