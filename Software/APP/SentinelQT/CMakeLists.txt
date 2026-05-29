@@ -61,6 +61,11 @@ if(NOT TARGET lidar_camera_fusion_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion ${CMAKE_CURRENT_BINARY_DIR}/fusion_build)
 endif()
 
+# Web 远程控制
+if(NOT TARGET web_control_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../web-control ${CMAKE_CURRENT_BINARY_DIR}/webcontrol_build)
+endif()
+
 find_package(Threads REQUIRED)
 
 set(TS_FILES SentinelQT_zh_CN.ts)
@@ -96,6 +101,7 @@ target_link_libraries(SentinelQT PRIVATE
     sentinel_visioner_lib
     sentinel_lslidarer_lib
     lidar_camera_fusion_lib
+    web_control_lib
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib
@@ -107,3 +113,5 @@ endif()
 
 install(TARGETS SentinelQT DESTINATION ./)
 install(FILES config.ini DESTINATION ./)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../web-control/web/ DESTINATION web
+    FILES_MATCHING PATTERN "*.html" PATTERN "*.css" PATTERN "*.js")

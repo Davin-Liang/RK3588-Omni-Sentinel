@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RK3588 Omni Sentinel</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#549688;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  color:#2d3535;
+  min-height:100vh;
+  padding:6px;
+}
+#titleBar{
+  background:#F4EAC5;
+  border:1px solid #30363d;
+  border-radius:10px;
+  padding:6px 16px;
+  display:flex;align-items:center;
+  height:38px;margin-bottom:4px;
+}
+#hwLabel{font-size:11px;font-weight:500;color:#2d3535;width:280px;white-space:nowrap;overflow:hidden;}
+#titleLabel{font-size:18px;font-weight:600;color:#58a6ff;flex:1;text-align:center;}
+#clockLabel{font-size:14px;font-weight:500;color:#2d3535;width:280px;text-align:right;}
+.page{display:none}
+.page.active{display:block}
+#previewFrame{
+  background:#000;
+  border:1px solid #30363d;
+  border-radius:10px;
+  display:flex;gap:4px;padding:4px;
+  min-height:280px;
+}
+.preview-pane{
+  flex:1;background:#000;border-radius:6px;
+  position:relative;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+}
+.preview-pane video{
+  width:100%;height:100%;object-fit:contain;
+}
+.preview-placeholder{
+  color:#8b949e;font-size:14px;position:absolute;text-align:center;
+}
+#statusBar{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:8px;
+  padding:4px 12px;display:flex;align-items:center;
+  height:24px;margin:4px 0;font-size:12px;
+}
+#fpsLabel0{color:#4a5555;width:180px}
+#recordInfoLabel{color:#f85149;flex:1;text-align:center}
+#fpsLabel1{color:#4a5555;width:180px;text-align:right}
+.ctrl-frame{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:8px;
+  padding:4px 10px;display:flex;align-items:center;
+  gap:6px;height:36px;margin-bottom:4px;
+}
+.cam-label{font-size:13px;font-weight:600;color:#2d3535;width:40px}
+.btn{
+  font-size:12px;font-weight:600;color:#e6edf3;border:none;border-radius:5px;
+  padding:4px 10px;cursor:pointer;height:28px;min-width:60px;white-space:nowrap;
+}
+.btn:disabled{opacity:0.5;cursor:default}
+.btn-on{background:#da3633;border:1px solid #f85149}
+.btn-off{background:#238636;border:1px solid #2ea043}
+.btn-blue{background:#1f6feb;border:1px solid #388bfd}
+.btn-yellow{background:#d29922;border:1px solid #e2b144}
+.btn-cream{font-size:12px;color:#2d3535;background:#F5F0D7;border:1px solid #8b949e;border-radius:8px}
+.btn-red{background:#da3633;border:1px solid #f85149}
+#bottomBar{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:8px;
+  padding:4px 10px;display:flex;align-items:center;
+  gap:8px;height:34px;margin-bottom:4px;
+}
+#resLabel{font-size:12px;color:#4a5555}
+#resSelect{
+  font-size:13px;color:#2d3535;background:#F5F0D7;
+  border:1px solid #30363d;border-radius:8px;padding:2px 4px;height:28px;
+}
+.spacer{flex:1}
+#statusLabel{font-size:12px;color:#fff;text-align:center;padding:2px;height:20px}
+#videoTitleBar{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:10px;
+  padding:6px 16px;display:flex;align-items:center;height:38px;margin-bottom:10px;
+}
+#videoTitle{font-size:16px;font-weight:600;color:#58a6ff}
+#videoTable{
+  width:100%;border-collapse:separate;border-spacing:0;
+  background:#F4EAC5;border:1px solid #30363d;border-radius:8px;
+  font-size:14px;color:#2d3535;overflow:hidden;
+}
+#videoTable th{
+  background:#F5F0D7;color:#2d3535;font-size:13px;font-weight:600;
+  padding:8px;text-align:left;border-bottom:2px solid #30363d;
+}
+#videoTable td{padding:8px;border-bottom:1px solid #e0d8b0}
+#videoTable tr:last-child td{border-bottom:none}
+#videoTable tr:hover{background:#d4e6f1}
+.btn-del{
+  font-size:13px;color:#2d3535;background:#F5F0D7;
+  border:1px solid #f85149;border-radius:4px;padding:3px 14px;cursor:pointer;
+}
+#fusionTitleBar{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:10px;
+  padding:6px 16px;display:flex;align-items:center;height:38px;margin-bottom:4px;
+}
+#fusionTitle{font-size:18px;font-weight:600;color:#58a6ff;flex:1;text-align:center}
+#fusionContent{display:flex;gap:8px;min-height:400px}
+#fusionCanvas{
+  background:#1a1a2e;border:1px solid #30363d;border-radius:8px;flex:1;
+}
+#fusionParams{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:8px;
+  width:320px;padding:10px;overflow-y:auto;max-height:450px;
+}
+.param-section-title{font-size:13px;font-weight:600;color:#58a6ff;padding:6px 0 2px 0}
+.param-row{display:flex;align-items:center;gap:4px;margin:3px 0}
+.param-name{font-size:11px;color:#4a5555;min-width:95px}
+.param-input{
+  font-size:12px;color:#2d3535;background:#F5F0D7;
+  border:1px solid #8b949e;border-radius:4px;padding:2px 4px;
+  width:80px;height:24px;text-align:right;
+}
+.param-unit{font-size:11px;color:#4a5555;width:24px}
+.param-help{
+  font-size:10px;font-weight:700;color:#58a6ff;background:#F5F0D7;
+  border:1px solid #58a6ff;border-radius:9px;width:18px;height:18px;
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+}
+.param-desc{
+  font-size:12px;color:#2d3535;background:#e8f0fe;
+  border:1px solid #58a6ff;border-radius:4px;padding:6px;margin:2px 0;
+}
+#fusionStatusBar{
+  background:#F4EAC5;border:1px solid #30363d;border-radius:8px;
+  padding:4px 12px;display:flex;height:36px;align-items:center;margin-top:4px;
+  font-size:13px;color:#2d3535;
+}
+</style>
+</head>
+<body>
+
+<!-- Title Bar -->
+<div id="titleBar">
+  <div id="hwLabel">--°C  CPU --  RGA-/-/-  NPU-/-/-</div>
+  <div id="titleLabel">RK3588 Omni Sentinel</div>
+  <div id="clockLabel"></div>
+</div>
+
+<!-- Page 0: Main -->
+<div class="page active" id="pageMain">
+  <div id="previewFrame">
+    <div class="preview-pane" id="pane0">
+      <span class="preview-placeholder">相机1 推流未开启</span>
+    </div>
+    <div class="preview-pane" id="pane1">
+      <span class="preview-placeholder">相机2 推流未开启</span>
+    </div>
+  </div>
+  <div id="statusBar">
+    <span id="fpsLabel0">相机1 --</span>
+    <span id="recordInfoLabel"></span>
+    <span id="fpsLabel1">相机2 --</span>
+  </div>
+  <div class="ctrl-frame">
+    <span class="cam-label">相机1</span>
+    <button class="btn btn-off" id="btnStream0">开始推流</button>
+    <button class="btn btn-blue" id="btnRecord0">开始录像</button>
+    <button class="btn btn-yellow" id="btnPause0">暂停</button>
+  </div>
+  <div class="ctrl-frame">
+    <span class="cam-label">相机2</span>
+    <button class="btn btn-off" id="btnStream1">开始推流</button>
+    <button class="btn btn-blue" id="btnRecord1">开始录像</button>
+    <button class="btn btn-yellow" id="btnPause1">暂停</button>
+  </div>
+  <div id="bottomBar">
+    <span id="resLabel">相机1 录像:</span>
+    <select id="resSelect" onchange="changeRes()">
+      <option value="1080">1080p</option><option value="720">720p</option>
+    </select>
+    <span class="spacer"></span>
+    <button class="btn btn-cream" onclick="showPage('fusion')">融合管理</button>
+    <button class="btn btn-cream" onclick="showPage('videos');loadVideos()">视频管理</button>
+    <button class="btn btn-red" id="btnSystem">关闭系统</button>
+  </div>
+</div>
+
+<!-- Page 1: Videos -->
+<div class="page" id="pageVideos">
+  <div id="videoTitleBar">
+    <span id="videoTitle">录像文件管理</span>
+    <span class="spacer"></span>
+    <button class="btn btn-cream" onclick="loadVideos()">刷新</button>
+    <button class="btn btn-cream" onclick="showPage('main')">← 返回</button>
+  </div>
+  <table id="videoTable">
+    <thead><tr><th>文件名</th><th>分辨率</th><th>时长</th><th>大小</th><th>操作</th></tr></thead>
+    <tbody id="videoBody"></tbody>
+  </table>
+</div>
+
+<!-- Page 2: Fusion -->
+<div class="page" id="pageFusion">
+  <div id="fusionTitleBar">
+    <button class="btn btn-cream" onclick="showPage('main')">← 返回</button>
+    <span id="fusionTitle">融合目标跟踪</span>
+    <span class="spacer"></span>
+    <button class="btn btn-off" id="btnFusionToggle">启用融合</button>
+  </div>
+  <div id="fusionContent">
+    <canvas id="fusionCanvas" width="560" height="450"></canvas>
+    <div id="fusionParams"></div>
+  </div>
+  <div id="fusionStatusBar">
+    <span id="fusionStatusLabel">目标: 0 | 已确认: 0 | 告警: 0 | 融合: 关闭</span>
+    <span class="spacer"></span>
+    <span id="fusionDistLabel"></span>
+  </div>
+</div>
+
+<div id="statusLabel"></div>
+
+<script>
+// ========== Global State (from WebSocket updates) ==========
+const DEVICE_IP = location.hostname;
+const WS_URL = `ws://${DEVICE_IP}:${location.port || 8080}/ws`;
+let ws = null;
+let wsReconnectTimer = null;
+let trackingTargets = [];
+let fusionEnabled = false;
+
+// Per-camera state (updated by WebSocket)
+let cam = {
+  0: { previewActive: false, streaming: false, recording: false, paused: false, fps: 0, width: 0, height: 0, recordResolution: 1080 },
+  1: { previewActive: false, streaming: false, recording: false, paused: false, fps: 0, width: 0, height: 0, recordResolution: 720 }
+};
+
+// ========== WebSocket ==========
+function connectWS() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  try {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => { console.log('WS connected'); if (wsReconnectTimer) clearInterval(wsReconnectTimer); };
+    ws.onmessage = (e) => {
+      try { handleWS(JSON.parse(e.data)); } catch(ex) {}
+    };
+    ws.onclose = () => { ws = null; wsReconnectTimer = setInterval(connectWS, 3000); };
+    ws.onerror = () => { if (ws) ws.close(); };
+  } catch(ex) {}
+}
+
+function handleWS(msg) {
+  switch(msg.type) {
+    case 'status': updateUI(msg.data); break;
+    case 'tracking': updateTracking(msg.data); break;
+    case 'event': handleEvent(msg.data); break;
+  }
+}
+
+// ========== REST API ==========
+async function apiPost(path, body) {
+  try {
+    const resp = await fetch(`/api/v1${path}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: body ? JSON.stringify(body) : '{}'
+    });
+    const r = await resp.json();
+    if (!r.ok) console.error('API error:', path, r.error);
+    return r;
+  } catch(e) { console.error('API fail:', path, e); return {ok:false}; }
+}
+
+async function apiGet(path) {
+  try { const r = await fetch(`/api/v1${path}`); return await r.json(); }
+  catch(e) { return null; }
+}
+
+async function apiPut(path, body) {
+  try {
+    const r = await fetch(`/api/v1${path}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{}) });
+    return await r.json();
+  } catch(e) { return {ok:false}; }
+}
+
+async function apiDelete(path, body) {
+  try {
+    const r = await fetch(`/api/v1${path}`, { method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{}) });
+    return await r.json();
+  } catch(e) { return {ok:false}; }
+}
+
+// ========== Button Click Handlers ==========
+async function toggleStream(camNum) {
+  if (cam[camNum].streaming) {
+    await apiPost(`/cam/${camNum}/stream/stop`);
+    stopMjpegVideo(camNum);
+  } else {
+    await apiPost(`/cam/${camNum}/stream/start`);
+    // 延迟等推流启动后开始 MJPEG 视频
+    setTimeout(() => startMjpegVideo(camNum), 1000);
+  }
+}
+
+async function toggleRecord(camNum) {
+  if (cam[camNum].recording) {
+    await apiPost(`/cam/${camNum}/record/stop`);
+  } else {
+    await apiPost(`/cam/${camNum}/record/start`);
+  }
+}
+
+async function togglePause(camNum) {
+  if (cam[camNum].paused) {
+    await apiPost(`/cam/${camNum}/resume`);
+  } else {
+    await apiPost(`/cam/${camNum}/pause`);
+  }
+}
+
+// Wire button clicks
+for (let i = 0; i < 2; i++) {
+  document.getElementById('btnStream'+i).onclick = () => toggleStream(i);
+  document.getElementById('btnRecord'+i).onclick = () => toggleRecord(i);
+  document.getElementById('btnPause'+i).onclick  = () => togglePause(i);
+}
+
+// System button
+document.getElementById('btnSystem').onclick = async function() {
+  const anyActive = cam[0].previewActive || cam[1].previewActive;
+  if (anyActive) {
+    await apiPost('/system/stop');
+  } else {
+    await apiPost('/system/start');
+  }
+};
+
+// ========== UI Update from WS Status ==========
+function updateUI(data) {
+  // HW
+  if (data.hw && data.hw.ok) {
+    const h = data.hw;
+    const cpu = h.cpu >= 0 ? `CPU${String(h.cpu).padStart(3)}` : 'CPU --';
+    const temp = h.temp >= 0 ? `${h.temp}°C` : '--°C';
+    const rga = h.rga && h.rga.length ? h.rga.map(v=>v>=0?v:'-').join('/') : '-/-/-';
+    const npu = h.npu && h.npu.length ? h.npu.map(v=>v>=0?v:'-').join('/') : '-/-/-';
+    document.getElementById('hwLabel').textContent = `${temp}  ${cpu}  RGA${rga}  NPU${npu}`;
+  }
+
+  for (let i = 0; i < 2; i++) {
+    const d = data[`cam${i}`];
+    if (!d) continue;
+
+    // Save state
+    cam[i].streaming = !!d.streaming;
+    cam[i].recording = !!d.recording;
+    cam[i].paused = !!d.paused;
+    cam[i].previewActive = !!d.previewActive;
+    cam[i].width = d.width || 0;
+    cam[i].height = d.height || 0;
+    cam[i].fps = d.fps || 0;
+    if (d.recordResolution) cam[i].recordResolution = d.recordResolution;
+
+    // FPS
+    const fpsLabel = document.getElementById(`fpsLabel${i}`);
+    if (cam[i].fps > 0) {
+      fpsLabel.textContent = `相机${i+1} ${cam[i].fps.toFixed(1)}fps  |  ${cam[i].width}x${cam[i].height}`;
+    }
+
+    // Stream button
+    const btnStream = document.getElementById(`btnStream${i}`);
+    btnStream.textContent = cam[i].streaming ? '停止推流' : '开始推流';
+    btnStream.className = cam[i].streaming ? 'btn btn-on' : 'btn btn-off';
+
+    // Record button
+    const btnRecord = document.getElementById(`btnRecord${i}`);
+    btnRecord.textContent = cam[i].recording ? '停止录像' : '开始录像';
+    btnRecord.className = cam[i].recording ? 'btn btn-on' : 'btn btn-blue';
+
+    // Pause button
+    const btnPause = document.getElementById(`btnPause${i}`);
+    btnPause.textContent = cam[i].paused ? '恢复' : '暂停';
+    btnPause.className = cam[i].paused ? 'btn btn-yellow' : 'btn btn-off';
+
+    // Recording elapsed
+    if (cam[i].recording) {
+      const elapsed = d.recordingElapsedSec || 0;
+      const hh = String(Math.floor(elapsed / 3600)).padStart(2,'0');
+      const mm = String(Math.floor((elapsed % 3600) / 60)).padStart(2,'0');
+      const ss = String(elapsed % 60).padStart(2,'0');
+      document.getElementById('recordInfoLabel').textContent =
+        `● REC 相机${i+1} ${cam[i].recordResolution}p  ${hh}:${mm}:${ss}`;
+    }
+
+    // Video: streaming state change → handled by toggleStream button click
+    if (!cam[i].streaming && mjpegTimer[i]) {
+      stopMjpegVideo(i);
+    }
+  }
+
+  // Clear recording info if neither camera is recording
+  if (!cam[0].recording && !cam[1].recording) {
+    document.getElementById('recordInfoLabel').textContent = '';
+  }
+
+  // System button
+  const anyActive = cam[0].previewActive || cam[1].previewActive;
+  const btnSys = document.getElementById('btnSystem');
+  btnSys.textContent = anyActive ? '关闭系统' : '启动系统';
+  btnSys.className = anyActive ? 'btn btn-red' : 'btn btn-off';
+
+  // Fusion state
+  if (data.fusionEnabled !== undefined) {
+    fusionEnabled = data.fusionEnabled;
+    const btnFus = document.getElementById('btnFusionToggle');
+    btnFus.textContent = fusionEnabled ? '停止融合' : '启用融合';
+    btnFus.className = fusionEnabled ? 'btn btn-on' : 'btn btn-off';
+  }
+
+  if (data.trackingTargets) {
+    trackingTargets = data.trackingTargets;
+    updateFusionStatus();
+    drawRadar();
+  }
+}
+
+function updateTracking(data) {
+  if (data.targets) {
+    trackingTargets = data.targets;
+    updateFusionStatus();
+    drawRadar();
+  }
+}
+
+function handleEvent(data) {
+  const evt = data.event || '';
+  const d = data.detail || '';
+  const camLabel = `相机${(data.cam || 0) + 1}`;
+  let text = '';
+  switch (evt) {
+    case 'stream_started': text = `${camLabel} 推流已启动`; break;
+    case 'stream_stopped': text = `${camLabel} 推流已停止`; break;
+    case 'record_started': text = `${camLabel} 录像已开始`; break;
+    case 'record_stopped': text = `${camLabel} 录像已停止`; break;
+    case 'error': text = `${camLabel} 错误: ${d}`; break;
+  }
+  if (text) document.getElementById('statusLabel').textContent = text;
+}
+
+// ========== MJPEG 视频显示（推流时轮询 snapshot.jpg） ==========
+let mjpegTimer = [null, null];
+let mjpegImg = [null, null];
+
+function startMjpegVideo(camNum) {
+  if (mjpegTimer[camNum]) return; // 已经在运行
+  const pane = document.getElementById(`pane${camNum}`);
+  const placeholder = pane.querySelector('.preview-placeholder');
+
+  // 创建 img 元素
+  const img = document.createElement('img');
+  img.style.width = '100%';
+  img.style.height = '100%';
+  img.style.objectFit = 'contain';
+  pane.appendChild(img);
+  mjpegImg[camNum] = img;
+
+  // 每 150ms 刷新一次（约 6-7 fps）
+  function poll() {
+    if (!mjpegTimer[camNum]) return; // 已停止
+    const ts = Date.now();
+    img.src = `/api/v1/cam/${camNum}/snapshot.jpg?t=${ts}`;
+    img.onload = () => {
+      if (placeholder) placeholder.style.display = 'none';
+    };
+  }
+  poll();
+  mjpegTimer[camNum] = setInterval(poll, 150);
+}
+
+function stopMjpegVideo(camNum) {
+  if (mjpegTimer[camNum]) {
+    clearInterval(mjpegTimer[camNum]);
+    mjpegTimer[camNum] = null;
+  }
+  if (mjpegImg[camNum]) {
+    mjpegImg[camNum].remove();
+    mjpegImg[camNum] = null;
+  }
+  const pane = document.getElementById(`pane${camNum}`);
+  const placeholder = pane.querySelector('.preview-placeholder');
+  if (placeholder) {
+    placeholder.textContent = `相机${camNum + 1} 推流未开启`;
+    placeholder.style.display = '';
+  }
+}
+
+// ========== Page Navigation ==========
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const map = { main: 'pageMain', videos: 'pageVideos', fusion: 'pageFusion' };
+  const el = document.getElementById(map[name]);
+  if (el) el.classList.add('active');
+  if (name === 'fusion') loadFusionConfig();
+}
+
+// 从后端拉取当前融合参数并填充到输入框
+async function loadFusionConfig() {
+  const data = await apiGet('/fusion/config');
+  if (!data || !data.ok) return;
+  // Tracker params
+  ['clusterEpsMeters','alpha','beta','maxAssociationDistMeters','minHitsToConfirm',
+   'maxCoastingFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters'].forEach(k => {
+    const el = document.getElementById('fp_' + k);
+    if (el && data[k] !== undefined) el.value = data[k];
+  });
+  // Camera intrinsics
+  for (let ci = 0; ci < 2; ci++) {
+    const cam = data['cam' + ci];
+    if (!cam) continue;
+    ['fx','fy','cx','cy'].forEach(f => {
+      const el = document.getElementById('fp_cam' + ci + '_' + f);
+      if (el && cam[f] !== undefined) el.value = cam[f];
+    });
+  }
+  // Fusion enabled state
+  if (data.fusionEnabled !== undefined) {
+    fusionEnabled = data.fusionEnabled;
+    const btnFus = document.getElementById('btnFusionToggle');
+    btnFus.textContent = fusionEnabled ? '停止融合' : '启用融合';
+    btnFus.className = fusionEnabled ? 'btn btn-on' : 'btn btn-off';
+  }
+}
+
+// ========== Resolution ==========
+function changeRes() {
+  const val = document.getElementById('resSelect').value;
+  apiPut('/cam/0/record-resolution', { resolution: val + 'p' });
+}
+
+// ========== Fusion ==========
+document.getElementById('btnFusionToggle').onclick = async function() {
+  if (fusionEnabled) {
+    await apiPost('/fusion/stop');
+  } else {
+    const result = await apiPost('/fusion/start');
+    if (!result.ok) {
+      alert('融合启动失败: ' + (result.error || '未知错误'));
+    }
+  }
+};
+
+// ========== Video Management ==========
+async function loadVideos() {
+  const data = await apiGet('/videos');
+  const tbody = document.getElementById('videoBody');
+  tbody.innerHTML = '';
+  if (!data || !data.videos) return;
+  data.videos.forEach(v => {
+    const tr = document.createElement('tr');
+    const dur = v.durationSec ? `${Math.floor(v.durationSec/60)}:${String(Math.floor(v.durationSec%60)).padStart(2,'0')}` : '--';
+    const sizeMB = (v.size / 1048576).toFixed(1);
+    const res = v.width ? `${v.width}x${v.height}` : '--';
+    tr.innerHTML = `
+      <td>${v.name}</td><td>${res}</td><td>${dur}</td><td>${sizeMB} MB</td>
+      <td><button class="btn-del" onclick="deleteVideo('${encodeURIComponent(v.path)}')">删除</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function deleteVideo(path) {
+  if (!confirm('确认删除该录像文件?')) return;
+  const result = await apiDelete('/videos', { path: decodeURIComponent(path) });
+  if (result && result.ok) loadVideos();
+}
+
+// ========== Fusion Radar ==========
+const RADAR_RANGE = 10.0;
+function drawRadar() {
+  const canvas = document.getElementById('fusionCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const cx = w / 2, cy = h / 2;
+  const scale = Math.min(cx, cy) / RADAR_RANGE;
+
+  ctx.clearRect(0, 0, w, h);
+
+  const rings = [1, 2, 5, 10, 15, 20];
+  ctx.strokeStyle = '#2a2a4a'; ctx.lineWidth = 1;
+  rings.forEach(r => {
+    const rpx = r * scale;
+    if (rpx > cx) return;
+    ctx.beginPath(); ctx.arc(cx, cy, rpx, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = '#4a4a6a'; ctx.font = '8px Arial';
+    ctx.fillText(r+'m', cx+rpx-12, cy+3);
+  });
+
+  ctx.strokeStyle = '#3a3a5a'; ctx.setLineDash([4,8]);
+  ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,h); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,cy); ctx.lineTo(w,cy); ctx.stroke();
+  ctx.setLineDash([]);
+
+  trackingTargets.forEach(t => {
+    const px = cx + t.posY * scale;
+    const py = cy - t.posX * scale;
+    if (px < 0 || px > w || py < 0 || py > h) return;
+
+    let fill, border;
+    switch (t.state) {
+      case 'Confirmed': fill='#3fb950'; border='#2ea043'; break;
+      case 'Tentative': fill='#d29922'; border='#b08800'; break;
+      default: fill='#8b949e'; border='#6e7681'; break;
+    }
+
+    if (t.warningActive) {
+      const pulseR = 12 + 4 * Math.sin(Date.now() / 200);
+      ctx.beginPath(); ctx.arc(px, py, pulseR, 0, Math.PI*2);
+      ctx.strokeStyle = 'rgba(218,54,51,0.6)'; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI*2);
+    ctx.fillStyle = fill; ctx.fill();
+    ctx.strokeStyle = border; ctx.lineWidth = 1.5; ctx.stroke();
+
+    if (Math.abs(t.velX) > 0.01 || Math.abs(t.velY) > 0.01) {
+      const speed = Math.sqrt(t.velX*t.velX + t.velY*t.velY);
+      const arrLen = Math.min(speed * 8, 22);
+      const vx = -t.velY / speed * arrLen;
+      const vy = -t.velX / speed * arrLen;
+      const ex = px + vx, ey = py + vy;
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey);
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+      const ang = Math.atan2(vy, vx);
+      ctx.beginPath(); ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - 6*Math.cos(ang-0.5), ey - 6*Math.sin(ang-0.5));
+      ctx.lineTo(ex - 6*Math.cos(ang+0.5), ey - 6*Math.sin(ang+0.5));
+      ctx.closePath(); ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.fill();
+    }
+
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 8px Arial';
+    ctx.fillText(t.id, px+9, py-4);
+    ctx.fillText(t.distanceMeters.toFixed(1)+'m', px+9, py+8);
+  });
+
+  const lx = w - 120, ly = h - 65;
+  ctx.fillStyle = 'rgba(26,26,46,0.85)';
+  ctx.beginPath(); ctx.roundRect(lx-5, ly-5, 125, 70, 6); ctx.fill();
+  [['已确认','#3fb950'],['待确认','#d29922'],['滑行中','#8b949e'],['告警','#da3633']].forEach(([label,color],i) => {
+    const y = ly + i*16;
+    ctx.beginPath(); ctx.arc(lx+4, y+4, 4, 0, Math.PI*2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.fillStyle = '#e6edf3'; ctx.fillText(label, lx+14, y+7);
+  });
+}
+
+function updateFusionStatus() {
+  const confirmed = trackingTargets.filter(t => t.state === 'Confirmed').length;
+  const warnings = trackingTargets.filter(t => t.warningActive).length;
+  document.getElementById('fusionStatusLabel').textContent =
+    `目标: ${trackingTargets.length} | 已确认: ${confirmed} | 告警: ${warnings} | 融合: ${fusionEnabled ? '运行中' : '关闭'}`;
+  const dists = trackingTargets.filter(t => t.state === 'Confirmed').slice(0,3)
+    .map(t => `T${t.id}:${t.distanceMeters.toFixed(1)}m`);
+  document.getElementById('fusionDistLabel').textContent = dists.join('  ');
+}
+
+// ========== Fusion Params ==========
+function buildFusionParams() {
+  const container = document.getElementById('fusionParams');
+  const trackerParams = [
+    ['clusterEpsMeters','聚类半径','m',0.1,5.0,'DBSCAN 聚类算法的邻域半径'],
+    ['alpha','Alpha 滤波','',0.1,1.0,'alpha-beta 滤波器的位置增益'],
+    ['beta','Beta 滤波','',0.01,0.5,'alpha-beta 滤波器的速度增益'],
+    ['maxAssociationDistMeters','关联距离','m',0.5,10.0,'数据关联的最大门限距离'],
+    ['minHitsToConfirm','确认命中','',1,20,'航迹从待确认转为已确认所需的最小连续命中帧数'],
+    ['maxCoastingFrames','滑行帧数','',1,50,'目标丢失后保持预测的最大帧数'],
+    ['maxTracks','最大航迹','',1,200,'同时跟踪的最大目标数'],
+    ['warningEnterDistMeters','告警进入','m',0.1,5.0,'目标进入此距离范围触发告警'],
+    ['warningExitDistMeters','告警退出','m',0.2,10.0,'目标退出此距离范围解除告警'],
+  ];
+
+  let html = '<div class="param-section-title">跟踪器参数</div>';
+  trackerParams.forEach(([key,name,unit,min,max,desc]) => {
+    html += `<div class="param-row">
+      <span class="param-name">${name}</span>
+      <input class="param-input" id="fp_${key}" type="number" step="any">
+      <span class="param-unit">${unit}</span>
+      <span class="param-help" onclick="toggleHelp('h_${key}')">?</span>
+    </div>
+    <div class="param-desc" id="h_${key}" style="display:none">${desc}</div>`;
+  });
+
+  [0,1].forEach(camIdx => {
+    html += `<div class="param-section-title">相机 ${camIdx} 内参</div>`;
+    ['fx','fy','cx','cy'].forEach(f => {
+      html += `<div class="param-row">
+        <span class="param-name">Cam${camIdx} ${f.toUpperCase()}</span>
+        <input class="param-input" id="fp_cam${camIdx}_${f}" type="number" step="any">
+      </div>`;
+    });
+  });
+
+  html += `<div style="margin-top:8px"><button class="btn btn-off" onclick="saveFusionConfig()">保存参数</button></div>`;
+  container.innerHTML = html;
+}
+
+function toggleHelp(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveFusionConfig() {
+  const cfg = {};
+  ['clusterEpsMeters','alpha','beta','maxAssociationDistMeters','minHitsToConfirm',
+   'maxCoastingFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters'].forEach(k => {
+    const el = document.getElementById('fp_'+k);
+    if (el) cfg[k] = parseFloat(el.value) || 0;
+  });
+  await apiPost('/fusion/config', cfg);
+
+  for (let ci = 0; ci < 2; ci++) {
+    const intr = {};
+    ['fx','fy','cx','cy'].forEach(f => {
+      const el = document.getElementById(`fp_cam${ci}_${f}`);
+      if (el) intr[f] = parseFloat(el.value) || 0;
+    });
+    await apiPost(`/fusion/camera/${ci}/intrinsics`, intr);
+  }
+}
+
+// ========== Clock ==========
+function updateClock() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const mo = String(now.getMonth()+1).padStart(2,'0');
+  const d = String(now.getDate()).padStart(2,'0');
+  const h = String(now.getHours()).padStart(2,'0');
+  const mi = String(now.getMinutes()).padStart(2,'0');
+  const s = String(now.getSeconds()).padStart(2,'0');
+  document.getElementById('clockLabel').textContent = `${y}-${mo}-${d}  ${h}:${mi}:${s}`;
+}
+
+// ========== Init ==========
+connectWS();
+updateClock();
+setInterval(updateClock, 1000);
+buildFusionParams();
+</script>
+</body>
+</html>

@@ -200,7 +200,7 @@
           <property name="bottomMargin"><number>0</number></property>
           <item>
            <widget class="QLabel" name="cam0Label">
-            <property name="text"><string>CAM0</string></property>
+            <property name="text"><string>相机1</string></property>
             <property name="minimumSize"><size><width>40</width><height>0</height></size></property>
             <property name="styleSheet">
              <string notr="true">font-size: 13px; font-weight: 600; color: #2d3535; background: transparent; border: none;</string>
@@ -263,7 +263,7 @@
           <property name="bottomMargin"><number>0</number></property>
           <item>
            <widget class="QLabel" name="cam1Label">
-            <property name="text"><string>CAM1</string></property>
+            <property name="text"><string>相机2</string></property>
             <property name="minimumSize"><size><width>40</width><height>0</height></size></property>
             <property name="styleSheet">
              <string notr="true">font-size: 13px; font-weight: 600; color: #2d3535; background: transparent; border: none;</string>
@@ -326,7 +326,7 @@
           <property name="bottomMargin"><number>0</number></property>
           <item>
            <widget class="QLabel" name="resLabel">
-            <property name="text"><string>CAM0 录像分辨率</string></property>
+            <property name="text"><string>相机1 录像分辨率</string></property>
             <property name="styleSheet">
              <string notr="true">font-size: 12px; color: #4a5555; background: transparent; border: none;</string>
             </property>

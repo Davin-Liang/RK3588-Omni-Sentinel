@@ -173,20 +173,37 @@ RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止
 - 录像停止时: "启动录像" 蓝色 `#1f6feb`
 - 录像进行时: "停止录像" 红色 `#da3633`
 
+### 3.4 Web 远程控制集成
+
+WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQueuedConnection` 与 Qt 主线程安全通信。
+
+**线程安全模型**:
+- REST 命令：`QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 阻塞 WebServer 线程直到主线程执行完毕，确保 HTTP 响应包含操作结果
+- 状态查询：同上，由主线程构建完整状态 JSON 后返回
+- WebSocket 推送：`push_status()` 将 JSON 推入 `std::queue`（mutex 保护），广播线程每 50ms 消费发送，主线程非阻塞
+- MJPEG 快照：预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码
+
+**集成要点**:
+- 构造函数中 `webServer_ = new WebServer(port)` + `set_command_handler` + `start()`
+- `on_frame_ready_()` 中调用 `webServer_->set_cached_preview(camNum, image)` 更新缓存
+- `update_hw_usage_()` 尾部调用 `webServer_->push_status(get_status_json_())` 推送状态 (1Hz)
+- `on_tracking_updated_()` 中调用 `webServer_->push_tracking()` 推送跟踪数据
+- 析构函数中**优先**调用 `webServer_->stop()` 再销毁其他成员，避免 BlockingQueuedConnection 死锁
+- `get_hw_json_()` 使用独立 static 变量计算 CPU，不干扰 `update_hw_usage_()` 的 `prevCpuTotal_`/`prevCpuIdle_`
+
+**暂停行为（Web vs QT 一致性）**: `web_pause_()` 暂停前先停止推流→录像→预览→最后暂停相机，与 `on_btn_pause_()` 逻辑一致，避免 PreviewWorker 无帧超时告警。
+
 ## 4. 配置文件
 
-`config.ini` 使用 `QSettings::IniFormat`，路径为 `QCoreApplication::applicationDirPath() + "/config.ini"`，确保与可执行文件同目录：
+`config.ini` 使用 `QSettings::IniFormat`，路径为 `QCoreApplication::applicationDirPath() + "/config.ini"`，确保与可执行文件同目录。包含六节：
 
-```ini
-[Stream]
-rtspUrl=rtsp://127.0.0.1:8554/live/cam0
+- `[Camera0]` / `[Camera1]`: 设备路径、分辨率、RTSP 推流 URL、录像分辨率
+- `[WebServer]`: Web 服务器端口 (`port=8080`) 和启用开关 (`enabled=true`)
+- `[Record]`: 录像文件输出目录
+- `[Lidar]`: 串口设备、波特率、扫描频率、测距范围
+- `[Fusion]`: 跟踪器参数 + 每路相机内参
 
-[Record]
-dir=/mnt/sdcard
-resolution=1080
-```
-
-界面修改分辨率时通过 `config_.setValue()` 即时写回文件。
+界面修改分辨率/融合参数时通过 `config_.setValue()` 即时写回文件。
 
 ### 3.6 融合参数管理
 

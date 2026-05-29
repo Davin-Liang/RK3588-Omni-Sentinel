@@ -3,6 +3,7 @@
 
 #include "sentinel-visioner.h"
 #include "sentinel_streamer.h"
+#include "web_server.h"
 #include "preview_worker.h"
 #include "fusion_worker.h"
 #include "top_down_view.h"
@@ -22,6 +23,8 @@
 #include <QVBoxLayout>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
+#include "json.hpp"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -146,6 +149,7 @@ Widget::Widget(QWidget *parent)
     , ui(new Ui::Widget)
     , visioner_(new SentinelVisioner())
     , streamer_(new SentinelStreamer())
+    , webServer_(nullptr)
     , previewWorker_{nullptr, nullptr}
     , previewThread_{nullptr, nullptr}
     , config_(QCoreApplication::applicationDirPath() + "/config.ini", QSettings::IniFormat)
@@ -153,6 +157,7 @@ Widget::Widget(QWidget *parent)
     , recordTimer_{nullptr, nullptr}
     , frameCount_{0, 0}
     , lastFpsTsUs_{0, 0}
+    , lastFps_{0.0, 0.0}
     , previewActive_{false, false}
     , cameraPaused_{false, false}
     , prevCpuTotal_(0)
@@ -292,6 +297,32 @@ Widget::Widget(QWidget *parent)
         le->installEventFilter(this);
     }
 
+    // ---- Web 远程控制服务器 ----
+    int webPort = config_.value("WebServer/port", 8080).toInt();
+    bool webEnabled = config_.value("WebServer/enabled", true).toBool();
+    if (webEnabled) {
+        webServer_ = new WebServer(static_cast<uint16_t>(webPort));
+        // 命令回调在 WebServer 线程执行，必须通过 BlockingQueuedConnection
+        // 转发到 Qt 主线程执行 handle_web_command，并同步等待结果
+        webServer_->set_command_handler([this](const std::string& method,
+                                                const std::string& path,
+                                                const std::string& body) -> std::string {
+            fprintf(stderr, "[WebServer] cmdHandler called: %s %s\n", method.c_str(), path.c_str());
+            std::string result;
+            QMetaObject::invokeMethod(this, [this, &result, &method, &path, &body]() {
+                fprintf(stderr, "[WebServer] invokeMethod lambda executing on main thread\n");
+                result = handle_web_command(method, path, body);
+            }, Qt::BlockingQueuedConnection);
+            fprintf(stderr, "[WebServer] cmdHandler returning: %s\n", result.c_str());
+            return result;
+        });
+        if (webServer_->start()) {
+            fprintf(stderr, "[SentinelQT] Web server started on port %d\n", webPort);
+        } else {
+            fprintf(stderr, "[SentinelQT] Web server failed to start on port %d\n", webPort);
+        }
+    }
+
     set_status_("系统就绪", "#3fb950");
     update_button_states_();
 }
@@ -300,6 +331,13 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
+    // WebServer 必须在其他组件之前停止，避免 BlockingQueuedConnection 死锁
+    if (webServer_) {
+        webServer_->stop();
+        delete webServer_;
+        webServer_ = nullptr;
+    }
+
     // 停止 fusion 子系统
     if (fusionWorker_) {
         fusionWorker_->stop();
@@ -444,13 +482,13 @@ void Widget::on_btn_toggle_preview_(int camNum)
         btn->setText("开启预览");
         btn->setStyleSheet(TOGGLE_OFF_STYLE);
         lbl->setText((camNum == 0) ? "ISP 已关闭" : "USB 已关闭");
-        set_status_(QString("CAM%1 预览已关闭").arg(camNum), "#ffffff");
+        set_status_(QString("相机%1 预览已关闭").arg(camNum), "#ffffff");
     } else {
         start_preview_(camNum);
         btn->setText("关闭预览");
         btn->setStyleSheet(TOGGLE_ON_STYLE);
         lbl->setText("等待相机...");
-        set_status_(QString("CAM%1 预览已开启").arg(camNum), "#58a6ff");
+        set_status_(QString("相机%1 预览已开启").arg(camNum), "#58a6ff");
     }
 }
 
@@ -458,6 +496,11 @@ void Widget::on_btn_toggle_preview_(int camNum)
 
 void Widget::on_frame_ready_(int camNum, const QImage& image)
 {
+    // 缓存最新预览帧供 Web MJPEG 端点使用
+    if (webServer_) {
+        webServer_->set_cached_preview(camNum, image);
+    }
+
     frameCount_[camNum]++;
     if (frameCount_[camNum] % 30 == 0) {
         struct timespec ts;
@@ -465,6 +508,7 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
         uint64_t nowUs = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
         if (lastFpsTsUs_[camNum] > 0 && nowUs > lastFpsTsUs_[camNum]) {
             double fps = 30.0 * 1000000.0 / (nowUs - lastFpsTsUs_[camNum]);
+            lastFps_[camNum] = fps;
             QLabel* fpsLabel = cam_lbl(ui->fpsLabel0, ui->fpsLabel1, camNum);
             fpsLabel->setText(QString("FPS%1 %2  |  %3x%4")
                 .arg(camNum)
@@ -491,16 +535,16 @@ void Widget::on_btn_stream_(int camNum)
 
     if (streamer_->is_streaming(camNum)) {
         if (streamer_->stop_stream(camNum)) {
-            set_status_(QString("CAM%1 推流已停止").arg(camNum), "#ffffff");
+            set_status_(QString("相机%1 推流已停止").arg(camNum), "#ffffff");
             update_camera_button_states_(camNum);
         }
     } else {
         QByteArray url = rtspUrl_[camNum].toUtf8();
         if (streamer_->start_stream(camNum, url.constData())) {
-            set_status_(QString("CAM%1 推流中: %2").arg(camNum).arg(rtspUrl_[camNum]), "#58a6ff");
+            set_status_(QString("相机%1 推流中: %2").arg(camNum).arg(rtspUrl_[camNum]), "#58a6ff");
             update_camera_button_states_(camNum);
         } else {
-            set_status_(QString("CAM%1 推流启动失败!").arg(camNum), "#f85149");
+            set_status_(QString("相机%1 推流启动失败!").arg(camNum), "#f85149");
         }
     }
 }
@@ -515,7 +559,7 @@ void Widget::on_btn_record_(int camNum)
         if (streamer_->stop_record(camNum)) {
             recordTimer_[camNum]->stop();
             ui->recordInfoLabel->clear();
-            set_status_(QString("CAM%1 录像已停止: %2").arg(camNum).arg(currentRecordPath_[camNum]), "#ffffff");
+            set_status_(QString("相机%1 录像已停止: %2").arg(camNum).arg(currentRecordPath_[camNum]), "#ffffff");
             update_camera_button_states_(camNum);
         }
     } else {
@@ -533,10 +577,10 @@ void Widget::on_btn_record_(int camNum)
             recordStartTime_[camNum] = QDateTime::currentDateTime();
             recordTimer_[camNum]->start(1000);
             update_record_info_(camNum);
-            set_status_(QString("CAM%1 录像中: %2").arg(camNum).arg(currentRecordPath_[camNum]), "#3fb950");
+            set_status_(QString("相机%1 录像中: %2").arg(camNum).arg(currentRecordPath_[camNum]), "#3fb950");
             update_camera_button_states_(camNum);
         } else {
-            set_status_(QString("CAM%1 录像启动失败!").arg(camNum), "#f85149");
+            set_status_(QString("相机%1 录像启动失败!").arg(camNum), "#f85149");
         }
     }
 }
@@ -560,7 +604,7 @@ void Widget::on_btn_pause_(int camNum)
         btn->setText("暂停");
         btn->setStyleSheet(PAUSE_ON_STYLE);
         lbl->setText("等待相机...");
-        set_status_(QString("CAM%1 已恢复").arg(camNum), "#58a6ff");
+        set_status_(QString("相机%1 已恢复").arg(camNum), "#58a6ff");
     } else {
         if (streamer_->is_recording(camNum)) {
             streamer_->stop_record(camNum);
@@ -577,8 +621,8 @@ void Widget::on_btn_pause_(int camNum)
         cameraPaused_[camNum] = true;
         btn->setText("恢复");
         btn->setStyleSheet(PAUSE_OFF_STYLE);
-        lbl->setText(QString("CAM%1 已暂停").arg(camNum));
-        set_status_(QString("CAM%1 已暂停").arg(camNum), "#ffffff");
+        lbl->setText(QString("相机%1 已暂停").arg(camNum));
+        set_status_(QString("相机%1 已暂停").arg(camNum), "#ffffff");
     }
     update_camera_button_states_(camNum);
 }
@@ -711,6 +755,11 @@ void Widget::update_hw_usage_()
                 .arg(npuCores[2] >= 0 ? QString::number(npuCores[2]) : "-");
 
     ui->hwLabel->setText(text);
+
+    // Web 状态推送 (1Hz)
+    if (webServer_ && webServer_->is_running()) {
+        webServer_->push_status(get_status_json_());
+    }
 }
 
 // ---- Record info ----
@@ -736,7 +785,7 @@ void Widget::update_record_info_(int camNum)
 
 void Widget::on_streamer_event(int camNum, StreamerEvent event, const QString& detail)
 {
-    QString camPrefix = QString("CAM%1 ").arg(camNum);
+    QString camPrefix = QString("相机%1 ").arg(camNum);
     switch (event) {
     case StreamerEvent::STREAM_STARTED:
         set_status_(camPrefix + "推流中: " + detail, "#58a6ff");
@@ -755,6 +804,22 @@ void Widget::on_streamer_event(int camNum, StreamerEvent event, const QString& d
     case StreamerEvent::ERROR:
         set_status_(camPrefix + "错误: " + (detail.isEmpty() ? "unknown" : detail), "#f85149");
         break;
+    }
+
+    // Web 事件推送
+    if (webServer_ && webServer_->is_running()) {
+        const char* evName = "unknown";
+        switch (event) {
+        case StreamerEvent::STREAM_STARTED: evName = "stream_started"; break;
+        case StreamerEvent::STREAM_STOPPED: evName = "stream_stopped"; break;
+        case StreamerEvent::RECORD_STARTED: evName = "record_started"; break;
+        case StreamerEvent::RECORD_STOPPED: evName = "record_stopped"; break;
+        case StreamerEvent::ERROR:          evName = "error"; break;
+        }
+        nlohmann::json j;
+        j["cam"] = camNum;
+        j["detail"] = detail.toStdString();
+        webServer_->push_event(evName, j.dump());
     }
 }
 
@@ -1375,6 +1440,33 @@ void Widget::on_tracking_updated_(const QVector<TrackedTarget>& targets)
     lastTrackedTargets_ = targets;
     topDownView_->set_targets(targets);
     topDownView_->update();
+
+    // Web 跟踪数据推送 (5Hz，由 FusionWorker 频率决定)
+    if (webServer_ && webServer_->is_running()) {
+        nlohmann::json j;
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& t : targets) {
+            nlohmann::json tj;
+            tj["id"] = t.id;
+            tj["state"] = (t.state == TrackState::Confirmed) ? "Confirmed" :
+                          (t.state == TrackState::Tentative) ? "Tentative" : "Coasting";
+            tj["posX"] = t.posX;
+            tj["posY"] = t.posY;
+            tj["velX"] = t.velX;
+            tj["velY"] = t.velY;
+            tj["distanceMeters"] = t.distanceMeters;
+            tj["confidence"] = t.confidence;
+            tj["pointCount"] = t.pointCount;
+            tj["classId"] = t.classId;
+            tj["warningActive"] = t.warningActive;
+            tj["age"] = t.age;
+            arr.push_back(tj);
+        }
+        j["targets"] = arr;
+        j["ts"] = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        webServer_->push_tracking(j.dump());
+    }
 }
 
 void Widget::on_fusion_param_changed_()
@@ -1423,6 +1515,570 @@ void Widget::on_fusion_status_update_()
         }
     }
     ui->fusionDistLabel->setText(distItems.join("  "));
+}
+
+// ======================================================================
+//  Web 远程控制 API
+// ======================================================================
+
+std::string Widget::handle_web_command(const std::string& method,
+                                        const std::string& path,
+                                        const std::string& body)
+{
+    fprintf(stderr, "[WebCmd] %s %s\n", method.c_str(), path.c_str());
+
+    // ---- 状态查询 (GET) ----
+    if (method == "GET") {
+        if (path == "/api/v1/status")        return get_status_json_();
+        if (path == "/api/v1/status/hw")     return get_hw_json_();
+        if (path == "/api/v1/videos")        return get_videos_json_();
+        if (path == "/api/v1/fusion/config") return get_fusion_config_json_();
+        return R"({"ok":false,"error":"unknown GET path"})";
+    }
+
+    // ---- 相机控制 (POST) ----
+    if (method == "POST") {
+        if (path == "/api/v1/cam/0/preview/start")  return web_start_preview_(0);
+        if (path == "/api/v1/cam/0/preview/stop")   return web_stop_preview_(0);
+        if (path == "/api/v1/cam/0/stream/start")   return web_start_stream_(0);
+        if (path == "/api/v1/cam/0/stream/stop")    return web_stop_stream_(0);
+        if (path == "/api/v1/cam/0/record/start")   return web_start_record_(0);
+        if (path == "/api/v1/cam/0/record/stop")    return web_stop_record_(0);
+        if (path == "/api/v1/cam/0/pause")          return web_pause_(0);
+        if (path == "/api/v1/cam/0/resume")         return web_resume_(0);
+        if (path == "/api/v1/cam/1/preview/start")  return web_start_preview_(1);
+        if (path == "/api/v1/cam/1/preview/stop")   return web_stop_preview_(1);
+        if (path == "/api/v1/cam/1/stream/start")   return web_start_stream_(1);
+        if (path == "/api/v1/cam/1/stream/stop")    return web_stop_stream_(1);
+        if (path == "/api/v1/cam/1/record/start")   return web_start_record_(1);
+        if (path == "/api/v1/cam/1/record/stop")    return web_stop_record_(1);
+        if (path == "/api/v1/cam/1/pause")          return web_pause_(1);
+        if (path == "/api/v1/cam/1/resume")         return web_resume_(1);
+        if (path == "/api/v1/system/start")         return web_system_start_();
+        if (path == "/api/v1/system/stop")          return web_system_stop_();
+        if (path == "/api/v1/lidar/start")          return web_lidar_start_();
+        if (path == "/api/v1/lidar/stop")           return web_lidar_stop_();
+        if (path == "/api/v1/fusion/start")         return web_fusion_start_();
+        if (path == "/api/v1/fusion/stop")          return web_fusion_stop_();
+        if (path == "/api/v1/fusion/config")        return web_fusion_config_(body);
+        if (path == "/api/v1/fusion/camera/0/intrinsics") return web_fusion_intrinsics_(0, body);
+        if (path == "/api/v1/fusion/camera/1/intrinsics") return web_fusion_intrinsics_(1, body);
+        return R"({"ok":false,"error":"unknown POST path"})";
+    }
+
+    // ---- PUT ----
+    if (method == "PUT") {
+        if (path == "/api/v1/cam/0/record-resolution") return web_set_record_resolution_(0, body);
+        if (path == "/api/v1/cam/1/record-resolution") return web_set_record_resolution_(1, body);
+        return R"({"ok":false,"error":"unknown PUT path"})";
+    }
+
+    // ---- DELETE ----
+    if (method == "DELETE") {
+        if (path == "/api/v1/videos") return web_delete_video_(body);
+        return R"({"ok":false,"error":"unknown DELETE path"})";
+    }
+
+    return R"({"ok":false,"error":"unknown method"})";
+}
+
+// ---- Preview ----
+
+std::string Widget::web_start_preview_(int camNum)
+{
+    if (previewActive_[camNum]) return R"({"ok":true})";
+    start_preview_(camNum);
+    QPushButton* btn = cam_btn(ui->btnToggle0, ui->btnToggle1, camNum);
+    btn->setText("关闭预览");
+    btn->setStyleSheet(TOGGLE_ON_STYLE);
+    update_camera_button_states_(camNum);
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_stop_preview_(int camNum)
+{
+    if (!previewActive_[camNum]) return R"({"ok":true})";
+    stop_preview_(camNum);
+    QPushButton* btn = cam_btn(ui->btnToggle0, ui->btnToggle1, camNum);
+    btn->setText("开启预览");
+    btn->setStyleSheet(TOGGLE_OFF_STYLE);
+    update_camera_button_states_(camNum);
+    return R"({"ok":true})";
+}
+
+// ---- Stream ----
+
+std::string Widget::web_start_stream_(int camNum)
+{
+    if (streamer_->is_streaming(camNum)) return R"({"ok":true})";
+    QByteArray url = rtspUrl_[camNum].toUtf8();
+    if (streamer_->start_stream(camNum, url.constData())) {
+        update_camera_button_states_(camNum);
+        return R"({"ok":true})";
+    }
+    return R"({"ok":false,"error":"stream start failed"})";
+}
+
+std::string Widget::web_stop_stream_(int camNum)
+{
+    if (!streamer_->is_streaming(camNum)) return R"({"ok":true})";
+    streamer_->stop_stream(camNum);
+    update_camera_button_states_(camNum);
+    return R"({"ok":true})";
+}
+
+// ---- Record ----
+
+std::string Widget::web_start_record_(int camNum)
+{
+    if (streamer_->is_recording(camNum)) return R"({"ok":true})";
+    int resVal = recordResolution_[camNum];
+    RecordResolution recordRes = (resVal == 720)
+        ? RecordResolution::RES_720P : RecordResolution::RES_1080P;
+
+    QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    currentRecordPath_[camNum] = recordDir_ + QString("/cam%1_record_%2.mp4")
+        .arg(camNum).arg(timestamp);
+
+    QByteArray path = currentRecordPath_[camNum].toUtf8();
+    if (streamer_->start_record(camNum, path.constData(), recordRes)) {
+        recordStartTime_[camNum] = QDateTime::currentDateTime();
+        recordTimer_[camNum]->start(1000);
+        update_record_info_(camNum);
+        update_camera_button_states_(camNum);
+        return R"({"ok":true})";
+    }
+    return R"({"ok":false,"error":"record start failed"})";
+}
+
+std::string Widget::web_stop_record_(int camNum)
+{
+    if (!streamer_->is_recording(camNum)) return R"({"ok":true})";
+    streamer_->stop_record(camNum);
+    recordTimer_[camNum]->stop();
+    ui->recordInfoLabel->clear();
+    update_camera_button_states_(camNum);
+    return R"({"ok":true})";
+}
+
+// ---- Pause/Resume ----
+
+std::string Widget::web_pause_(int camNum)
+{
+    if (cameraPaused_[camNum]) return R"({"ok":true})";
+
+    // 先停止推流、录像和预览，避免暂停时系统状态混乱导致卡死
+    if (streamer_->is_streaming(camNum)) {
+        streamer_->stop_stream(camNum);
+    }
+    if (streamer_->is_recording(camNum)) {
+        streamer_->stop_record(camNum);
+        recordTimer_[camNum]->stop();
+        ui->recordInfoLabel->clear();
+    }
+    if (previewActive_[camNum]) {
+        stop_preview_(camNum);
+    }
+
+    cameraPaused_[camNum] = true;
+    visioner_->camera_pause(camNum, true);
+    update_camera_button_states_(camNum);
+    refresh_status_label_();
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_resume_(int camNum)
+{
+    if (!cameraPaused_[camNum]) return R"({"ok":true})";
+    cameraPaused_[camNum] = false;
+    visioner_->camera_pause(camNum, false);
+    update_camera_button_states_(camNum);
+    return R"({"ok":true})";
+}
+
+// ---- System ----
+
+std::string Widget::web_system_start_()
+{
+    bool anyActive = previewActive_[0] || previewActive_[1];
+    if (anyActive) return R"({"ok":true})";
+    on_btn_system_();
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_system_stop_()
+{
+    bool allStopped = !previewActive_[0] && !previewActive_[1];
+    if (allStopped) return R"({"ok":true})";
+    on_btn_system_();
+    return R"({"ok":true})";
+}
+
+// ---- Record resolution ----
+
+std::string Widget::web_set_record_resolution_(int camNum, const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+        std::string res = j.value("resolution", "1080p");
+        int val = (res == "720p") ? 720 : 1080;
+        recordResolution_[camNum] = val;
+        if (camNum == 0) {
+            ui->resCombo->setCurrentIndex(val == 720 ? 1 : 0);
+        }
+        config_.setValue(QString("Camera%1/recordResolution").arg(camNum), val);
+        return R"({"ok":true})";
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
+}
+
+// ---- Videos ----
+
+std::string Widget::web_delete_video_(const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+        std::string filePath = j.value("path", "");
+        if (filePath.empty())
+            return R"({"ok":false,"error":"missing path"})";
+        if (QFile::remove(QString::fromStdString(filePath))) {
+            return R"({"ok":true})";
+        }
+        return R"({"ok":false,"error":"delete failed"})";
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
+}
+
+// ---- LiDAR ----
+
+std::string Widget::web_lidar_start_()
+{
+    if (!lidar_) return R"({"ok":false,"error":"no lidar"})";
+    if (!lidar_->load_config(lidarCfg_)) return R"({"ok":false,"error":"lidar config failed"})";
+    if (!lidar_->start()) return R"({"ok":false,"error":"lidar start failed"})";
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_lidar_stop_()
+{
+    if (lidar_) lidar_->stop();
+    return R"({"ok":true})";
+}
+
+// ---- Fusion ----
+
+std::string Widget::web_fusion_start_()
+{
+    if (fusionEnabled_) return R"({"ok":true})";
+
+    if (!lidar_) return R"({"ok":false,"error":"LiDAR 未初始化"})";
+    if (!fusion_) return R"({"ok":false,"error":"Fusion 未初始化"})";
+
+    sync_ui_to_fusion_config_();
+    save_fusion_config_();
+
+    // 如果 LiDAR 还没启动则启动（可能已由 /lidar/start 提前启动）
+    if (!lidar_->is_running()) {
+        if (!lidar_->load_config(lidarCfg_))
+            return R"({"ok":false,"error":"LiDAR 配置加载失败"})";
+        if (!lidar_->start())
+            return R"({"ok":false,"error":"LiDAR 启动失败（检查串口设备）"})";
+    }
+
+    fusion_->configure_tracker(fusionTrackerCfg_);
+    fusion_->enable_tracking(true);
+    fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+
+    if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
+        lidar_->stop();
+        return R"({"ok":false,"error":"融合启动失败（检查相机内参配置）"})";
+    }
+
+    fusionWorker_ = new FusionWorker(fusion_);
+    fusionThread_ = new QThread(this);
+    fusionWorker_->moveToThread(fusionThread_);
+    connect(fusionWorker_, &FusionWorker::trackingUpdated,
+            this, &Widget::on_tracking_updated_);
+    connect(fusionThread_, &QThread::started,
+            fusionWorker_, &FusionWorker::start);
+    fusionThread_->start();
+
+    fusionStatusTimer_->start(1000);
+    fusionEnabled_ = true;
+
+    ui->btnFusionToggle->setText("停止融合");
+    ui->btnFusionToggle->setStyleSheet(FUSION_ON_STYLE);
+    ui->fusionStatusLabel->setText("目标: 0 | 已确认: 0 | 告警: 0 | 融合: 运行中");
+
+    fprintf(stderr, "[SentinelQT] Fusion enabled via web\n");
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_fusion_stop_()
+{
+    if (!fusionEnabled_) return R"({"ok":true})";
+    on_btn_fusion_toggle_();
+    return fusionEnabled_ ? R"({"ok":false,"error":"fusion stop failed"})" : R"({"ok":true})";
+}
+
+std::string Widget::web_fusion_config_(const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+        fusionTrackerCfg_.clusterEpsMeters         = j.value("clusterEpsMeters",          fusionTrackerCfg_.clusterEpsMeters);
+        fusionTrackerCfg_.alpha                    = j.value("alpha",                     fusionTrackerCfg_.alpha);
+        fusionTrackerCfg_.beta                     = j.value("beta",                      fusionTrackerCfg_.beta);
+        fusionTrackerCfg_.maxAssociationDistMeters = j.value("maxAssociationDistMeters",  fusionTrackerCfg_.maxAssociationDistMeters);
+        fusionTrackerCfg_.minHitsToConfirm        = j.value("minHitsToConfirm",          fusionTrackerCfg_.minHitsToConfirm);
+        fusionTrackerCfg_.maxCoastingFrames       = j.value("maxCoastingFrames",         fusionTrackerCfg_.maxCoastingFrames);
+        fusionTrackerCfg_.maxTracks               = j.value("maxTracks",                 fusionTrackerCfg_.maxTracks);
+        fusionTrackerCfg_.warningEnterDistMeters  = j.value("warningEnterDistMeters",    fusionTrackerCfg_.warningEnterDistMeters);
+        fusionTrackerCfg_.warningExitDistMeters   = j.value("warningExitDistMeters",     fusionTrackerCfg_.warningExitDistMeters);
+
+        if (fusion_) fusion_->configure_tracker(fusionTrackerCfg_);
+        save_fusion_config_();
+        sync_fusion_config_to_ui_();
+        return R"({"ok":true})";
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
+}
+
+std::string Widget::web_fusion_intrinsics_(int camNum, const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+        fusionCamCfg_[camNum].fx = j.value("fx", fusionCamCfg_[camNum].fx);
+        fusionCamCfg_[camNum].fy = j.value("fy", fusionCamCfg_[camNum].fy);
+        fusionCamCfg_[camNum].cx = j.value("cx", fusionCamCfg_[camNum].cx);
+        fusionCamCfg_[camNum].cy = j.value("cy", fusionCamCfg_[camNum].cy);
+
+        if (fusion_) {
+            fusion_->update_camera_intrinsics(camNum,
+                fusionCamCfg_[camNum].fx, fusionCamCfg_[camNum].fy,
+                fusionCamCfg_[camNum].cx, fusionCamCfg_[camNum].cy,
+                fusionCamCfg_[camNum].imgWidth, fusionCamCfg_[camNum].imgHeight);
+        }
+        save_fusion_config_();
+        return R"({"ok":true})";
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
+}
+
+// ---- Status JSON builders ----
+
+std::string Widget::get_status_json_() const
+{
+    nlohmann::json j;
+
+    for (int i = 0; i < 2; ++i) {
+        nlohmann::json cam;
+        cam["previewActive"] = previewActive_[i];
+        cam["paused"]        = cameraPaused_[i];
+        cam["streaming"]     = streamer_ ? streamer_->is_streaming(i) : false;
+        cam["recording"]     = streamer_ ? streamer_->is_recording(i) : false;
+        cam["width"]         = camWidth_[i];
+        cam["height"]        = camHeight_[i];
+        cam["device"]        = deviceName_[i].toStdString();
+        cam["streamUrl"]     = rtspUrl_[i].toStdString();
+        cam["recordResolution"] = recordResolution_[i];
+
+        if (streamer_ && streamer_->is_recording(i)) {
+            qint64 elapsed = recordStartTime_[i].secsTo(QDateTime::currentDateTime());
+            cam["recordingElapsedSec"] = elapsed;
+            cam["recordingPath"] = currentRecordPath_[i].toStdString();
+        } else {
+            cam["recordingElapsedSec"] = 0;
+            cam["recordingPath"] = "";
+        }
+
+        // FPS
+        cam["fps"] = lastFps_[i];
+
+        j[QString("cam%1").arg(i).toStdString()] = cam;
+    }
+
+    // HW stats
+    j["hw"] = nlohmann::json::parse(get_hw_json_());
+
+    // Fusion
+    j["fusionEnabled"] = fusionEnabled_;
+    if (fusionEnabled_) {
+        nlohmann::json targets = nlohmann::json::array();
+        for (const auto& t : lastTrackedTargets_) {
+            nlohmann::json tj;
+            tj["id"] = t.id;
+            tj["state"] = (t.state == TrackState::Confirmed) ? "Confirmed" :
+                          (t.state == TrackState::Tentative) ? "Tentative" : "Coasting";
+            tj["posX"] = t.posX;
+            tj["posY"] = t.posY;
+            tj["velX"] = t.velX;
+            tj["velY"] = t.velY;
+            tj["distanceMeters"] = t.distanceMeters;
+            tj["confidence"] = t.confidence;
+            tj["pointCount"] = t.pointCount;
+            tj["classId"] = t.classId;
+            tj["warningActive"] = t.warningActive;
+            targets.push_back(tj);
+        }
+        j["trackingTargets"] = targets;
+    }
+
+    j["ok"] = true;
+    return j.dump();
+}
+
+std::string Widget::get_hw_json_() const
+{
+    nlohmann::json j;
+
+    // CPU — 读取但不修改缓存的 prevCpuTotal_/prevCpuIdle_，
+    // 避免干扰 update_hw_usage_() 的独立计算
+    FILE* fp = fopen("/proc/stat", "r");
+    if (fp) {
+        uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+        int n = fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                       &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+        fclose(fp);
+        if (n >= 4) {
+            uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
+            // 用静态变量保存上一次的 web 查询值，独立于 update_hw_usage_()
+            static uint64_t webPrevTotal = 0;
+            static uint64_t webPrevIdle  = 0;
+            uint64_t totalDelta = total - webPrevTotal;
+            uint64_t idleDelta  = idle  - webPrevIdle;
+            if (webPrevTotal > 0 && totalDelta > 0)
+                j["cpu"] = (int)(100 - (idleDelta * 100 / totalDelta));
+            else
+                j["cpu"] = 0;
+            webPrevTotal = total;
+            webPrevIdle  = idle;
+        }
+    } else {
+        j["cpu"] = -1;
+    }
+
+    // Temperature
+    fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    if (fp) {
+        int raw;
+        if (fscanf(fp, "%d", &raw) == 1) j["temp"] = raw / 1000;
+        else j["temp"] = -1;
+        fclose(fp);
+    } else {
+        j["temp"] = -1;
+    }
+
+    // RGA
+    nlohmann::json rga = nlohmann::json::array();
+    fp = fopen("/sys/kernel/debug/rkrga/load", "r");
+    if (fp) {
+        char line[128];
+        while (fgets(line, sizeof(line), fp)) {
+            int load;
+            if (sscanf(line, "         load = %d%%", &load) == 1)
+                rga.push_back(load);
+        }
+        fclose(fp);
+    }
+    j["rga"] = rga;
+
+    // NPU
+    nlohmann::json npu = nlohmann::json::array();
+    fp = fopen("/sys/kernel/debug/rknpu/load", "r");
+    if (fp) {
+        char line[256];
+        if (fgets(line, sizeof(line), fp)) {
+            int c0, c1, c2;
+            if (sscanf(line, "NPU load:  Core0: %d%%, Core1: %d%%, Core2: %d%%", &c0, &c1, &c2) == 3) {
+                npu.push_back(c0);
+                npu.push_back(c1);
+                npu.push_back(c2);
+            }
+        }
+        fclose(fp);
+    }
+    j["npu"] = npu;
+
+    j["ok"] = true;
+    return j.dump();
+}
+
+std::string Widget::get_videos_json_() const
+{
+    nlohmann::json result = nlohmann::json::array();
+    QDir dir(recordDir_);
+    QStringList filters;
+    filters << "*.mp4" << "*.MP4";
+    QFileInfoList files = dir.entryInfoList(filters, QDir::Files, QDir::Time);
+
+    for (const QFileInfo& fi : files) {
+        nlohmann::json v;
+        v["name"] = fi.fileName().toStdString();
+        v["path"] = fi.absoluteFilePath().toStdString();
+        v["size"]  = fi.size();
+
+        // 读取分辨率和时长 (libavformat)
+        AVFormatContext* ctx = avformat_alloc_context();
+        if (ctx && avformat_open_input(&ctx, fi.absoluteFilePath().toUtf8().constData(), nullptr, nullptr) == 0) {
+            if (avformat_find_stream_info(ctx, nullptr) >= 0) {
+                int vid = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+                if (vid >= 0) {
+                    v["width"]  = ctx->streams[vid]->codecpar->width;
+                    v["height"] = ctx->streams[vid]->codecpar->height;
+                }
+                if (ctx->duration > 0)
+                    v["durationSec"] = (double)ctx->duration / AV_TIME_BASE;
+                else
+                    v["durationSec"] = 0;
+            }
+            avformat_close_input(&ctx);
+        }
+        if (ctx) avformat_free_context(ctx);
+
+        result.push_back(v);
+    }
+
+    nlohmann::json resp;
+    resp["videos"] = result;
+    resp["ok"] = true;
+    return resp.dump();
+}
+
+std::string Widget::get_fusion_config_json_() const
+{
+    nlohmann::json j;
+
+    // Tracker config
+    j["clusterEpsMeters"]         = fusionTrackerCfg_.clusterEpsMeters;
+    j["alpha"]                    = fusionTrackerCfg_.alpha;
+    j["beta"]                     = fusionTrackerCfg_.beta;
+    j["maxAssociationDistMeters"] = fusionTrackerCfg_.maxAssociationDistMeters;
+    j["minHitsToConfirm"]         = fusionTrackerCfg_.minHitsToConfirm;
+    j["maxCoastingFrames"]        = fusionTrackerCfg_.maxCoastingFrames;
+    j["maxTracks"]                = fusionTrackerCfg_.maxTracks;
+    j["warningEnterDistMeters"]   = fusionTrackerCfg_.warningEnterDistMeters;
+    j["warningExitDistMeters"]    = fusionTrackerCfg_.warningExitDistMeters;
+
+    // Camera intrinsics
+    for (int i = 0; i < 2; ++i) {
+        nlohmann::json cam;
+        cam["fx"] = fusionCamCfg_[i].fx;
+        cam["fy"] = fusionCamCfg_[i].fy;
+        cam["cx"] = fusionCamCfg_[i].cx;
+        cam["cy"] = fusionCamCfg_[i].cy;
+        cam["imgWidth"]  = fusionCamCfg_[i].imgWidth;
+        cam["imgHeight"] = fusionCamCfg_[i].imgHeight;
+        j[QString("cam%1").arg(i).toStdString()] = cam;
+    }
+
+    j["fusionEnabled"] = fusionEnabled_;
+    j["camCount"] = fusionCamCount_;
+    j["ok"] = true;
+    return j.dump();
 }
 
 bool Widget::eventFilter(QObject* obj, QEvent* event)

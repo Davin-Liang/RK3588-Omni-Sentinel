@@ -19,6 +19,7 @@ class PreviewWorker;
 class FusionWorker;
 class TopDownView;
 class VirtualKeyboard;
+class WebServer;
 class QThread;
 class QTimer;
 enum class StreamerEvent;
@@ -38,6 +39,12 @@ public:
     static Widget* instance() { return instance_; }
 
     void on_streamer_event(int camNum, StreamerEvent event, const QString& detail);
+
+    /** @brief Web 命令处理（由 WebServer 线程通过 BlockingQueuedConnection 调用）
+     *  @return JSON 响应字符串 */
+    std::string handle_web_command(const std::string& method,
+                                   const std::string& path,
+                                   const std::string& body);
 
 private slots:
     void on_frame_ready_(int camNum, const QImage& image);
@@ -65,6 +72,7 @@ private:
 
     SentinelVisioner* visioner_;
     SentinelStreamer* streamer_;
+    WebServer* webServer_;
 
     PreviewWorker* previewWorker_[2];
     QThread* previewThread_[2];
@@ -85,6 +93,7 @@ private:
 
     int frameCount_[2];
     uint64_t lastFpsTsUs_[2];
+    double lastFps_[2];
     bool previewActive_[2];
     bool cameraPaused_[2];
     QString camStatus_[2];
@@ -118,6 +127,30 @@ private:
     void update_button_states_();
     void set_status_(const QString& msg, const QString& color);
     void refresh_status_label_();
+    std::string get_status_json_() const;
+    std::string get_hw_json_() const;
+    std::string get_videos_json_() const;
+    std::string get_fusion_config_json_() const;
+
+    // ---- Web 控制 helpers ----
+    std::string web_start_preview_(int camNum);
+    std::string web_stop_preview_(int camNum);
+    std::string web_start_stream_(int camNum);
+    std::string web_stop_stream_(int camNum);
+    std::string web_start_record_(int camNum);
+    std::string web_stop_record_(int camNum);
+    std::string web_pause_(int camNum);
+    std::string web_resume_(int camNum);
+    std::string web_system_start_();
+    std::string web_system_stop_();
+    std::string web_delete_video_(const std::string& path);
+    std::string web_set_record_resolution_(int camNum, const std::string& body);
+    std::string web_lidar_start_();
+    std::string web_lidar_stop_();
+    std::string web_fusion_start_();
+    std::string web_fusion_stop_();
+    std::string web_fusion_config_(const std::string& body);
+    std::string web_fusion_intrinsics_(int camNum, const std::string& body);
 
     // ---- Fusion helpers ----
     void load_lidar_config_();

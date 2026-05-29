@@ -123,3 +123,23 @@
 **原因**: `set_status_` 直接覆盖 `QLabel` 文本，无按相机分区存储。
 
 **解决**: `set_status_` 自动检测消息前缀 "CAM0"/"CAM1"，按相机存储在 `camStatus_[0/1]` 数组中。`refresh_status_label_` 合并为 `"CAM0: xxx | CAM1: xxx"` 显示。全局消息（无前缀）仍直接显示。
+
+---
+
+## 13. Web 状态推送导致 QT 标题栏 CPU 利用率消失
+
+**现象**: 添加 Web 远程控制的状态推送（`push_status()`）后，QT 标题栏 `hwLabel` 中的 CPU 利用率不再更新，始终显示 `CPU --`。
+
+**原因**: `get_hw_json_()` 被声明为 `const`，但内部通过 `const_cast<Widget*>(this)` 修改了 `prevCpuTotal_` 和 `prevCpuIdle_` 成员变量。这两个变量也被 `update_hw_usage_()` 使用，CPU 利用率依赖两次采样间的差值计算。`push_status()` 在 `update_hw_usage_()` 末尾调用 → `get_status_json_()` → `get_hw_json_()`，`get_hw_json_()` 读取 `/proc/stat` 后立即重置了缓存值。下一次 `update_hw_usage_()` 的采样间隔变得极短（两个函数几乎同时采样），差值趋近于 0，导致 CPU 计算为 0 或负数。
+
+**解决**: `get_hw_json_()` 改用独立的 `static` 局部变量（`webPrevTotal` / `webPrevIdle`）保存上一次 Web 查询的 CPU 采样值，不再通过 `const_cast` 修改 Widget 成员变量。Web 和 QT 各自独立计算 CPU，互不干扰。
+
+---
+
+## 14. Web 暂停导致 PreviewWorker 超时告警
+
+**现象**: 网页界面点击暂停后，终端不断打印 `[PreviewWorker] no frame for 30 cycles`，而 QT 界面的暂停按钮不会触发此告警。
+
+**原因**: `web_pause_()` 实现时参考了 `on_btn_pause_()` 的主体逻辑，但遗漏了 `stop_preview_()` 调用。QT 的暂停流程是：停止录像→停止推流→**停止预览**→暂停相机。Web 的暂停缺少"停止预览"步骤，导致 PreviewWorker 子线程继续调用 `try_get_preview()` 轮询帧。相机暂停后 RGA 管线停止产出新帧，PreviewWorker 连续 30 次（×200ms = 6 秒）拿不到帧后打印超时告警。
+
+**解决**: `web_pause_()` 增加 `stop_preview_()` 调用，与 QT 暂停逻辑完全对齐：停止推流→停止录像→停止预览→暂停相机。

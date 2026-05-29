@@ -62,6 +62,11 @@ sentinel-visioner (相机视觉管线 + RGA 硬件加速)
 lidar-camera-fusion (视觉-雷达数据融合，纯算法组件)
   └── sentinel-lslidarer/include (仅依赖 LidarPoint/LidarFrame 类型定义)
 
+web-control (Web 远程控制组件)
+  ├── cpp-httplib (单头文件 HTTP/WebSocket 库, MIT)
+  ├── nlohmann/json (单头文件 JSON 库, MIT)
+  └── SentinelQT (嵌入进程内, 通过 BlockingQueuedConnection 通信)
+
 sentinel-lslidarer (激光雷达驱动，完全独立)
   └── Threads::Threads (唯一外部依赖)
 
@@ -74,11 +79,26 @@ sentinel-streamer (推流与录像组件)
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
   ├── sentinel-streamer (推流/录像启停控制)
+  ├── web-control (嵌入进程内 HTTP/WebSocket 服务器, REST API 远程控制)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
   ├── Qt5 Widgets (QStackedWidget 三页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] 节)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] 节)
 ```
+
+### web-control — Web 远程控制组件
+
+嵌入式 HTTP/WebSocket 服务器，在 SentinelQT 进程中运行，提供 REST API 远程操控板端设备，配套单文件 SPA 前端完全复刻 QT 界面风格。
+
+- **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 25+ REST 路由和 WebSocket 端点
+- **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
+- **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
+- **SPA 前端**: 单文件 `index.html`，三页布局（主控/视频管理/融合管理），CSS 完全复刻 QT 配色方案。推流视频通过 MJPEG 轮询（150ms）显示
+- **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
+- **配置**: `config.ini` 中 `[WebServer]` 节（`port=8080`, `enabled=true`）
+- **SPA 热加载**: HTML 从文件系统多路径搜索加载（`web/index.html`），编辑后无需重编译
+
+唯一公共头文件: `include/web_server.h`，API 类: `WebServer`
 
 ### sentinel-lslidarer — 镭神 N10Plus 单线雷达驱动
 
@@ -188,7 +208,8 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **系统暂停**: `camera_pause(camNum, paused)` 暂停 RGA 处理，硬件流保持，避免 STREAMOFF 重建管线
 - **线程模型**: 两个 PreviewWorker + 一个 FusionWorker 各自独立 QThread + std::atomic<bool>；LidarCameraFusion 内部 std::thread；主线程处理 UI 和定时器。FusionWorker 100ms 轮询 + 目标变化去重。析构逆序释放（FusionWorker → fusion → lidar → preview → visioner/streamer）
 - **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
-- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]` 五节，USB 分辨率上限 720p 钳位
+- **Web 远程控制**: 嵌入 WebServer（cpp-httplib），提供 REST API + WebSocket 实时推送。浏览器打开 `http://<IP>:8080` 即可远程操控。预览帧缓存供 MJPEG 端点读取，推流视频通过 snapshot.jpg 轮询显示
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]` 六节，USB 分辨率上限 720p 钳位
 
 关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置）、`build.sh`（构建脚本）
 
