@@ -51,6 +51,16 @@ if(NOT TARGET sentinel_streamer_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-streamer ${CMAKE_CURRENT_BINARY_DIR}/streamer_build)
 endif()
 
+# Lidar driver
+if(NOT TARGET sentinel_lslidarer_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer ${CMAKE_CURRENT_BINARY_DIR}/lslidarer_build)
+endif()
+
+# Lidar-Camera Fusion
+if(NOT TARGET lidar_camera_fusion_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion ${CMAKE_CURRENT_BINARY_DIR}/fusion_build)
+endif()
+
 find_package(Threads REQUIRED)
 
 set(TS_FILES SentinelQT_zh_CN.ts)
@@ -62,6 +72,12 @@ add_executable(SentinelQT
     widget.ui
     preview_worker.cpp
     preview_worker.h
+    fusion_worker.cpp
+    fusion_worker.h
+    top_down_view.cpp
+    top_down_view.h
+    virtual_keyboard.cpp
+    virtual_keyboard.h
     ${TS_FILES}
 )
 
@@ -69,6 +85,8 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-visioner/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-streamer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -76,6 +94,8 @@ target_link_libraries(SentinelQT PRIVATE
     Qt5::Widgets
     sentinel_streamer_lib
     sentinel_visioner_lib
+    sentinel_lslidarer_lib
+    lidar_camera_fusion_lib
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib

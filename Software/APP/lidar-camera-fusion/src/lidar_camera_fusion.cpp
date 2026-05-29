@@ -246,11 +246,6 @@ void LidarCameraFusion::project_point_(float cx, float cy, float cz,
 
 bool LidarCameraFusion::configure_tracker(const TrackerConfig& config)
 {
-    if (trackingEnabled_) {
-        fprintf(stderr, "[LidarCameraFusion] configure_tracker: "
-                "disable tracking first\n");
-        return false;
-    }
     if (!tracker_) {
         fprintf(stderr, "[LidarCameraFusion] configure_tracker: "
                 "tracker not allocated\n");
@@ -261,6 +256,51 @@ bool LidarCameraFusion::configure_tracker(const TrackerConfig& config)
     }
     trackerConfig_ = config;
     return true;
+}
+
+// ============================================================================
+// 运行时配置查询/更新
+// ============================================================================
+
+const TrackerConfig& LidarCameraFusion::get_tracker_config() const
+{
+    return trackerConfig_;
+}
+
+bool LidarCameraFusion::get_camera_config(uint32_t camIndex, CameraConfig& outCfg) const
+{
+    if (camIndex >= camCount_) {
+        fprintf(stderr, "[LidarCameraFusion] get_camera_config: "
+                "camIndex %u out of range (camCount=%u)\n", camIndex, camCount_);
+        return false;
+    }
+    outCfg = camConfigs_[camIndex];
+    return true;
+}
+
+bool LidarCameraFusion::update_camera_intrinsics(uint32_t camIndex,
+                                                  float fx, float fy,
+                                                  float cx, float cy,
+                                                  uint32_t imgWidth,
+                                                  uint32_t imgHeight)
+{
+    if (camIndex >= camCount_) {
+        fprintf(stderr, "[LidarCameraFusion] update_camera_intrinsics: "
+                "camIndex %u out of range (camCount=%u)\n", camIndex, camCount_);
+        return false;
+    }
+    camConfigs_[camIndex].fx        = fx;
+    camConfigs_[camIndex].fy        = fy;
+    camConfigs_[camIndex].cx        = cx;
+    camConfigs_[camIndex].cy        = cy;
+    camConfigs_[camIndex].imgWidth  = imgWidth;
+    camConfigs_[camIndex].imgHeight = imgHeight;
+    return true;
+}
+
+uint32_t LidarCameraFusion::get_cam_count() const
+{
+    return camCount_;
 }
 
 bool LidarCameraFusion::enable_tracking(bool enable)

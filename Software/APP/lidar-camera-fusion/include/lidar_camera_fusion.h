@@ -130,6 +130,41 @@ public:
      */
     bool is_running() const;
 
+    // ---- 运行时配置查询/更新 ----
+
+    /**
+     * @brief  获取当前跟踪器配置的只读引用。
+     * @return TrackerConfig 常量引用
+     */
+    const TrackerConfig& get_tracker_config() const;
+
+    /**
+     * @brief  获取指定相机的配置（运行时查询）。
+     * @param  camIndex 相机索引 [0, camCount-1]
+     * @param  outCfg   输出配置（调用者分配）
+     * @return true 索引合法，false 失败
+     */
+    bool get_camera_config(uint32_t camIndex, CameraConfig& outCfg) const;
+
+    /**
+     * @brief  运行时更新相机内参（保留外参矩阵不变）。
+     *         内部先读取当前 camConfigs_[camIndex] 的 tLidarToCam，
+     *         仅覆盖 fx/fy/cx/cy/imgWidth/imgHeight 字段。
+     * @param  camIndex  相机索引 [0, camCount-1]
+     * @param  fx, fy, cx, cy  针孔模型内参
+     * @param  imgWidth, imgHeight  图像尺寸（像素）
+     * @return true 索引合法，false 失败
+     */
+    bool update_camera_intrinsics(uint32_t camIndex,
+                                  float fx, float fy, float cx, float cy,
+                                  uint32_t imgWidth, uint32_t imgHeight);
+
+    /**
+     * @brief  获取当前相机数量。
+     * @return 相机数量（0 = 未启动或仅构造）
+     */
+    uint32_t get_cam_count() const;
+
     // ---- 目标跟踪 API ----
 
     /**

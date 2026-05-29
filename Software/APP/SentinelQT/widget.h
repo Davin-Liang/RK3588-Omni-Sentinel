@@ -5,11 +5,20 @@
 #include <QImage>
 #include <QSettings>
 #include <QDateTime>
+#include <QMap>
+#include <QLineEdit>
+#include <QEvent>
 #include <memory>
+
+#include "lidar_camera_fusion.h"
 
 class SentinelVisioner;
 class SentinelStreamer;
+class SentinelLslidarer;
 class PreviewWorker;
+class FusionWorker;
+class TopDownView;
+class VirtualKeyboard;
 class QThread;
 class QTimer;
 enum class StreamerEvent;
@@ -44,6 +53,13 @@ private slots:
     void update_hw_usage_();
     void update_record_info_(int camNum);
 
+    // ---- Fusion slots ----
+    void on_btn_fusion_toggle_();
+    void on_btn_back_from_fusion_();
+    void on_tracking_updated_(const QVector<TrackedTarget>& targets);
+    void on_fusion_param_changed_();
+    void on_fusion_status_update_();
+
 private:
     Ui::Widget *ui;
 
@@ -77,6 +93,22 @@ private:
 
     static Widget* instance_;
 
+    // ---- Fusion ----
+    SentinelLslidarer*  lidar_;
+    LidarCameraFusion*  fusion_;
+    FusionWorker*       fusionWorker_;
+    QThread*            fusionThread_;
+    QTimer*             fusionStatusTimer_;
+    bool                fusionEnabled_;
+    TopDownView*        topDownView_;
+    VirtualKeyboard*    virtualKeyboard_;
+    TrackerConfig       fusionTrackerCfg_;
+    CameraConfig        fusionCamCfg_[2];
+    LidarConfig         lidarCfg_;
+    QMap<QString, QLineEdit*> fusionParamEdits_;
+    QVector<TrackedTarget>    lastTrackedTargets_;
+    uint32_t            fusionCamCount_;
+
     void load_config_();
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
@@ -86,5 +118,15 @@ private:
     void update_button_states_();
     void set_status_(const QString& msg, const QString& color);
     void refresh_status_label_();
+
+    // ---- Fusion helpers ----
+    void load_lidar_config_();
+    void load_fusion_config_();
+    void build_fusion_param_ui_();
+    void sync_ui_to_fusion_config_();
+    void sync_fusion_config_to_ui_();
+    void save_fusion_config_();
+
+    bool eventFilter(QObject* obj, QEvent* event) override;
 };
 #endif // WIDGET_H

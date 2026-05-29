@@ -92,6 +92,27 @@ YOLO 推理类尚未实现，暂用 `generate_fake_detections_()` 生成**固定
 
 ---
 
+## 运行时配置 API
+
+```cpp
+// 查询当前配置
+const TrackerConfig& cfg = fusion.get_tracker_config();
+CameraConfig camCfg;
+fusion.get_camera_config(0, camCfg);
+
+// 运行时更新（无需停止融合线程）
+fusion.configure_tracker(newCfg);    // 支持热更新，不再要求 tracking 先 disable
+fusion.update_camera_intrinsics(0, fx, fy, cx, cy, imgWidth, imgHeight);
+
+// 查询状态
+uint32_t camCount = fusion.get_cam_count();
+bool running = fusion.is_running();
+```
+
+**注意**：`configure_tracker()` 已移除 `trackingEnabled_` 前置检查，支持运行时热更新配置，无需先调用 `enable_tracking(false)`。
+
+---
+
 ## 配合 Qt 工程使用
 
 `LidarCameraFusion` 内部自带 fusion 线程，**无需继承 QObject，也不依赖 Qt**。通过快照接口 + 告警回调与 Qt 信号槽对接：
@@ -157,7 +178,7 @@ private:
 | 4 | 头文件依赖 | `lidar_tracking_types.h` 独立无 Qt 依赖，Qt 工程只需 include 此文件 |
 | 5 | 死锁风险 | 不要在告警回调里调用 `copy_tracked_targets()` |
 | 6 | 展示字段 | `distanceMeters` 预计算，`state` 枚举转文字显示 |
-| 7 | 配置时机 | `configure_tracker()` / `register_warning_callback()` 在 `start()` 前调用 |
+| 7 | 配置时机 | `configure_tracker()` 支持运行时热更新（已移除 trackingEnabled 前置守卫）；`register_warning_callback()` 在 `start()` 前调用 |
 | 8 | 启停顺序 | `stop()` → `copy_tracked_targets()`（最后一次查询）→ 析构 |
 
 ---

@@ -4,12 +4,22 @@
 #include "sentinel-visioner.h"
 #include "sentinel_streamer.h"
 #include "preview_worker.h"
+#include "fusion_worker.h"
+#include "top_down_view.h"
+#include "virtual_keyboard.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QThread>
 #include <QTimer>
 #include <QMessageBox>
+#include <QScrollArea>
+#include <QDoubleValidator>
+#include <QIntValidator>
+#include <QPainter>
+#include <QPushButton>
+#include <QStyledItemDelegate>
+#include <QVBoxLayout>
 #include <cstring>
 #include <cstdio>
 
@@ -27,6 +37,22 @@ static void streamer_callback_(int camNum, StreamerEvent event, const char* deta
     QMetaObject::invokeMethod(w, [w, camNum, event, detailStr]() {
         w->on_streamer_event(camNum, event, detailStr);
     }, Qt::QueuedConnection);
+}
+
+static void fusion_warning_callback_(const TrackedTarget& target, void* /*userData*/)
+{
+    const char* stateStr = "?";
+    switch (target.state) {
+    case TrackState::Tentative: stateStr = "Tentative"; break;
+    case TrackState::Confirmed: stateStr = "Confirmed"; break;
+    case TrackState::Coasting:  stateStr = "Coasting";  break;
+    default: break;
+    }
+    fprintf(stderr,
+        "[FusionWarning] target #%u class=%u dist=%.2fm pos=(%.2f,%.2f) "
+        "vel=(%.2f,%.2f) state=%s\n",
+        target.id, target.classId, target.distanceMeters,
+        target.posX, target.posY, target.velX, target.velY, stateStr);
 }
 
 // ---- Styles ----
@@ -89,6 +115,18 @@ static const char* SYSTEM_OFF_STYLE =
     " QPushButton:hover { background-color: #2ea043; }"
     " QPushButton:pressed { background-color: #196c2e; }";
 
+static const char* FUSION_ON_STYLE =
+    "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #da3633;"
+    " border: 1px solid #f85149; border-radius: 6px; }"
+    " QPushButton:hover { background-color: #f85149; }"
+    " QPushButton:pressed { background-color: #b62324; }";
+
+static const char* FUSION_OFF_STYLE =
+    "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #238636;"
+    " border: 1px solid #2ea043; border-radius: 6px; }"
+    " QPushButton:hover { background-color: #2ea043; }"
+    " QPushButton:pressed { background-color: #196c2e; }";
+
 // ---- Helper: find button for camera ----
 
 static QPushButton* cam_btn(QPushButton* btn0, QPushButton* btn1, int camNum)
@@ -119,6 +157,15 @@ Widget::Widget(QWidget *parent)
     , cameraPaused_{false, false}
     , prevCpuTotal_(0)
     , prevCpuIdle_(0)
+    , lidar_(nullptr)
+    , fusion_(nullptr)
+    , fusionWorker_(nullptr)
+    , fusionThread_(nullptr)
+    , fusionStatusTimer_(nullptr)
+    , fusionEnabled_(false)
+    , topDownView_(nullptr)
+    , virtualKeyboard_(nullptr)
+    , fusionCamCount_(1)
 {
     instance_ = this;
     ui->setupUi(this);
@@ -128,6 +175,20 @@ Widget::Widget(QWidget *parent)
     // Resolution combo — controls cam0 record resolution only
     int res0 = recordResolution_[0];
     ui->resCombo->setCurrentIndex(res0 == 720 ? 1 : 0);
+
+    // 居中 QComboBox 文字
+    class CenterDelegate : public QStyledItemDelegate {
+    public:
+        explicit CenterDelegate(QObject* p = nullptr) : QStyledItemDelegate(p) {}
+        void paint(QPainter* painter, const QStyleOptionViewItem& option,
+                   const QModelIndex& index) const override {
+            QStyleOptionViewItem opt = option;
+            opt.displayAlignment = Qt::AlignCenter;
+            QStyledItemDelegate::paint(painter, opt, index);
+        }
+    };
+    ui->resCombo->setItemDelegate(new CenterDelegate(ui->resCombo));
+
     connect(ui->resCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
         recordResolution_[0] = (idx == 1) ? 720 : 1080;
@@ -177,6 +238,60 @@ Widget::Widget(QWidget *parent)
     if (ok0) start_preview_(0);
     if (ok1) start_preview_(1);
 
+    // --- Fusion 初始化 (不启动 radar/fusion，仅创建对象和加载配置) ---
+
+    lidar_ = new SentinelLslidarer();
+    fusion_ = new LidarCameraFusion();
+
+    load_lidar_config_();
+    load_fusion_config_();
+
+    fusion_->configure_tracker(fusionTrackerCfg_);
+    fusion_->enable_tracking(true);
+
+    // TopDownView 替换占位
+    topDownView_ = new TopDownView(ui->fusionViewContainer);
+    QVBoxLayout* viewLayout = new QVBoxLayout(ui->fusionViewContainer);
+    viewLayout->setContentsMargins(0, 0, 0, 0);
+    viewLayout->addWidget(topDownView_);
+
+    // VirtualKeyboard 替换占位
+    virtualKeyboard_ = new VirtualKeyboard(ui->keyboardContainer);
+    QVBoxLayout* kbLayout = new QVBoxLayout(ui->keyboardContainer);
+    kbLayout->setContentsMargins(0, 0, 0, 0);
+    kbLayout->addWidget(virtualKeyboard_);
+
+    // 构建参数 UI
+    build_fusion_param_ui_();
+    sync_fusion_config_to_ui_();
+
+    // 融合页面按钮连接
+    connect(ui->btnFusionToggle, &QPushButton::clicked,
+            this, &Widget::on_btn_fusion_toggle_);
+    connect(ui->btnBackFromFusion, &QPushButton::clicked,
+            this, &Widget::on_btn_back_from_fusion_);
+
+    // 主页面 "融合管理" 按钮
+    connect(ui->btnFusion, &QPushButton::clicked, this, [this]() {
+        ui->stackedWidget->setCurrentIndex(2);
+    });
+
+    // 虚拟键盘可见性
+    connect(virtualKeyboard_, &VirtualKeyboard::visibilityChanged,
+            this, [this](bool visible) {
+        ui->keyboardContainer->setVisible(visible);
+    });
+
+    // 融合状态定时器
+    fusionStatusTimer_ = new QTimer(this);
+    connect(fusionStatusTimer_, &QTimer::timeout,
+            this, &Widget::on_fusion_status_update_);
+
+    // eventFilter 安装到所有参数编辑框
+    for (auto* le : fusionParamEdits_) {
+        le->installEventFilter(this);
+    }
+
     set_status_("系统就绪", "#3fb950");
     update_button_states_();
 }
@@ -185,6 +300,27 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
+    // 停止 fusion 子系统
+    if (fusionWorker_) {
+        fusionWorker_->stop();
+        if (fusionThread_ && fusionThread_->isRunning()) {
+            fusionThread_->quit();
+            fusionThread_->wait(3000);
+        }
+        delete fusionWorker_;
+        fusionWorker_ = nullptr;
+        delete fusionThread_;
+        fusionThread_ = nullptr;
+    }
+    if (fusion_) {
+        fusion_->stop();
+    }
+    if (lidar_) {
+        lidar_->stop();
+    }
+    delete fusion_;
+    delete lidar_;
+
     for (int i = 0; i < 2; ++i) {
         if (visioner_) {
             visioner_->camera_stream_ctrl(i, false);
@@ -562,19 +698,17 @@ void Widget::update_hw_usage_()
     QString text;
     text += tempC >= 0 ? QString("%1°C").arg(tempC) : "--°C";
     text += "  ";
-    text += cpuUsage >= 0 ? QString("CPU %1%").arg(cpuUsage) : "CPU --%";
+    text += cpuUsage >= 0 ? QString("CPU%1").arg(cpuUsage, 3) : "CPU --";
     text += "  ";
-    text += QString("RGA %1/%2/%3")
+    text += QString("RGA%1/%2/%3")
                 .arg(rgaCores[0] >= 0 ? QString::number(rgaCores[0]) : "-")
                 .arg(rgaCores[1] >= 0 ? QString::number(rgaCores[1]) : "-")
                 .arg(rgaCores[2] >= 0 ? QString::number(rgaCores[2]) : "-");
-    text += "%";
     text += "  ";
-    text += QString("NPU %1/%2/%3")
+    text += QString("NPU%1/%2/%3")
                 .arg(npuCores[0] >= 0 ? QString::number(npuCores[0]) : "-")
                 .arg(npuCores[1] >= 0 ? QString::number(npuCores[1]) : "-")
                 .arg(npuCores[2] >= 0 ? QString::number(npuCores[2]) : "-");
-    text += "%";
 
     ui->hwLabel->setText(text);
 }
@@ -800,4 +934,504 @@ void Widget::refresh_status_label_()
     if (text.isEmpty()) text = "系统就绪";
     ui->statusLabel->setText(text);
     ui->statusLabel->setStyleSheet("font-size: 12px; color: #ffffff; padding: 2px;");
+}
+
+// ============================================================================
+// Fusion: 配置加载/保存
+// ============================================================================
+
+void Widget::load_lidar_config_()
+{
+    lidarCfg_.serialPort = config_.value("Lidar/device", "/dev/sentinel_lidar")
+                               .toString().toStdString();
+    lidarCfg_.baudRate      = config_.value("Lidar/baudRate", 460800).toInt();
+    lidarCfg_.n10PlusHz     = config_.value("Lidar/hz", 10).toInt();
+    lidarCfg_.minRange      = config_.value("Lidar/minRange", 0.15f).toFloat();
+    lidarCfg_.maxRange      = config_.value("Lidar/maxRange", 50.0f).toFloat();
+    lidarCfg_.angleDisableMin = config_.value("Lidar/angleDisableMin", 0).toInt();
+    lidarCfg_.angleDisableMax = config_.value("Lidar/angleDisableMax", 0).toInt();
+}
+
+void Widget::load_fusion_config_()
+{
+    fusionEnabled_  = config_.value("Fusion/enabled", false).toBool();
+    fusionCamCount_ = config_.value("Fusion/camCount", 1).toUInt();
+
+    // Tracker 关键参数
+    fusionTrackerCfg_.clusterEpsMeters =
+        config_.value("Fusion/clusterEpsMeters", 0.5f).toFloat();
+    fusionTrackerCfg_.alpha =
+        config_.value("Fusion/alpha", 0.7f).toFloat();
+    fusionTrackerCfg_.beta =
+        config_.value("Fusion/beta", 0.3f).toFloat();
+    fusionTrackerCfg_.maxAssociationDistMeters =
+        config_.value("Fusion/maxAssociationDistMeters", 2.0f).toFloat();
+    fusionTrackerCfg_.minHitsToConfirm =
+        config_.value("Fusion/minHitsToConfirm", 3u).toUInt();
+    fusionTrackerCfg_.maxCoastingFrames =
+        config_.value("Fusion/maxCoastingFrames", 5u).toUInt();
+    fusionTrackerCfg_.maxTracks =
+        config_.value("Fusion/maxTracks", 50u).toUInt();
+    fusionTrackerCfg_.warningEnterDistMeters =
+        config_.value("Fusion/warningEnterDistMeters", 3.0f).toFloat();
+    fusionTrackerCfg_.warningExitDistMeters =
+        config_.value("Fusion/warningExitDistMeters", 3.5f).toFloat();
+
+    // Tracker 细节参数 (仅 config.ini, UI 不暴露)
+    fusionTrackerCfg_.minClusterPoints =
+        config_.value("Fusion/minClusterPoints", 3u).toUInt();
+    fusionTrackerCfg_.requireClassIdMatch =
+        config_.value("Fusion/requireClassIdMatch", true).toBool();
+    fusionTrackerCfg_.maxTentativeMisses =
+        config_.value("Fusion/maxTentativeMisses", 1u).toUInt();
+    fusionTrackerCfg_.maxStaleCoastingFrames =
+        config_.value("Fusion/maxStaleCoastingFrames", 2u).toUInt();
+    fusionTrackerCfg_.minConfirmedAgeForWarning =
+        config_.value("Fusion/minConfirmedAgeForWarning", 2u).toUInt();
+    fusionTrackerCfg_.warningCooldownNs =
+        config_.value("Fusion/warningCooldownNs", 2000000000ULL).toULongLong();
+    fusionTrackerCfg_.minHitsForVelocity =
+        config_.value("Fusion/minHitsForVelocity", 2u).toUInt();
+
+    // Camera 0
+    fusionCamCfg_[0].fx = config_.value("Fusion/Cam0Fx", 400.0f).toFloat();
+    fusionCamCfg_[0].fy = config_.value("Fusion/Cam0Fy", 400.0f).toFloat();
+    fusionCamCfg_[0].cx = config_.value("Fusion/Cam0Cx", 320.0f).toFloat();
+    fusionCamCfg_[0].cy = config_.value("Fusion/Cam0Cy", 240.0f).toFloat();
+    fusionCamCfg_[0].imgWidth  = config_.value("Fusion/Cam0ImgWidth", 640u).toUInt();
+    fusionCamCfg_[0].imgHeight = config_.value("Fusion/Cam0ImgHeight", 480u).toUInt();
+    for (int i = 0; i < 16; ++i) {
+        fusionCamCfg_[0].tLidarToCam[i] =
+            config_.value(QString("Fusion/Cam0T%1").arg(i), 0.0f).toFloat();
+    }
+    // 默认外参: cx = ly, cz = -lx (见 demo_thread)
+    if (fusionCamCfg_[0].tLidarToCam[1] == 0.0f &&
+        fusionCamCfg_[0].tLidarToCam[8] == 0.0f) {
+        fusionCamCfg_[0].tLidarToCam[1]  = 1.0f;   // cx = ly
+        fusionCamCfg_[0].tLidarToCam[8]  = -1.0f;  // cz = -lx
+        fusionCamCfg_[0].tLidarToCam[15] = 1.0f;
+    }
+
+    // Camera 1
+    fusionCamCfg_[1].fx = config_.value("Fusion/Cam1Fx", 400.0f).toFloat();
+    fusionCamCfg_[1].fy = config_.value("Fusion/Cam1Fy", 400.0f).toFloat();
+    fusionCamCfg_[1].cx = config_.value("Fusion/Cam1Cx", 320.0f).toFloat();
+    fusionCamCfg_[1].cy = config_.value("Fusion/Cam1Cy", 240.0f).toFloat();
+    fusionCamCfg_[1].imgWidth  = config_.value("Fusion/Cam1ImgWidth", 640u).toUInt();
+    fusionCamCfg_[1].imgHeight = config_.value("Fusion/Cam1ImgHeight", 480u).toUInt();
+    for (int i = 0; i < 16; ++i) {
+        fusionCamCfg_[1].tLidarToCam[i] =
+            config_.value(QString("Fusion/Cam1T%1").arg(i), 0.0f).toFloat();
+    }
+    if (fusionCamCfg_[1].tLidarToCam[1] == 0.0f &&
+        fusionCamCfg_[1].tLidarToCam[8] == 0.0f) {
+        fusionCamCfg_[1].tLidarToCam[1]  = 1.0f;
+        fusionCamCfg_[1].tLidarToCam[8]  = -1.0f;
+        fusionCamCfg_[1].tLidarToCam[15] = 1.0f;
+    }
+}
+
+void Widget::save_fusion_config_()
+{
+    config_.setValue("Fusion/enabled", fusionEnabled_);
+    config_.setValue("Fusion/camCount", fusionCamCount_);
+
+    config_.setValue("Fusion/clusterEpsMeters", fusionTrackerCfg_.clusterEpsMeters);
+    config_.setValue("Fusion/alpha", fusionTrackerCfg_.alpha);
+    config_.setValue("Fusion/beta", fusionTrackerCfg_.beta);
+    config_.setValue("Fusion/maxAssociationDistMeters", fusionTrackerCfg_.maxAssociationDistMeters);
+    config_.setValue("Fusion/minHitsToConfirm", fusionTrackerCfg_.minHitsToConfirm);
+    config_.setValue("Fusion/maxCoastingFrames", fusionTrackerCfg_.maxCoastingFrames);
+    config_.setValue("Fusion/maxTracks", fusionTrackerCfg_.maxTracks);
+    config_.setValue("Fusion/warningEnterDistMeters", fusionTrackerCfg_.warningEnterDistMeters);
+    config_.setValue("Fusion/warningExitDistMeters", fusionTrackerCfg_.warningExitDistMeters);
+
+    config_.setValue("Fusion/Cam0Fx", fusionCamCfg_[0].fx);
+    config_.setValue("Fusion/Cam0Fy", fusionCamCfg_[0].fy);
+    config_.setValue("Fusion/Cam0Cx", fusionCamCfg_[0].cx);
+    config_.setValue("Fusion/Cam0Cy", fusionCamCfg_[0].cy);
+
+    config_.setValue("Fusion/Cam1Fx", fusionCamCfg_[1].fx);
+    config_.setValue("Fusion/Cam1Fy", fusionCamCfg_[1].fy);
+    config_.setValue("Fusion/Cam1Cx", fusionCamCfg_[1].cx);
+    config_.setValue("Fusion/Cam1Cy", fusionCamCfg_[1].cy);
+
+    config_.sync();
+}
+
+// ============================================================================
+// Fusion: 参数 UI 构建
+// ============================================================================
+
+void Widget::build_fusion_param_ui_()
+{
+    QWidget* content = ui->paramScrollContent;
+    QVBoxLayout* layout = new QVBoxLayout(content);
+    layout->setSpacing(2);
+    layout->setContentsMargins(6, 6, 6, 6);
+
+    // 参数说明映射
+    QMap<QString, QString> descriptions;
+    descriptions["clusterEpsMeters"] =
+        QString::fromUtf8("两点距离小于此值的归为同一目标，值越小目标分得越细");
+    descriptions["alpha"] =
+        QString::fromUtf8("位置滤波平滑系数，越大越信任当前观测（响应快但抖动大）");
+    descriptions["beta"] =
+        QString::fromUtf8("速度估计平滑系数，越大速度响应越快但噪声也越大");
+    descriptions["maxAssociationDistMeters"] =
+        QString::fromUtf8("检测与航迹匹配的最大距离，超过此值视为不同目标");
+    descriptions["minHitsToConfirm"] =
+        QString::fromUtf8("连续命中这么多帧后航迹从\"待确认\"升级为\"已确认\"");
+    descriptions["maxCoastingFrames"] =
+        QString::fromUtf8("目标短暂丢失后靠预测维持的最大帧数，超时则删除航迹");
+    descriptions["maxTracks"] =
+        QString::fromUtf8("同时跟踪的目标数量上限，防止内存和CPU过载");
+    descriptions["warningEnterDistMeters"] =
+        QString::fromUtf8("目标进入此距离内触发告警（迟滞进入阈值，需小于解除距离）");
+    descriptions["warningExitDistMeters"] =
+        QString::fromUtf8("目标离开此距离外解除告警（迟滞退出阈值，防止边界抖动）");
+    descriptions["cam0_fx"] = QString::fromUtf8("X轴焦距（像素），影响水平投影缩放");
+    descriptions["cam0_fy"] = QString::fromUtf8("Y轴焦距（像素），影响垂直投影缩放");
+    descriptions["cam0_cx"] = QString::fromUtf8("主点X坐标（像素），图像水平中心");
+    descriptions["cam0_cy"] = QString::fromUtf8("主点Y坐标（像素），图像垂直中心");
+    descriptions["cam1_fx"] = QString::fromUtf8("X轴焦距（像素）");
+    descriptions["cam1_fy"] = QString::fromUtf8("Y轴焦距（像素）");
+    descriptions["cam1_cx"] = QString::fromUtf8("主点X坐标（像素）");
+    descriptions["cam1_cy"] = QString::fromUtf8("主点Y坐标（像素）");
+
+    // 为每个 section 创建独立的说明标签
+    auto makeDescLabel = [&]() -> QLabel* {
+        QLabel* lbl = new QLabel(content);
+        lbl->setWordWrap(true);
+        lbl->setStyleSheet(
+            "font-size: 12px; color: #2d3535; background-color: #e8f0fe;"
+            " border: 1px solid #58a6ff; border-radius: 4px; padding: 6px; margin: 2px 0;");
+        lbl->hide();
+        layout->addWidget(lbl);
+        return lbl;
+    };
+
+    auto makeDescTimer = [&](QLabel* lbl) -> QTimer* {
+        QTimer* t = new QTimer(content);
+        t->setSingleShot(true);
+        QObject::connect(t, &QTimer::timeout, lbl, &QLabel::hide);
+        return t;
+    };
+
+    QLabel* trackerDescLabel = nullptr;
+    QTimer* trackerDescTimer = nullptr;
+    QLabel* cam0DescLabel = nullptr;
+    QTimer* cam0DescTimer = nullptr;
+    QLabel* cam1DescLabel = nullptr;
+    QTimer* cam1DescTimer = nullptr;
+
+    auto addSection = [&](const QString& title, QLabel*& descLabel, QTimer*& descTimer) {
+        descLabel = makeDescLabel();
+        descTimer = makeDescTimer(descLabel);
+        QLabel* lbl = new QLabel(title, content);
+        lbl->setStyleSheet(
+            "font-size: 13px; font-weight: 600; color: #58a6ff;"
+            " background: transparent; border: none; padding: 6px 0 2px 0;");
+        layout->addWidget(lbl);
+    };
+
+    auto addParam = [&](const QString& key, const QString& label,
+                        const QString& suffix, bool isFloat, bool isInt,
+                        QLabel* descLabel, QTimer* descTimer) {
+        QHBoxLayout* row = new QHBoxLayout();
+        row->setSpacing(2);
+
+        QPushButton* helpBtn = new QPushButton("?", content);
+        helpBtn->setFixedSize(18, 18);
+        helpBtn->setStyleSheet(
+            "QPushButton { font-size: 10px; font-weight: 700; color: #58a6ff;"
+            " background-color: #F5F0D7; border: 1px solid #58a6ff;"
+            " border-radius: 9px; }"
+            "QPushButton:pressed { background-color: #d4e6f1; }");
+        QString desc = descriptions.value(key);
+        if (!desc.isEmpty() && descLabel) {
+            QObject::connect(helpBtn, &QPushButton::clicked, content, [descLabel, descTimer, desc]() {
+                descLabel->setText(desc);
+                descLabel->show();
+                descTimer->start(4000);
+            });
+        } else {
+            helpBtn->setEnabled(false);
+            helpBtn->setStyleSheet(
+                "QPushButton { font-size: 10px; color: #8b949e;"
+                " background-color: #F5F0D7; border: 1px solid #d0d7de;"
+                " border-radius: 9px; }");
+        }
+        row->addWidget(helpBtn);
+
+        QLabel* nameLbl = new QLabel(label, content);
+        nameLbl->setMinimumWidth(95);
+        nameLbl->setStyleSheet(
+            "font-size: 11px; color: #4a5555; background: transparent; border: none;");
+        QLineEdit* edit = new QLineEdit(content);
+        edit->setMinimumWidth(60);
+        edit->setMaximumWidth(100);
+        edit->setMaximumHeight(28);
+        edit->setStyleSheet(
+            "font-size: 12px; color: #2d3535; background-color: #F5F0D7;"
+            " border: 1px solid #8b949e; border-radius: 4px; padding: 2px 4px;");
+        if (isFloat) {
+            edit->setValidator(new QDoubleValidator(-999.0, 999.0, 3, edit));
+        } else if (isInt) {
+            edit->setValidator(new QIntValidator(0, 9999, edit));
+        }
+        QLabel* suffixLbl = new QLabel(suffix, content);
+        suffixLbl->setStyleSheet(
+            "font-size: 11px; color: #4a5555; background: transparent; border: none;");
+        suffixLbl->setMaximumWidth(24);
+        row->addWidget(nameLbl);
+        row->addWidget(edit);
+        row->addWidget(suffixLbl);
+        layout->addLayout(row);
+        fusionParamEdits_[key] = edit;
+        connect(edit, &QLineEdit::editingFinished,
+                this, &Widget::on_fusion_param_changed_);
+    };
+
+    addSection(QString::fromUtf8("跟踪器参数"), trackerDescLabel, trackerDescTimer);
+    addParam("clusterEpsMeters",          QString::fromUtf8("聚类半径"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("alpha",                     QString::fromUtf8("Alpha增益"),     "",   true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("beta",                      QString::fromUtf8("Beta增益"),      "",   true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("maxAssociationDistMeters",  QString::fromUtf8("关联门限"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("minHitsToConfirm",          QString::fromUtf8("确认帧数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
+    addParam("maxCoastingFrames",         QString::fromUtf8("外推帧数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
+    addParam("maxTracks",                 QString::fromUtf8("最大航迹"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
+    addParam("warningEnterDistMeters",    QString::fromUtf8("告警距离"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("warningExitDistMeters",     QString::fromUtf8("解除距离"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+
+    addSection(QString::fromUtf8("相机参数 CAM0"), cam0DescLabel, cam0DescTimer);
+    addParam("cam0_fx", "fx", "", true, false, cam0DescLabel, cam0DescTimer);
+    addParam("cam0_fy", "fy", "", true, false, cam0DescLabel, cam0DescTimer);
+    addParam("cam0_cx", "cx", "", true, false, cam0DescLabel, cam0DescTimer);
+    addParam("cam0_cy", "cy", "", true, false, cam0DescLabel, cam0DescTimer);
+
+    addSection(QString::fromUtf8("相机参数 CAM1"), cam1DescLabel, cam1DescTimer);
+    addParam("cam1_fx", "fx", "", true, false, cam1DescLabel, cam1DescTimer);
+    addParam("cam1_fy", "fy", "", true, false, cam1DescLabel, cam1DescTimer);
+    addParam("cam1_cx", "cx", "", true, false, cam1DescLabel, cam1DescTimer);
+    addParam("cam1_cy", "cy", "", true, false, cam1DescLabel, cam1DescTimer);
+
+    layout->addStretch();
+}
+
+// ============================================================================
+// Fusion: UI ↔ Config 同步
+// ============================================================================
+
+void Widget::sync_fusion_config_to_ui_()
+{
+    auto setVal = [this](const QString& key, float v) {
+        if (fusionParamEdits_.contains(key))
+            fusionParamEdits_[key]->setText(QString::number(v, 'f', 3));
+    };
+    auto setInt = [this](const QString& key, uint32_t v) {
+        if (fusionParamEdits_.contains(key))
+            fusionParamEdits_[key]->setText(QString::number(v));
+    };
+
+    setVal("clusterEpsMeters",         fusionTrackerCfg_.clusterEpsMeters);
+    setVal("alpha",                    fusionTrackerCfg_.alpha);
+    setVal("beta",                     fusionTrackerCfg_.beta);
+    setVal("maxAssociationDistMeters", fusionTrackerCfg_.maxAssociationDistMeters);
+    setInt("minHitsToConfirm",         fusionTrackerCfg_.minHitsToConfirm);
+    setInt("maxCoastingFrames",        fusionTrackerCfg_.maxCoastingFrames);
+    setInt("maxTracks",                fusionTrackerCfg_.maxTracks);
+    setVal("warningEnterDistMeters",   fusionTrackerCfg_.warningEnterDistMeters);
+    setVal("warningExitDistMeters",    fusionTrackerCfg_.warningExitDistMeters);
+
+    setVal("cam0_fx", fusionCamCfg_[0].fx);
+    setVal("cam0_fy", fusionCamCfg_[0].fy);
+    setVal("cam0_cx", fusionCamCfg_[0].cx);
+    setVal("cam0_cy", fusionCamCfg_[0].cy);
+
+    setVal("cam1_fx", fusionCamCfg_[1].fx);
+    setVal("cam1_fy", fusionCamCfg_[1].fy);
+    setVal("cam1_cx", fusionCamCfg_[1].cx);
+    setVal("cam1_cy", fusionCamCfg_[1].cy);
+}
+
+void Widget::sync_ui_to_fusion_config_()
+{
+    auto getVal = [this](const QString& key) -> float {
+        if (fusionParamEdits_.contains(key))
+            return fusionParamEdits_[key]->text().toFloat();
+        return 0.0f;
+    };
+    auto getInt = [this](const QString& key) -> uint32_t {
+        if (fusionParamEdits_.contains(key))
+            return fusionParamEdits_[key]->text().toUInt();
+        return 0;
+    };
+
+    fusionTrackerCfg_.clusterEpsMeters         = getVal("clusterEpsMeters");
+    fusionTrackerCfg_.alpha                     = getVal("alpha");
+    fusionTrackerCfg_.beta                      = getVal("beta");
+    fusionTrackerCfg_.maxAssociationDistMeters  = getVal("maxAssociationDistMeters");
+    fusionTrackerCfg_.minHitsToConfirm          = getInt("minHitsToConfirm");
+    fusionTrackerCfg_.maxCoastingFrames         = getInt("maxCoastingFrames");
+    fusionTrackerCfg_.maxTracks                 = getInt("maxTracks");
+    fusionTrackerCfg_.warningEnterDistMeters    = getVal("warningEnterDistMeters");
+    fusionTrackerCfg_.warningExitDistMeters     = getVal("warningExitDistMeters");
+
+    fusionCamCfg_[0].fx = getVal("cam0_fx");
+    fusionCamCfg_[0].fy = getVal("cam0_fy");
+    fusionCamCfg_[0].cx = getVal("cam0_cx");
+    fusionCamCfg_[0].cy = getVal("cam0_cy");
+
+    fusionCamCfg_[1].fx = getVal("cam1_fx");
+    fusionCamCfg_[1].fy = getVal("cam1_fy");
+    fusionCamCfg_[1].cx = getVal("cam1_cx");
+    fusionCamCfg_[1].cy = getVal("cam1_cy");
+}
+
+// ============================================================================
+// Fusion: 事件处理
+// ============================================================================
+
+void Widget::on_btn_fusion_toggle_()
+{
+    if (!fusionEnabled_) {
+        // ---- 启用融合 ----
+        sync_ui_to_fusion_config_();
+        save_fusion_config_();
+
+        lidar_->load_config(lidarCfg_);
+        if (!lidar_->start()) {
+            ui->fusionStatusLabel->setText("雷达启动失败");
+            return;
+        }
+
+        fusion_->configure_tracker(fusionTrackerCfg_);
+        fusion_->enable_tracking(true);
+        fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+
+        if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
+            lidar_->stop();
+            ui->fusionStatusLabel->setText("融合启动失败");
+            return;
+        }
+
+        fusionWorker_ = new FusionWorker(fusion_);
+        fusionThread_ = new QThread(this);
+        fusionWorker_->moveToThread(fusionThread_);
+        connect(fusionWorker_, &FusionWorker::trackingUpdated,
+                this, &Widget::on_tracking_updated_);
+        connect(fusionThread_, &QThread::started,
+                fusionWorker_, &FusionWorker::start);
+        fusionThread_->start();
+
+        fusionStatusTimer_->start(1000);
+        fusionEnabled_ = true;
+
+        ui->btnFusionToggle->setText("停止融合");
+        ui->btnFusionToggle->setStyleSheet(FUSION_ON_STYLE);
+        ui->fusionStatusLabel->setText("目标: 0 | 已确认: 0 | 告警: 0 | 融合: 运行中");
+
+        fprintf(stderr, "[SentinelQT] Fusion enabled\n");
+    } else {
+        // ---- 禁用融合 ----
+        if (fusionWorker_) {
+            fusionWorker_->stop();
+            if (fusionThread_ && fusionThread_->isRunning()) {
+                fusionThread_->quit();
+                fusionThread_->wait(3000);
+            }
+            delete fusionWorker_;
+            fusionWorker_ = nullptr;
+            delete fusionThread_;
+            fusionThread_ = nullptr;
+        }
+
+        fusion_->stop();
+        lidar_->stop();
+        fusionStatusTimer_->stop();
+
+        topDownView_->set_targets({});
+        topDownView_->update();
+
+        fusionEnabled_ = false;
+        lastTrackedTargets_.clear();
+
+        ui->btnFusionToggle->setText("启用融合");
+        ui->btnFusionToggle->setStyleSheet(FUSION_OFF_STYLE);
+        ui->fusionStatusLabel->setText("目标: 0 | 已确认: 0 | 告警: 0 | 融合: 关闭");
+
+        fprintf(stderr, "[SentinelQT] Fusion disabled\n");
+    }
+}
+
+void Widget::on_btn_back_from_fusion_()
+{
+    ui->stackedWidget->setCurrentIndex(0);
+}
+
+void Widget::on_tracking_updated_(const QVector<TrackedTarget>& targets)
+{
+    lastTrackedTargets_ = targets;
+    topDownView_->set_targets(targets);
+    topDownView_->update();
+}
+
+void Widget::on_fusion_param_changed_()
+{
+    sync_ui_to_fusion_config_();
+    save_fusion_config_();
+
+    if (fusionEnabled_) {
+        fusion_->configure_tracker(fusionTrackerCfg_);
+        fusion_->enable_tracking(true);
+        fusion_->update_camera_intrinsics(
+            0, fusionCamCfg_[0].fx, fusionCamCfg_[0].fy,
+            fusionCamCfg_[0].cx, fusionCamCfg_[0].cy,
+            fusionCamCfg_[0].imgWidth, fusionCamCfg_[0].imgHeight);
+        fusion_->update_camera_intrinsics(
+            1, fusionCamCfg_[1].fx, fusionCamCfg_[1].fy,
+            fusionCamCfg_[1].cx, fusionCamCfg_[1].cy,
+            fusionCamCfg_[1].imgWidth, fusionCamCfg_[1].imgHeight);
+    }
+}
+
+void Widget::on_fusion_status_update_()
+{
+    uint32_t total = static_cast<uint32_t>(lastTrackedTargets_.size());
+    uint32_t confirmed = 0;
+    uint32_t warnings = 0;
+    for (const auto& t : lastTrackedTargets_) {
+        if (t.state == TrackState::Confirmed) ++confirmed;
+        if (t.warningActive) ++warnings;
+    }
+
+    ui->fusionStatusLabel->setText(
+        QString("目标: %1 | 已确认: %2 | 告警: %3 | 融合: %4")
+            .arg(total)
+            .arg(confirmed)
+            .arg(warnings)
+            .arg(fusionEnabled_ ? "运行中" : "关闭"));
+
+    // 右侧显示最多3个已确认目标的实际距离
+    QStringList distItems;
+    int shown = 0;
+    for (const auto& t : lastTrackedTargets_) {
+        if (t.state == TrackState::Confirmed && shown < 3) {
+            distItems.append(QString("T%1:%2m").arg(t.id).arg(t.distanceMeters, 0, 'f', 1));
+            ++shown;
+        }
+    }
+    ui->fusionDistLabel->setText(distItems.join("  "));
+}
+
+bool Widget::eventFilter(QObject* obj, QEvent* event)
+{
+    if (event->type() == QEvent::FocusIn) {
+        QLineEdit* le = qobject_cast<QLineEdit*>(obj);
+        if (le && fusionParamEdits_.values().contains(le)) {
+            virtualKeyboard_->show_for(le);
+        }
+    }
+    return QWidget::eventFilter(obj, event);
 }

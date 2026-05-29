@@ -74,8 +74,10 @@ sentinel-streamer (推流与录像组件)
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
   ├── sentinel-streamer (推流/录像启停控制)
-  ├── Qt5 Widgets (QStackedWidget 双页布局)
-  └── config.ini (运行时配置)
+  ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
+  ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
+  ├── Qt5 Widgets (QStackedWidget 三页布局)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] 节)
 ```
 
 ### sentinel-lslidarer — 镭神 N10Plus 单线雷达驱动
@@ -101,6 +103,13 @@ SentinelQT (QT5 嵌入式触控界面)
 - **线程模型**: 无内部线程/锁，设计为单线程顺序调用
 
 唯一公共头文件: `include/lidar_camera_fusion.h`，API 类: `LidarCameraFusion`
+
+运行时配置 API：
+- `get_tracker_config()` — 获取当前 TrackerConfig 只读引用
+- `get_camera_config(camIndex, outCfg)` — 获取指定相机配置
+- `update_camera_intrinsics(camIndex, fx, fy, cx, cy, w, h)` — 运行时更新相机内参（保留外参矩阵）
+- `get_cam_count()` — 获取当前相机数量
+- `configure_tracker(config)` — 支持运行时热更新（已移除 `trackingEnabled_` 前置守卫）
 
 ### sentinel-visioner — 多路视觉流水线
 
@@ -159,20 +168,29 @@ SentinelQT (QT5 嵌入式触控界面)
 
 RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner 和 SentinelStreamer 的上层集成者。
 
-- **技术栈**: Qt5 Widgets，QStackedWidget 双页布局（主控页 / 视频管理页），全屏无边框
+- **技术栈**: Qt5 Widgets，QStackedWidget 三页布局（主控页 / 视频管理页 / 融合管理页），全屏无边框
+- **共享标题栏**: `titleBar`（温度/CPU/RGA/NPU + 标题 + 时钟）位于根布局 QStackedWidget 上方，三页共享。hwLabel 和 clockLabel 均为 280px 确保标题居中
 - **双路预览**: 左右并排 `previewLabel0` / `previewLabel1`，两个独立 PreviewWorker 各自运行在独立 QThread，通过 lambda 捕获 camNum 将 `frameReady` 信号路由到对应 label。每路预览可独立开启/关闭
 - **双路控制**: 每路相机独立 4 按钮（预览切换、推流、录像、暂停），全局系统按钮一键启停两路
 - **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
 - **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI。两路独立 RTSP URL
 - **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。USB 相机强制 720p
 - **视频管理**: QTableWidget 列表展示录制文件（libavformat 读分辨率/时长），支持删除
-- **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）及日期时间
+- **融合目标跟踪**: 第三页独立子页面，集成 SentinelLslidarer + LidarCameraFusion：
+  - **俯视图**: `TopDownView` 自定义 QWidget，paintEvent 绘制距离网格、目标（按 TrackState 着色）、速度箭头、告警脉冲圈、中文图例
+  - **参数面板**: 9 个跟踪器参数 + 每路相机 4 个内参，QLineEdit + QDoubleValidator/QIntValidator，每个参数带 `?` 帮助按钮（点击在对应 section 下方显示说明，4 秒自动隐藏）
+  - **虚拟键盘**: `VirtualKeyboard` 4×4 数字键盘，默认隐藏，eventFilter 检测 FocusIn 自动弹出
+  - **融合启停**: `on_btn_fusion_toggle_()` 控制完整生命周期（lidar start → fusion start → FusionWorker 轮询），失败自动回滚
+  - **参数热更新**: `editingFinished` 触发 `configure_tracker()` + `update_camera_intrinsics()` 实时推送，无需重启融合
+  - **告警输出**: 三层输出 — 俯视图红色脉冲圈 + 状态栏告警计数 + 终端 stderr `[FusionWarning]` 日志
+  - **假检测模式**: 使用 `generate_fake_detections_()` 虚构检测框，待 NPU 推理就绪后替换
+- **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）及日期时间。紧凑格式（无 `%` 符号）
 - **系统暂停**: `camera_pause(camNum, paused)` 暂停 RGA 处理，硬件流保持，避免 STREAMOFF 重建管线
-- **线程模型**: 两个 PreviewWorker 各自独立 QThread + std::atomic<bool> 启停控制；主线程处理 UI 和定时器；析构逆序释放
+- **线程模型**: 两个 PreviewWorker + 一个 FusionWorker 各自独立 QThread + std::atomic<bool>；LidarCameraFusion 内部 std::thread；主线程处理 UI 和定时器。FusionWorker 100ms 轮询 + 目标变化去重。析构逆序释放（FusionWorker → fusion → lidar → preview → visioner/streamer）
 - **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
-- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]` 两节，USB 分辨率上限 720p 钳位
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]` 五节，USB 分辨率上限 720p 钳位
 
-关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`main.cpp`（入口）、`config.ini`（配置）、`build.sh`（构建脚本）
+关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置）、`build.sh`（构建脚本）
 
 ## 关键约定
 

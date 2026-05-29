@@ -1,6 +1,6 @@
 # SentinelQT
 
-基于 Qt5 Widgets 的嵌入式触屏应用程序，运行于 RK3588 ARM64 Linux 平台。集成 sentinel-visioner（双路相机视觉管线）和 sentinel-streamer（推流/录像），提供全触屏操作的双路实时监控界面。
+基于 Qt5 Widgets 的嵌入式触屏应用程序，运行于 RK3588 ARM64 Linux 平台。集成 sentinel-visioner（双路相机视觉管线）、sentinel-streamer（推流/录像）、sentinel-lslidarer（激光雷达驱动）和 lidar-camera-fusion（视觉-雷达融合跟踪），提供全触屏操作的双路实时监控与融合目标跟踪界面。
 
 ## 功能概述
 
@@ -22,6 +22,15 @@
   - **RGA 利用率**：`/sys/kernel/debug/rkrga/load`，逐核显示
   - **NPU 利用率**：`/sys/kernel/debug/rknpu/load`，逐核显示
   - **日期时间**：标题栏右侧显示 `yyyy-MM-dd HH:mm:ss`
+  - 标题栏在三个页面顶部共享显示
+
+- **融合目标跟踪子页面**：基于 `SentinelLslidarer` + `LidarCameraFusion`，通过 `QStackedWidget` 切换到独立子页面（第 3 页）：
+  - **鸟瞰俯视图**：自定义 `TopDownView` 组件实时绘制跟踪目标位置、速度矢量箭头、告警脉冲圈，支持距离网格和图例
+  - **参数动态配置**：9 个跟踪器参数 + 每路相机 4 个内参参数，通过嵌入式虚拟数字键盘触屏输入，每个参数带 "?" 帮助按钮说明
+  - **融合启停控制**：一键启用/停止雷达驱动、融合线程和跟踪轮询，启动失败自动回滚
+  - **实时状态显示**：底部状态栏左侧显示目标总数/已确认数/告警数，右侧显示最多 3 个目标的实际距离值
+  - **告警输出**：距离告警同时在俯视图（红色脉冲圈）、状态栏（告警计数）和终端 stderr（详细日志）三层输出
+  - **假检测模式**：NPU 推理未就绪时使用内置虚构检测框验证全链路，参数实时热更新无需重启融合
 
 - **双路状态栏**：底部状态栏自动合并两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示。
 
@@ -102,3 +111,14 @@ dir=/mnt/sdcard
 | `streamUrl` | `[Camera0/1]` | RTSP 推流目标地址 | 各不同 |
 | `recordResolution` | `[Camera0/1]` | 录像分辨率（CAM1 强制 720） | 1080 / 720 |
 | `dir` | `[Record]` | 录像文件保存目录 | `/mnt/sdcard` |
+| `device` | `[Lidar]` | 雷达串口设备 | `/dev/sentinel_lidar` |
+| `baudRate` | `[Lidar]` | 雷达波特率 | `460800` |
+| `camCount` | `[Fusion]` | 融合相机数量 | `1` |
+| `clusterEpsMeters` | `[Fusion]` | 聚类半径 (m) | `0.5` |
+| `alpha` / `beta` | `[Fusion]` | Alpha-Beta 滤波增益 | `0.7` / `0.3` |
+| `maxAssociationDistMeters` | `[Fusion]` | 关联门限距离 (m) | `2.0` |
+| `minHitsToConfirm` | `[Fusion]` | 确认航迹所需帧数 | `3` |
+| `maxCoastingFrames` | `[Fusion]` | 丢失外推帧数 | `5` |
+| `warningEnterDistMeters` | `[Fusion]` | 告警触发距离 (m) | `3.0` |
+| `warningExitDistMeters` | `[Fusion]` | 告警解除距离 (m) | `3.5` |
+| `Cam0Fx` 等 | `[Fusion]` | 相机 0/1 内参 (px) | `400` |
