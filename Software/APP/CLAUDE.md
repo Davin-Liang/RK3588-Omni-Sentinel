@@ -93,8 +93,9 @@ SentinelQT (QT5 嵌入式触控界面)
 - **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 25+ REST 路由和 WebSocket 端点
 - **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
 - **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
-- **SPA 前端**: 单文件 `index.html`，三页布局（主控/视频管理/融合管理），CSS 完全复刻 QT 配色方案。推流视频通过 MJPEG 轮询（150ms）显示
+- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局，CSS 完全复刻 QT 配色方案。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 MJPEG 轮询（150ms）显示，录像文件支持在线播放（流式输出 + Range seek）
 - **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
+- **暂停保护**: 暂停时自动停止推流/录像/预览；推流/录像启动时若相机已暂停则自动恢复，避免死锁
 - **配置**: `config.ini` 中 `[WebServer]` 节（`port=8080`, `enabled=true`）
 - **SPA 热加载**: HTML 从文件系统多路径搜索加载（`web/index.html`），编辑后无需重编译
 

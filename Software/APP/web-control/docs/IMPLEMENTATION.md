@@ -89,7 +89,20 @@ WebControl 是 RK3588-Omni-Sentinel 平台的 Web 远程控制组件，在 Senti
   → [广播线程] → WebSocket → 浏览器 Canvas 俯视图渲染
 ```
 
-### 4.4 推流视频显示流
+### 4.4 录像在线播放流
+
+```
+浏览器 点击 ▶ 播放按钮
+  → GET /api/v1/playback?path=URL_ENCODED_PATH
+  → cpp-httplib 路由直接处理（不走 CommandHandler，避免 BlockingQueuedConnection 延迟）
+  → URL 解码路径（手动处理 %2F 等编码）
+  → set_content_provider(fileSize, "video/mp4", lambda)
+  → cpp-httplib 自动处理 Range 请求（bytes=START-END）
+  → 流式读取文件块 → DataSink.write() → HTTP 206 响应
+  → 浏览器 <video> 元素解码播放，支持拖拽 seek
+```
+
+### 4.5 推流视频显示流
 
 ```
 浏览器 点击"开始推流"
@@ -121,11 +134,13 @@ WebControl 是 RK3588-Omni-Sentinel 平台的 Web 远程控制组件，在 Senti
 
 ## 6. 前端 SPA 设计
 
-单文件 `index.html`，三个页面（CSS visibility 切换模拟 QStackedWidget）：
+单文件 `index.html`，仪表盘式单页布局，所有功能一页呈现：
 
-- **主控页**: 双路相机预览区 + 控制行（推流/录像/暂停）+ 底部导航栏
-- **视频管理页**: 录像文件表格（文件名/分辨率/时长/删除）
-- **融合管理页**: Canvas 俯视图 + 参数编辑面板
+- **顶部栏**: Logo + 硬件监控（温度/CPU/RGA/NPU）+ 时钟
+- **相机行（2 列）**: 双路相机卡片，各含 16:9 视频预览区 + 控制按钮（预览/推流/录像/暂停）+ 状态指示灯
+- **状态栏**: 录像信息 + 系统状态
+- **底部行（2 列）**: 左列融合跟踪（雷达图 + 参数面板），右列系统控制（上半）+ 录像文件列表（下半，含在线播放按钮）
+- **播放器**: 全屏覆盖层，支持 Range 拖拽 seek，路径 `GET /api/v1/playback?path=`
 
 **完全复刻 QT 配色**:
 - 根背景 `#549688`、卡片 `#F4EAC5`/`#F5F0D7`、强调色 `#58a6ff`

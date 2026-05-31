@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <vector>
 #include <QBuffer>
 
 using json = nlohmann::json;
@@ -184,6 +185,53 @@ bool WebServer::start()
         handle_api(req, res, "DELETE");
     };
     impl_->httpServer_.Delete(R"(/api/v1/videos)", wrap_delete);
+
+    // 录像文件播放（流式输出，支持 Range 请求）
+    impl_->httpServer_.Get(R"(/api/v1/playback)", [](const httplib::Request& req, httplib::Response& res) {
+        std::string filePath = req.get_param_value("path");
+        if (filePath.empty()) { res.status = 400; res.set_content("missing path", "text/plain"); return; }
+
+        // URL 解码
+        std::string decoded;
+        for (size_t i = 0; i < filePath.size(); ++i) {
+            if (filePath[i] == '%' && i + 2 < filePath.size()) {
+                auto hex = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                    return -1;
+                };
+                int h = hex(filePath[i+1]), l = hex(filePath[i+2]);
+                if (h >= 0 && l >= 0) { decoded += (char)((h << 4) | l); i += 2; continue; }
+            }
+            decoded += filePath[i];
+        }
+        filePath = decoded;
+
+        // 获取文件大小
+        std::ifstream fsize(filePath, std::ios::binary | std::ios::ate);
+        if (!fsize.is_open()) { res.status = 404; res.set_content("not found", "text/plain"); return; }
+        size_t fileSize = fsize.tellg();
+        fsize.close();
+
+        // 用 cpp-httplib 的内容提供器流式输出
+        // cpp-httplib 会据此自动处理 Range 请求
+        res.set_content_provider(
+            fileSize,          // Content-Length
+            "video/mp4",       // Content-Type
+            [filePath](size_t offset, size_t length, httplib::DataSink& sink) -> bool {
+                std::ifstream f(filePath, std::ios::binary);
+                if (!f) return false;
+                f.seekg(offset);
+                std::vector<char> buf(length);
+                f.read(buf.data(), length);
+                size_t n = f.gcount();
+                if (n > 0) sink.write(buf.data(), n);
+                return true;
+            },
+            [](bool success) { /* done */ }
+        );
+    });
 
     // ---- WebSocket（新版 API：server.WebSocket() 大写 W）----
     impl_->httpServer_.WebSocket("/ws", [this](const httplib::Request& /*req*/,

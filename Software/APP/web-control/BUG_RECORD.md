@@ -61,3 +61,43 @@ auto wrap_post = [handle_api](const httplib::Request& req, httplib::Response& re
 - handler 改为 `[this](const httplib::Request&, httplib::ws::WebSocket& ws) { ... }`
 - `ws.read(msg, op, timeout)` 改为 `ws.read(msg)`，返回值与 `httplib::ws::ReadResult::Text` 比较
 - `ws.send(msg, callback)` 改为 `ws.send(msg)`
+
+---
+
+## 4. 录像文件在线播放失败（Range 请求解析崩溃 + 二进制处理不当）
+
+**现象**: 录像文件列表新增播放按钮后，点击播放弹出播放器但一直转圈，最终播放失败。浏览器 Network 面板显示请求未完成。但同样 URL 在浏览器地址栏直接访问可下载完整文件，下载后可本地播放。
+
+**原因**: 两个独立问题：
+1. 浏览器 `<video>` 元素发送的首个探测请求为 `Range: bytes=0-`（`-` 后为空）。代码用 `std::stoull(rangeVal.substr(dashPos + 1))` 解析，空字符串传入 `std::stoull` 抛出 `std::invalid_argument` 异常，handler 未捕获导致请求失败。
+2. `res.set_content(binary_data, "video/mp4")` 对二进制 MP4 数据传输可能经过文本处理，导致浏览器无法正确解码。
+
+**解决**: 
+1. 检查 `dashPos + 1` 之后的子串是否为空，为空则保持默认值 `fileSize - 1`。
+2. 改用 cpp-httplib 自带的 `res.set_content_provider(fileSize, "video/mp4", lambda)` 流式输出。该方法自动处理 Range 请求切片（浏览器发送 `bytes=START-END` → cpp-httplib 自动计算 offset 和 length 调用 provider），且直接写入 socket 不经文本处理。
+
+```cpp
+// 修复后：使用 set_content_provider 流式输出
+res.set_content_provider(
+    fileSize, "video/mp4",
+    [filePath](size_t offset, size_t length, httplib::DataSink& sink) -> bool {
+        std::ifstream f(filePath, std::ios::binary);
+        f.seekg(offset);
+        std::vector<char> buf(length);
+        f.read(buf.data(), length);
+        sink.write(buf.data(), f.gcount());
+        return true;
+    },
+    [](bool) {}
+);
+```
+
+---
+
+## 5. 融合参数帮助提示不自动消失
+
+**现象**: 网页融合参数面板的 `?` 帮助按钮点击后，提示框持续显示不消失，遮挡其他参数。
+
+**原因**: 重设计时只恢复了帮助按钮的 HTML 结构和点击切换逻辑，遗漏了 QT 界面的 4 秒自动隐藏功能。
+
+**解决**: `toggleHelp()` 函数增加 4 秒 `setTimeout` 自动隐藏。再次点击或切换其他帮助按钮时取消前一个定时器，确保只有一个提示框显示。

@@ -1611,6 +1611,16 @@ std::string Widget::web_stop_preview_(int camNum)
 std::string Widget::web_start_stream_(int camNum)
 {
     if (streamer_->is_streaming(camNum)) return R"({"ok":true})";
+
+    // 如果相机已暂停，先恢复
+    if (cameraPaused_[camNum]) {
+        visioner_->camera_pause(camNum, false);
+        cameraPaused_[camNum] = false;
+        if (!previewActive_[camNum]) {
+            start_preview_(camNum);
+        }
+    }
+
     QByteArray url = rtspUrl_[camNum].toUtf8();
     if (streamer_->start_stream(camNum, url.constData())) {
         update_camera_button_states_(camNum);
@@ -1632,6 +1642,16 @@ std::string Widget::web_stop_stream_(int camNum)
 std::string Widget::web_start_record_(int camNum)
 {
     if (streamer_->is_recording(camNum)) return R"({"ok":true})";
+
+    // 如果相机已暂停，先恢复
+    if (cameraPaused_[camNum]) {
+        visioner_->camera_pause(camNum, false);
+        cameraPaused_[camNum] = false;
+        if (!previewActive_[camNum]) {
+            start_preview_(camNum);
+        }
+    }
+
     int resVal = recordResolution_[camNum];
     RecordResolution recordRes = (resVal == 720)
         ? RecordResolution::RES_720P : RecordResolution::RES_1080P;
@@ -1690,9 +1710,20 @@ std::string Widget::web_pause_(int camNum)
 std::string Widget::web_resume_(int camNum)
 {
     if (!cameraPaused_[camNum]) return R"({"ok":true})";
-    cameraPaused_[camNum] = false;
+
     visioner_->camera_pause(camNum, false);
+
+    // 恢复预览（暂停时已被 web_pause_ 停止）
+    if (!previewActive_[camNum]) {
+        start_preview_(camNum);
+        QPushButton* toggleBtn = cam_btn(ui->btnToggle0, ui->btnToggle1, camNum);
+        toggleBtn->setText("关闭预览");
+        toggleBtn->setStyleSheet(TOGGLE_ON_STYLE);
+    }
+
+    cameraPaused_[camNum] = false;
     update_camera_button_states_(camNum);
+    refresh_status_label_();
     return R"({"ok":true})";
 }
 

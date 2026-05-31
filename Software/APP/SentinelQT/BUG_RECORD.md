@@ -142,4 +142,14 @@
 
 **原因**: `web_pause_()` 实现时参考了 `on_btn_pause_()` 的主体逻辑，但遗漏了 `stop_preview_()` 调用。QT 的暂停流程是：停止录像→停止推流→**停止预览**→暂停相机。Web 的暂停缺少"停止预览"步骤，导致 PreviewWorker 子线程继续调用 `try_get_preview()` 轮询帧。相机暂停后 RGA 管线停止产出新帧，PreviewWorker 连续 30 次（×200ms = 6 秒）拿不到帧后打印超时告警。
 
-**解决**: `web_pause_()` 增加 `stop_preview_()` 调用，与 QT 暂停逻辑完全对齐：停止推流→停止录像→停止预览→暂停相机。
+**解决**: `web_pause_()` 增加 `stop_preview_()` 调用，与 QT 暂停逻辑完全对齐：停止推流→停止录像→停止预览→暂停相机。同时 `web_resume_()` 增加 `start_preview_()` 调用恢复预览线程。
+
+---
+
+## 15. 暂停状态下点击推流/录像导致系统卡死
+
+**现象**: 相机暂停后，在网页点击"开始推流"或"开始录像"，整个 SentinelQT 进程卡死，需 `killall -9 SentinelQT` 强制终止。
+
+**原因**: `web_start_stream_()` 和 `web_start_record_()` 未检查相机暂停状态，直接调用 `streamer_->start_stream()`。当相机暂停时 RGA 管线已停止产出帧，streamer 的推流线程调用 `wait_get_orig_copy_buffer()` 无限阻塞等帧 → 死锁。`BlockingQueuedConnection` 同步等待推流结果也一并卡住。
+
+**解决**: `web_start_stream_()` 和 `web_start_record_()` 在执行前检测 `cameraPaused_[camNum]`，若为 true 则先调用 `visioner_->camera_pause(false)` 恢复 RGA 管线，再重启预览线程，最后执行推流/录像操作。

@@ -1,6 +1,6 @@
 # WebControl
 
-Web 远程控制组件。在 SentinelQT 进程中嵌入 HTTP/WebSocket 服务器（cpp-httplib），提供 REST API 远程操控板端设备，并通过单文件 SPA 前端实现与 QT 界面风格一致的浏览器控制台。推流画面通过 MJPEG 轮询显示。
+Web 远程控制组件。在 SentinelQT 进程中嵌入 HTTP/WebSocket 服务器（cpp-httplib），提供 REST API 远程操控板端设备，并通过单文件 SPA 前端实现仪表盘式浏览器控制台，完全复刻 QT 配色方案。推流画面通过 MJPEG 轮询显示，录像文件支持在线播放。
 
 ---
 
@@ -80,8 +80,8 @@ delete webServer_;
 | `/api/v1/videos` | DELETE | 删除录像文件 |
 | `/api/v1/cam/{0,1}/record-resolution` | PUT | 设置录像分辨率 |
 | `/api/v1/cam/{0,1}/snapshot.jpg` | GET | MJPEG 单帧快照 |
+| `/api/v1/playback?path=<file>` | GET | 在线播放录像文件（流式输出 + Range 支持） |
 | `/ws` | WebSocket | 实时状态/跟踪/事件推送 |
-
 ---
 
 ## 编译 & 部署
