@@ -153,3 +153,53 @@
 **原因**: `web_start_stream_()` 和 `web_start_record_()` 未检查相机暂停状态，直接调用 `streamer_->start_stream()`。当相机暂停时 RGA 管线已停止产出帧，streamer 的推流线程调用 `wait_get_orig_copy_buffer()` 无限阻塞等帧 → 死锁。`BlockingQueuedConnection` 同步等待推流结果也一并卡住。
 
 **解决**: `web_start_stream_()` 和 `web_start_record_()` 在执行前检测 `cameraPaused_[camNum]`，若为 true 则先调用 `visioner_->camera_pause(false)` 恢复 RGA 管线，再重启预览线程，最后执行推流/录像操作。
+
+---
+
+## 16. 数据回溯页面虚拟键盘无法弹出
+
+**现象**: 切换到"数据回溯管理"页面（page 3），点击回溯秒数输入框，虚拟键盘不出现。融合参数页面的虚拟键盘正常。
+
+**原因**: `keyboardContainer` 是 `pageFusion`（page 2）的子控件，当 QStackedWidget 切到 page 3 时 pageFusion 被隐藏，虚拟键盘不可见。此外 `eventFilter` 只检查 `fusionParamEdits_` 中的 QLineEdit，不包含回溯页的输入框。
+
+**解决**: 将 `keyboardContainer` 从 `pageFusion` 内部移到 QStackedWidget 同级的 `wrapperLayout` 根层级，所有页面共享。同时 `eventFilter` 新增 `le == backtrackSecsEdit_` 条件识别回溯页输入框。
+
+---
+
+## 17. Web↔Qt 双向同步覆盖冲突
+
+**现象**: Web 界面修改回溯秒数后，不到 1 秒即被 Qt 的周期性状态推送覆盖为旧值，两者相互覆盖无法稳定输入。
+
+**原因**: `get_status_json_` 每 1 秒推送完整状态到 Web，覆盖用户在 Web 界面正在进行但尚未提交的修改。
+
+**解决**: 为回溯秒数/摄像头选择引入 `btrDirty` 脏标志：Web 用户修改输入时置脏，阻止 Qt 推送覆盖；点击"回溯"提交后清脏标志恢复同步。同理为系统控制的录像分辨率（`sysDirty`）和融合参数（`fusionCfgDirty`）添加脏标志。
+
+---
+
+## 18. QDoubleSpinBox 无法安装虚拟键盘 eventFilter
+
+**现象**: 回溯秒数使用 `QDoubleSpinBox`，调用 `lineEdit()->installEventFilter()` 编译报错 `protected`，改用 `findChild<QLineEdit*>()` 返回 nullptr。
+
+**原因**: Qt5 中 `QAbstractSpinBox::lineEdit()` 是 protected 方法。`findChild<QLineEdit*>()` 在构造阶段返回 nullptr，因为 spinbox 内部 QLineEdit 是延迟创建的（首次 show 时才实例化）。
+
+**解决**: 放弃 QDoubleSpinBox，改用与融合参数一致的 QLineEdit + QDoubleValidator 方案，构造时即可直接 `installEventFilter(this)`。
+
+---
+
+## 19. 虚拟键盘弹出后 FocusOut 立即隐藏
+
+**现象**: 点击回溯秒数输入框，虚拟键盘一闪即消失，无法输入。
+
+**原因**: eventFilter 新增 FocusOut 处理，输入框失焦时调用 `hide_keyboard()`。但键盘按钮自身获取焦点时也会触发输入框的 FocusOut，导致键盘弹出即被隐藏。
+
+**解决**: FocusOut 中改用 `QTimer::singleShot(50ms)` 延迟判断，检查 `QApplication::focusWidget()` 是否在虚拟键盘上。若焦点在键盘按钮上则保留键盘，否则隐藏。
+
+---
+
+## 20. Web 暂停/恢复后 Qt 暂停按钮不更新
+
+**现象**: Web 界面点击"暂停"，Web 按钮变为"恢复"，但 Qt 界面暂停按钮仍显示"暂停"。
+
+**原因**: `update_camera_button_states_()` 仅更新推流/录像按钮的状态和样式，未处理暂停按钮。Web 的 REST handler `web_pause_`/`web_resume_` 调用此函数后暂停按钮文本和样式不变。
+
+**解决**: 在 `update_camera_button_states_()` 中增加暂停按钮状态更新：根据 `cameraPaused_[camNum]` 设置按钮文本为"暂停"或"恢复"及对应样式。

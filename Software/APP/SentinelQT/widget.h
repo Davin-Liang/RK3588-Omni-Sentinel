@@ -22,6 +22,8 @@ class VirtualKeyboard;
 class WebServer;
 class QThread;
 class QTimer;
+class QTableWidget;
+class QComboBox;
 enum class StreamerEvent;
 
 QT_BEGIN_NAMESPACE
@@ -40,6 +42,8 @@ public:
 
     void on_streamer_event(int camNum, StreamerEvent event, const QString& detail);
 
+    void on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs);
+
     /** @brief Web 命令处理（由 WebServer 线程通过 BlockingQueuedConnection 调用）
      *  @return JSON 响应字符串 */
     std::string handle_web_command(const std::string& method,
@@ -56,6 +60,10 @@ private slots:
     void on_btn_videos_();
     void on_btn_back_();
     void on_btn_refresh_videos_();
+    void on_btn_backtrack_();
+    void on_btn_refresh_backtrack_();
+    void on_btn_backtrack_page_();
+    void on_btn_back_from_backtrack_();
     void update_clock_();
     void update_hw_usage_();
     void update_record_info_(int camNum);
@@ -112,6 +120,7 @@ private:
     TopDownView*        topDownView_;
     VirtualKeyboard*    virtualKeyboard_;
     TrackerConfig       fusionTrackerCfg_;
+    int                  fusionConfigVersion_;
     CameraConfig        fusionCamCfg_[2];
     LidarConfig         lidarCfg_;
     QMap<QString, QLineEdit*> fusionParamEdits_;
@@ -151,6 +160,15 @@ private:
     std::string web_fusion_stop_();
     std::string web_fusion_config_(const std::string& body);
     std::string web_fusion_intrinsics_(int camNum, const std::string& body);
+    std::string web_backtrack_query_(const std::string& body);
+    std::string get_backtrack_files_json_() const;
+
+    // ---- Backtrack helpers ----
+    QTableWidget*       backtrackTable_;
+    QLineEdit*          backtrackSecsEdit_;
+    QComboBox*          backtrackCamCombo_;
+    QString             backtrackDir_;
+    void build_backtrack_page_();
 
     // ---- Fusion helpers ----
     void load_lidar_config_();

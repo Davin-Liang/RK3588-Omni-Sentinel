@@ -130,6 +130,7 @@ bool WebServer::start()
     impl_->httpServer_.Get(R"(/api/v1/status/hw)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/videos)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/fusion/config)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/backtrack/files)", wrap_get);
 
     // MJPEG snapshots
     impl_->httpServer_.Get(R"(/api/v1/cam/0/snapshot.jpg)", [this](const httplib::Request&, httplib::Response& res) {
@@ -172,6 +173,7 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/fusion/config)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/0/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/1/intrinsics)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/backtrack/query)", wrap_post);
 
     // PUT
     auto wrap_put = [handle_api](const httplib::Request& req, httplib::Response& res) {

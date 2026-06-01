@@ -17,6 +17,11 @@
 #include <QScrollArea>
 #include <QDoubleValidator>
 #include <QIntValidator>
+#include <QComboBox>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QHeaderView>
+#include <QFrame>
 #include <QPainter>
 #include <QPushButton>
 #include <QStyledItemDelegate>
@@ -56,6 +61,36 @@ static void fusion_warning_callback_(const TrackedTarget& target, void* /*userDa
         "vel=(%.2f,%.2f) state=%s\n",
         target.id, target.classId, target.distanceMeters,
         target.posX, target.posY, target.velX, target.velY, stateStr);
+
+    Widget* w = Widget::instance();
+    if (w) {
+        uint64_t alertTsUs = target.lastUpdateNs / 1000;
+        QMetaObject::invokeMethod(w, [w, alertTsUs, targetId = static_cast<int>(target.id)]() {
+            w->on_fusion_alert_backtrack_(targetId, alertTsUs);
+        }, Qt::QueuedConnection);
+    }
+}
+
+void Widget::on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs)
+{
+    double backSecs = config_.value("Backtrack/maxBacktrackSeconds", 5.0).toDouble();
+
+    uint64_t startTs = alertTsUs - static_cast<uint64_t>(backSecs * 1000000.0);
+    fprintf(stderr,
+        "[SentinelQT] ========================================\n"
+        "[SentinelQT] alert backtrack triggered!\n"
+        "[SentinelQT]   target id    : %d\n"
+        "[SentinelQT]   alert ts     : %llu us\n"
+        "[SentinelQT]   back seconds : %.1f s\n"
+        "[SentinelQT]   time range   : [%llu, %llu] us\n"
+        "[SentinelQT]   cameras      : CAM0 + CAM1\n"
+        "[SentinelQT]   status       : disk manager not ready, skip disk query\n"
+        "[SentinelQT] ========================================\n",
+        targetId,
+        (unsigned long long)alertTsUs,
+        backSecs,
+        (unsigned long long)startTs,
+        (unsigned long long)alertTsUs);
 }
 
 // ---- Styles ----
@@ -216,6 +251,10 @@ Widget::Widget(QWidget *parent)
     connect(ui->btnBackToMain, &QPushButton::clicked, this, &Widget::on_btn_back_);
     connect(ui->btnRefreshVideos, &QPushButton::clicked, this, &Widget::on_btn_refresh_videos_);
     connect(ui->btnSystem, &QPushButton::clicked, this, &Widget::on_btn_system_);
+    connect(ui->btnBacktrack, &QPushButton::clicked, this, &Widget::on_btn_backtrack_page_);
+
+    // Build backtrack page
+    build_backtrack_page_();
 
     // Clock timer
     clockTimer_ = new QTimer(this);
@@ -405,6 +444,8 @@ void Widget::load_config_()
     }
 
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
+
+    backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
 }
 
 // ---- Camera init ----
@@ -423,6 +464,13 @@ bool Widget::init_camera_(int camNum)
     if (!streamer_->add_camera(camNum, visioner_)) {
         fprintf(stderr, "[SentinelQT] streamer add_camera cam%d 失败\n", camNum);
         return false;
+    }
+
+    if (config_.value("Backtrack/enabled", true).toBool()) {
+        int numSlots = config_.value("Backtrack/ringBufferSlots", 150).toInt();
+        if (!streamer_->init_record_buffer(camNum, numSlots, camWidth_[camNum], camHeight_[camNum])) {
+            fprintf(stderr, "[SentinelQT] init record buffer cam%d failed\n", camNum);
+        }
     }
 
     if (camNum == 0) {
@@ -848,6 +896,15 @@ void Widget::update_camera_button_states_(int camNum)
         btnRecord->setStyleSheet(RECORD_OFF_STYLE);
     }
 
+    QPushButton* btnPause = cam_btn(ui->btnPause0, ui->btnPause1, camNum);
+    if (cameraPaused_[camNum]) {
+        btnPause->setText("恢复");
+        btnPause->setStyleSheet(PAUSE_OFF_STYLE);
+    } else {
+        btnPause->setText("暂停");
+        btnPause->setStyleSheet(PAUSE_ON_STYLE);
+    }
+
     bool controlsEnabled = !cameraPaused_[camNum];
     btnStream->setEnabled(controlsEnabled);
     btnRecord->setEnabled(controlsEnabled);
@@ -1121,6 +1178,7 @@ void Widget::save_fusion_config_()
     config_.setValue("Fusion/Cam1Cx", fusionCamCfg_[1].cx);
     config_.setValue("Fusion/Cam1Cy", fusionCamCfg_[1].cy);
 
+    ++fusionConfigVersion_;
     config_.sync();
 }
 
@@ -1533,6 +1591,7 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/status/hw")     return get_hw_json_();
         if (path == "/api/v1/videos")        return get_videos_json_();
         if (path == "/api/v1/fusion/config") return get_fusion_config_json_();
+        if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
         return R"({"ok":false,"error":"unknown GET path"})";
     }
 
@@ -1563,6 +1622,7 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/fusion/config")        return web_fusion_config_(body);
         if (path == "/api/v1/fusion/camera/0/intrinsics") return web_fusion_intrinsics_(0, body);
         if (path == "/api/v1/fusion/camera/1/intrinsics") return web_fusion_intrinsics_(1, body);
+        if (path == "/api/v1/backtrack/query")  return web_backtrack_query_(body);
         return R"({"ok":false,"error":"unknown POST path"})";
     }
 
@@ -1958,6 +2018,17 @@ std::string Widget::get_status_json_() const
         j["trackingTargets"] = targets;
     }
 
+    nlohmann::json btr;
+    btr["seconds"] = backtrackSecsEdit_ ? backtrackSecsEdit_->text().toDouble() : 5.0;
+    btr["cam"]      = backtrackCamCombo_ ? backtrackCamCombo_->currentData().toInt() : -1;
+    j["backtrack"] = btr;
+
+    // Record resolution (system control → Web sync)
+    nlohmann::json sys;
+    sys["recordResolution"] = recordResolution_[0];
+    j["system"] = sys;
+    j["fusionConfigVersion"] = fusionConfigVersion_;
+
     j["ok"] = true;
     return j.dump();
 }
@@ -2112,12 +2183,243 @@ std::string Widget::get_fusion_config_json_() const
     return j.dump();
 }
 
+// ============================================================================
+// 数据回溯
+// ============================================================================
+
+// TODO: 硬盘数据管理类开发后启用
+// class RecordWriter : public QThread {
+//     Q_OBJECT
+// public:
+//     RecordWriter(int camNum, SentinelStreamer* streamer, QObject* parent = nullptr)
+//         : QThread(parent), camNum_(camNum), streamer_(streamer), running_(false) {}
+//     void stop() { running_ = false; wait(); }
+// protected:
+//     void run() override {
+//         running_ = true;
+//         while (running_) {
+//             uint8_t* data = nullptr; size_t size = 0; uint64_t ts = 0;
+//             if (streamer_->try_get_record_frame(camNum_, &data, &size, &ts)) {
+//                 // diskManager_->save_frame(camNum_, data, size, ts);
+//                 streamer_->release_record_frame(camNum_, data);
+//             } else {
+//                 usleep(5000);
+//             }
+//         }
+//     }
+// private:
+//     int camNum_;
+//     SentinelStreamer* streamer_;
+//     std::atomic<bool> running_;
+// };
+
+void Widget::build_backtrack_page_()
+{
+    QWidget* page = ui->pageBacktrack;
+    QVBoxLayout* rootLayout = new QVBoxLayout(page);
+    rootLayout->setContentsMargins(8, 8, 8, 4);
+    rootLayout->setSpacing(6);
+
+    // 标题栏
+    QFrame* titleBar = new QFrame(page);
+    titleBar->setFixedHeight(38);
+    titleBar->setStyleSheet("QFrame { background-color: #F4EAC5; border-radius: 10px; }");
+    QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(12, 0, 12, 0);
+    QLabel* titleLabel = new QLabel("数据回溯管理", titleBar);
+    titleLabel->setStyleSheet("font-size: 16px; font-weight: 700; color: #58a6ff;");
+    titleLayout->addWidget(titleLabel);
+    titleLayout->addStretch();
+    QPushButton* btnBack = new QPushButton("返回", titleBar);
+    btnBack->setFixedSize(80, 28);
+    btnBack->setStyleSheet("font-size: 12px; color: #2d3535; background-color: #F5F0D7; border: 1px solid #8b949e; border-radius: 8px;");
+    connect(btnBack, &QPushButton::clicked, this, &Widget::on_btn_back_from_backtrack_);
+    titleLayout->addWidget(btnBack);
+    rootLayout->addWidget(titleBar);
+
+    // 参数区
+    QFrame* paramFrame = new QFrame(page);
+    QHBoxLayout* paramLayout = new QHBoxLayout(paramFrame);
+    paramLayout->setContentsMargins(0, 0, 0, 0);
+    paramLayout->setSpacing(10);
+
+    QLabel* lblSecs = new QLabel("回溯秒数:", paramFrame);
+    lblSecs->setStyleSheet("font-size: 13px; color: #2d3535;");
+    paramLayout->addWidget(lblSecs);
+
+    backtrackSecsEdit_ = new QLineEdit(paramFrame);
+    backtrackSecsEdit_->setText("5.0");
+    backtrackSecsEdit_->setFixedWidth(70);
+    backtrackSecsEdit_->setValidator(new QDoubleValidator(0.1, 30.0, 1, backtrackSecsEdit_));
+    backtrackSecsEdit_->installEventFilter(this);
+    backtrackSecsEdit_->setStyleSheet("font-size: 13px; color: #2d3535; background: #F5F0D7; border: 1px solid #30363d; border-radius: 6px; padding: 2px 4px;");
+    paramLayout->addWidget(backtrackSecsEdit_);
+
+    QLabel* lblCam = new QLabel("摄像头:", paramFrame);
+    lblCam->setStyleSheet("font-size: 13px; color: #2d3535;");
+    paramLayout->addWidget(lblCam);
+
+    backtrackCamCombo_ = new QComboBox(paramFrame);
+    backtrackCamCombo_->addItem("全部", -1);
+    backtrackCamCombo_->addItem("CAM0", 0);
+    backtrackCamCombo_->addItem("CAM1", 1);
+    backtrackCamCombo_->setFixedWidth(80);
+    backtrackCamCombo_->setStyleSheet("QComboBox { font-size: 13px; color: #2d3535; background: #F5F0D7; border: 1px solid #30363d; border-radius: 6px; padding: 2px 4px; }");
+    paramLayout->addWidget(backtrackCamCombo_);
+
+    paramLayout->addStretch();
+
+    QPushButton* btnBacktrack = new QPushButton("手动回溯", paramFrame);
+    btnBacktrack->setFixedSize(80, 28);
+    btnBacktrack->setStyleSheet("font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #1f6feb; border: 1px solid #388bfd; border-radius: 8px;");
+    connect(btnBacktrack, &QPushButton::clicked, this, &Widget::on_btn_backtrack_);
+    paramLayout->addWidget(btnBacktrack);
+
+    QPushButton* btnRefresh = new QPushButton("刷新列表", paramFrame);
+    btnRefresh->setFixedSize(80, 28);
+    btnRefresh->setStyleSheet("font-size: 12px; color: #2d3535; background-color: #F5F0D7; border: 1px solid #8b949e; border-radius: 8px;");
+    connect(btnRefresh, &QPushButton::clicked, this, &Widget::on_btn_refresh_backtrack_);
+    paramLayout->addWidget(btnRefresh);
+
+    rootLayout->addWidget(paramFrame);
+
+    // 文件列表
+    backtrackTable_ = new QTableWidget(page);
+    backtrackTable_->setColumnCount(3);
+    backtrackTable_->setHorizontalHeaderLabels({"文件名", "大小", "类型"});
+    backtrackTable_->horizontalHeader()->setStretchLastSection(true);
+    backtrackTable_->verticalHeader()->setVisible(false);
+    backtrackTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    backtrackTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    backtrackTable_->setStyleSheet(
+        "QTableWidget { background-color: #F4EAC5; border: 1px solid #30363d; border-radius: 8px; }"
+        "QHeaderView::section { background-color: #F5F0D7; font-weight: 600; padding: 5px; border-bottom: 2px solid #30363d; }"
+        "QTableWidget::item { padding: 4px 6px; }");
+    rootLayout->addWidget(backtrackTable_, 1);
+
+    // 状态标签
+    QLabel* statusLabel = new QLabel("就绪", page);
+    statusLabel->setFixedHeight(20);
+    statusLabel->setAlignment(Qt::AlignCenter);
+    statusLabel->setStyleSheet("font-size: 12px; color: #4a5555;");
+    rootLayout->addWidget(statusLabel);
+}
+
+void Widget::on_btn_backtrack_page_()
+{
+    ui->stackedWidget->setCurrentIndex(3);
+    on_btn_refresh_backtrack_();
+}
+
+void Widget::on_btn_back_from_backtrack_()
+{
+    ui->stackedWidget->setCurrentIndex(0);
+}
+
+void Widget::on_btn_backtrack_()
+{
+    double backSecs = backtrackSecsEdit_->text().toDouble();
+    int cam = backtrackCamCombo_->currentData().toInt();
+
+    fprintf(stderr,
+        "[SentinelQT] manual backtrack: cam=%d seconds=%.1f\n"
+        "[SentinelQT]   status: disk manager not ready, skip disk query\n",
+        cam, backSecs);
+
+    on_btn_refresh_backtrack_();
+}
+
+void Widget::on_btn_refresh_backtrack_()
+{
+    backtrackTable_->setRowCount(0);
+    if (backtrackDir_.isEmpty()) return;
+
+    QDir dir(backtrackDir_);
+    if (!dir.exists()) {
+        fprintf(stderr, "[SentinelQT] backtrack dir not found: %s\n",
+                backtrackDir_.toUtf8().constData());
+        return;
+    }
+
+    QFileInfoList files = dir.entryInfoList(QDir::Files, QDir::Time);
+    for (const QFileInfo& fi : files) {
+        int row = backtrackTable_->rowCount();
+        backtrackTable_->insertRow(row);
+        backtrackTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
+        double sizeKB = fi.size() / 1024.0;
+        QString sizeStr = sizeKB >= 1024.0
+            ? QString("%1 MB").arg(sizeKB / 1024.0, 0, 'f', 1)
+            : QString("%1 KB").arg(sizeKB, 0, 'f', 1);
+        backtrackTable_->setItem(row, 1, new QTableWidgetItem(sizeStr));
+        backtrackTable_->setItem(row, 2, new QTableWidgetItem(fi.suffix().toLower()));
+    }
+}
+
+// ---- Web handlers ----
+
+std::string Widget::web_backtrack_query_(const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+        int cam = j.value("cam", -1);
+        double seconds = j.value("seconds", 5.0);
+
+        // 同步 Qt 界面控件
+        backtrackSecsEdit_->setText(QString::number(seconds, 'f', 1));
+        int comboIdx = backtrackCamCombo_->findData(cam);
+        if (comboIdx >= 0) backtrackCamCombo_->setCurrentIndex(comboIdx);
+
+        fprintf(stderr,
+            "[SentinelQT] web backtrack query: cam=%d seconds=%.1f\n"
+            "[SentinelQT]   status: disk manager not ready, skip disk query\n",
+            cam, seconds);
+
+        nlohmann::json resp;
+        resp["ok"] = true;
+        resp["message"] = "backtrack request received, see terminal log";
+        return resp.dump();
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
+}
+
+std::string Widget::get_backtrack_files_json_() const
+{
+    nlohmann::json files = nlohmann::json::array();
+    if (!backtrackDir_.isEmpty()) {
+        QDir dir(backtrackDir_);
+        QFileInfoList list = dir.entryInfoList(QDir::Files, QDir::Time);
+        for (const QFileInfo& fi : list) {
+            nlohmann::json v;
+            v["name"] = fi.fileName().toStdString();
+            v["size"] = fi.size();
+            v["type"] = fi.suffix().toStdString();
+            files.push_back(v);
+        }
+    }
+    nlohmann::json resp;
+    resp["files"] = files;
+    resp["ok"] = true;
+    return resp.dump();
+}
+
 bool Widget::eventFilter(QObject* obj, QEvent* event)
 {
     if (event->type() == QEvent::FocusIn) {
         QLineEdit* le = qobject_cast<QLineEdit*>(obj);
-        if (le && fusionParamEdits_.values().contains(le)) {
+        if (le && (fusionParamEdits_.values().contains(le) || le == backtrackSecsEdit_)) {
             virtualKeyboard_->show_for(le);
+        }
+    } else if (event->type() == QEvent::FocusOut) {
+        QLineEdit* le = qobject_cast<QLineEdit*>(obj);
+        if (le && (fusionParamEdits_.values().contains(le) || le == backtrackSecsEdit_)) {
+            // 延迟判断：如果焦点移到了键盘按钮上则不隐藏
+            QTimer::singleShot(50, this, [this]() {
+                QWidget* fw = QApplication::focusWidget();
+                if (!fw || !virtualKeyboard_->isAncestorOf(fw)) {
+                    virtualKeyboard_->hide_keyboard();
+                }
+            });
         }
     }
     return QWidget::eventFilter(obj, event);

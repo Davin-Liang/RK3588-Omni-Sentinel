@@ -199,3 +199,13 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 **原因**: MPP 硬件编码器依赖 `framerate` 参数进行码率控制。不设 `framerate` 时编码器码控异常，分配的码率远低于目标值，导致 P/B 帧质量急剧下降。
 
 **解决**: 恢复 `ctx->framerate = AVRational{15, 1}`（与相机实际帧率匹配），framerate 仅用于码率控制，PTS 由我们独立覆盖，互不干扰。
+
+---
+
+## 19. RecordBufferPool 消费归还后再写入 count_ 不递增
+
+**现象**: `try_get_record_frame` 消费帧并 `release_record_frame` 归还后，`write_frame` 覆写该槽位时 count_ 不递增，导致 `frame_count()` 始终小于实际可消费帧数。
+
+**原因**: `try_get_record_frame` 消费帧时只设置 `checkedOut=true` 和 `count_--`，没有将 `written` 重置为 `false`。`write_frame` 覆写时检查 `!slots_[idx].written` 为 false（因首次写入时已置 true），跳过 count_ 递增。
+
+**解决**: 在 `try_get_record_frame` 中消费帧时增加 `slots_[idx].written = false`，使后续 write_frame 覆写该槽位时能正确递增 count_。

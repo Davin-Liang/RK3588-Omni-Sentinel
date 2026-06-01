@@ -72,8 +72,8 @@ sentinel-lslidarer (激光雷达驱动，完全独立)
 
 sentinel-streamer (推流与录像组件)
   ├── sentinel-visioner (依赖头文件 + 运行时调用 wait/get/release 接口)
-  ├── dma-buffer-pool (720p 中间缩放缓冲池)
-  ├── 3rdparty/librga (1080p→720p NV12 硬件缩放)
+  ├── dma-buffer-pool (720p 中间缩放缓冲池 + RecordBufferPool 录像帧环形缓冲)
+  ├── 3rdparty/librga (1080p→720p NV12 硬件缩放 + rga_nv12_copy DMA 零拷贝)
   └── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
 
 SentinelQT (QT5 嵌入式触控界面)
@@ -90,10 +90,11 @@ SentinelQT (QT5 嵌入式触控界面)
 
 嵌入式 HTTP/WebSocket 服务器，在 SentinelQT 进程中运行，提供 REST API 远程操控板端设备，配套单文件 SPA 前端完全复刻 QT 界面风格。
 
-- **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 25+ REST 路由和 WebSocket 端点
+- **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 27+ REST 路由（含回溯）和 WebSocket 端点
 - **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
 - **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
 - **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局，CSS 完全复刻 QT 配色方案。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 MJPEG 轮询（150ms）显示，录像文件支持在线播放（流式输出 + Range seek）
+- **数据回溯面板**: 右下角系统控制+回溯并排双卡片，含秒数输入/相机选择/文件列表，通过 REST API 与 Qt 双向 dirty flag 同步
 - **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
 - **暂停保护**: 暂停时自动停止推流/录像/预览；推流/录像启动时若相机已暂停则自动恢复，避免死锁
 - **配置**: `config.ini` 中 `[WebServer]` 节（`port=8080`, `enabled=true`）
@@ -164,6 +165,9 @@ SentinelQT (QT5 嵌入式触控界面)
 - **线程安全**: 每路摄像头独立推流线程，编码器和输出上下文严格在 `workerThread.join()` 后销毁，杜绝 use-after-free
 - **状态回调**: `StreamerCallback` 函数指针，通知上层启停/错误事件
 - **反复启停**: 编码器每轮销毁重建，无 DTS 残留
+- **RecordBufferPool 环形缓冲**: 基于 DmaBufferPool + RGA DMA 拷贝的 NV12 帧环形缓冲区，在编码前暂存历史帧供数据回溯。每路独立，槽位数可配
+- **rga_nv12_copy**: RGA IM2D `imcopy` 硬件 DMA 零拷贝，避免 CPU memcpy 开销
+- **回溯公共 API**: `init_record_buffer(camNum, slotCount, width, height)` 初始化缓冲池，`try_get_record_frame(camNum, &data, &size, &ts)` 非阻塞 FIFO 消费帧，`release_record_frame(camNum, data)` 归还缓冲
 
 唯一公共头文件: `include/sentinel_streamer.h`，API 类: `SentinelStreamer`
 
@@ -189,7 +193,7 @@ SentinelQT (QT5 嵌入式触控界面)
 
 RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner 和 SentinelStreamer 的上层集成者。
 
-- **技术栈**: Qt5 Widgets，QStackedWidget 三页布局（主控页 / 视频管理页 / 融合管理页），全屏无边框
+- **技术栈**: Qt5 Widgets，QStackedWidget 四页布局（主控页 / 视频管理页 / 融合管理页 / 数据回溯页），全屏无边框
 - **共享标题栏**: `titleBar`（温度/CPU/RGA/NPU + 标题 + 时钟）位于根布局 QStackedWidget 上方，三页共享。hwLabel 和 clockLabel 均为 280px 确保标题居中
 - **双路预览**: 左右并排 `previewLabel0` / `previewLabel1`，两个独立 PreviewWorker 各自运行在独立 QThread，通过 lambda 捕获 camNum 将 `frameReady` 信号路由到对应 label。每路预览可独立开启/关闭
 - **双路控制**: 每路相机独立 4 按钮（预览切换、推流、录像、暂停），全局系统按钮一键启停两路
@@ -200,19 +204,23 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **融合目标跟踪**: 第三页独立子页面，集成 SentinelLslidarer + LidarCameraFusion：
   - **俯视图**: `TopDownView` 自定义 QWidget，paintEvent 绘制距离网格、目标（按 TrackState 着色）、速度箭头、告警脉冲圈、中文图例
   - **参数面板**: 9 个跟踪器参数 + 每路相机 4 个内参，QLineEdit + QDoubleValidator/QIntValidator，每个参数带 `?` 帮助按钮（点击在对应 section 下方显示说明，4 秒自动隐藏）
-  - **虚拟键盘**: `VirtualKeyboard` 4×4 数字键盘，默认隐藏，eventFilter 检测 FocusIn 自动弹出
+  - **虚拟键盘**: `VirtualKeyboard` 4×4 数字键盘，默认隐藏，eventFilter 检测 FocusIn 自动弹出 / FocusOut 自动隐藏。`keyboardContainer` 位于根布局（QStackedWidget 同级），实现跨页面（融合页 + 回溯页）键盘共享
   - **融合启停**: `on_btn_fusion_toggle_()` 控制完整生命周期（lidar start → fusion start → FusionWorker 轮询），失败自动回滚
   - **参数热更新**: `editingFinished` 触发 `configure_tracker()` + `update_camera_intrinsics()` 实时推送，无需重启融合
   - **告警输出**: 三层输出 — 俯视图红色脉冲圈 + 状态栏告警计数 + 终端 stderr `[FusionWarning]` 日志
   - **假检测模式**: 使用 `generate_fake_detections_()` 虚构检测框，待 NPU 推理就绪后替换
+  - **数据回溯**: 第四页独立子页面，通过 RecordBufferPool 实现历史帧查询：
+    - **手动回溯**: 秒数输入框 + 相机选择器 + 回溯按钮，`on_btn_backtrack_()` 触发。当前为终端打印占位（待硬盘数据管理类就绪后从磁盘检索）
+    - **自动告警回溯**: 融合告警回调触发 `on_fusion_alert_backtrack_()`，根据告警时间戳和配置的回溯秒数终端打印回溯范围。双路相机同时回溯
+    - **双向 Web↔Qt 同步**: dirty flag 机制 — 回溯参数/l融合参数/录分辨率通过 status JSON 推送同步，用户正在修改时暂停覆盖
 - **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）及日期时间。紧凑格式（无 `%` 符号）
 - **系统暂停**: `camera_pause(camNum, paused)` 暂停 RGA 处理，硬件流保持，避免 STREAMOFF 重建管线
 - **线程模型**: 两个 PreviewWorker + 一个 FusionWorker 各自独立 QThread + std::atomic<bool>；LidarCameraFusion 内部 std::thread；主线程处理 UI 和定时器。FusionWorker 100ms 轮询 + 目标变化去重。析构逆序释放（FusionWorker → fusion → lidar → preview → visioner/streamer）
 - **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
 - **Web 远程控制**: 嵌入 WebServer（cpp-httplib），提供 REST API + WebSocket 实时推送。浏览器打开 `http://<IP>:8080` 即可远程操控。预览帧缓存供 MJPEG 端点读取，推流视频通过 snapshot.jpg 轮询显示
-- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]` 六节，USB 分辨率上限 720p 钳位
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]` 七节，USB 分辨率上限 720p 钳位
 
-关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置）、`build.sh`（构建脚本）
+关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置，`[Backtrack]` 节）、`build.sh`（构建脚本）
 
 ## 关键约定
 

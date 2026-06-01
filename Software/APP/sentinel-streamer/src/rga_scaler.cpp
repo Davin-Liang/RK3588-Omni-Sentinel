@@ -63,3 +63,43 @@ bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd)
 
     return true;
 }
+
+bool rga_nv12_copy(int srcFd, int srcWidth, int srcHeight, int dstFd)
+{
+    if (srcFd <= 0 || dstFd <= 0) {
+        fprintf(stderr, "[RgaScaler] rga_nv12_copy: invalid dmaFd\n");
+        return false;
+    }
+
+    int fmt = RK_FORMAT_YCrCb_420_SP;
+
+    im_handle_param_t srcParam = {srcWidth, srcHeight, fmt};
+    rga_buffer_handle_t srcHandle = importbuffer_fd(srcFd, &srcParam);
+    if (srcHandle <= 0) {
+        fprintf(stderr, "[RgaScaler] rga_nv12_copy: import src fd=%d failed\n", srcFd);
+        return false;
+    }
+
+    im_handle_param_t dstParam = {srcWidth, srcHeight, fmt};
+    rga_buffer_handle_t dstHandle = importbuffer_fd(dstFd, &dstParam);
+    if (dstHandle <= 0) {
+        fprintf(stderr, "[RgaScaler] rga_nv12_copy: import dst fd=%d failed\n", dstFd);
+        releasebuffer_handle(srcHandle);
+        return false;
+    }
+
+    rga_buffer_t srcBuf = wrapbuffer_handle(srcHandle, srcWidth, srcHeight, fmt, srcWidth, srcHeight);
+    rga_buffer_t dstBuf = wrapbuffer_handle(dstHandle, srcWidth, srcHeight, fmt, srcWidth, srcHeight);
+
+    IM_STATUS ret = imcopy(srcBuf, dstBuf);
+
+    releasebuffer_handle(srcHandle);
+    releasebuffer_handle(dstHandle);
+
+    if (ret != IM_STATUS_SUCCESS) {
+        fprintf(stderr, "[RgaScaler] rga_nv12_copy: imcopy failed ret=%d\n", (int)ret);
+        return false;
+    }
+
+    return true;
+}

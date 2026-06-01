@@ -2,6 +2,7 @@
 #define SENTINEL_STREAMER_H
 
 #include <cstdint>
+#include <cstddef>
 
 // 前置声明，避免循环依赖
 struct DmaBuffer_t;
@@ -174,6 +175,17 @@ public:
      * 传 nullptr 取消回调。
      */
     void set_callback(StreamerCallback cb);
+
+    // ================================================================
+    // 录像帧缓冲（供磁盘写入线程消费）
+    // ================================================================
+
+    bool init_record_buffer(int camNum, int slotCount, int width, int height);
+
+    bool try_get_record_frame(int camNum, uint8_t** outData, size_t* outSize,
+                              uint64_t* outTimestampUs);
+
+    void release_record_frame(int camNum, uint8_t* data);
 
 private:
     StreamerContext* contexts_[2];  ///< 最多支持 2 路摄像头，不透明实现

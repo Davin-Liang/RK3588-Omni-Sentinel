@@ -5,6 +5,7 @@
 #include "sentinel_streamer.h"
 #include "sentinel-visioner.h"
 #include "dma-buffer-pool.h"
+#include "record_buffer_pool.h"
 #include "mpp_encoder.h"
 
 #include <cstdio>
@@ -66,6 +67,9 @@ struct StreamerContext {
     // MP4 输出
     AVFormatContext* mp4Ctx;
 
+    // 录像帧环形缓冲池
+    RecordBufferPool* recordPool;
+
     StreamerContext()
         : camNum(-1)
         , visioner(nullptr)
@@ -80,6 +84,7 @@ struct StreamerContext {
         , recordEncCtx(nullptr)
         , ffmpegPipe(nullptr)
         , mp4Ctx(nullptr)
+        , recordPool(nullptr)
     {
         streamUrl[0] = '\0';
     }
@@ -103,6 +108,12 @@ static void stream_thread_func_(StreamerContext* ctx)
         // 步骤 1: 获取原始 1080p NV12 帧
         DmaBuffer_t* origBuf = ctx->visioner->wait_get_orig_copy_buffer(ctx->camNum);
         if (!origBuf) continue;
+
+        // 步骤 1.5: 写入录像帧环形缓冲池（RGA DMA 硬件拷贝，供磁盘写入线程消费）
+        if (ctx->recordPool) {
+            ctx->recordPool->write_frame(
+                origBuf->dmaFd, origBuf->width, origBuf->height, origBuf->timestampUs);
+        }
 
         uint64_t tsUs = origBuf->timestampUs;
 
@@ -280,6 +291,16 @@ bool SentinelStreamer::add_camera(int camNum, SentinelVisioner* visioner, int po
         return false;
     }
 
+    // 创建录像帧环形缓冲池（不立即分配 DMA，等 Widget 调 init_record_buffer）
+    ctx->recordPool = new (std::nothrow) RecordBufferPool();
+    if (!ctx->recordPool) {
+        fprintf(stderr, "[SentinelStreamer] alloc RecordBufferPool failed\n");
+        ctx->scale720pPool->destroy_pool();
+        delete ctx->scale720pPool;
+        delete ctx;
+        return false;
+    }
+
     // 编码器惰性创建：start_stream / start_record 时才各自初始化
     contexts_[camNum] = ctx;
     fprintf(stderr, "[SentinelStreamer] cam=%d added\n", camNum);
@@ -304,6 +325,12 @@ bool SentinelStreamer::remove_camera(int camNum)
         ctx->scale720pPool->destroy_pool();
         delete ctx->scale720pPool;
         ctx->scale720pPool = nullptr;
+    }
+
+    if (ctx->recordPool) {
+        ctx->recordPool->destroy_pool();
+        delete ctx->recordPool;
+        ctx->recordPool = nullptr;
     }
 
     delete ctx;
@@ -557,4 +584,36 @@ bool SentinelStreamer::is_recording(int camNum) const
 void SentinelStreamer::set_callback(StreamerCallback cb)
 {
     g_callback_ = cb;
+}
+
+// ---------------------------------------------------------------------------
+// 录像帧缓冲
+// ---------------------------------------------------------------------------
+
+bool SentinelStreamer::init_record_buffer(int camNum, int slotCount,
+                                           int width, int height)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) return false;
+    StreamerContext* ctx = contexts_[camNum];
+    if (!ctx->recordPool) return false;
+    return ctx->recordPool->alloc_pool(slotCount, width, height);
+}
+
+bool SentinelStreamer::try_get_record_frame(int camNum, uint8_t** outData,
+                                             size_t* outSize,
+                                             uint64_t* outTimestampUs)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) return false;
+    StreamerContext* ctx = contexts_[camNum];
+    if (!ctx->recordPool) return false;
+    return ctx->recordPool->try_get_record_frame(outData, outSize, outTimestampUs);
+}
+
+void SentinelStreamer::release_record_frame(int camNum, uint8_t* data)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) return;
+    StreamerContext* ctx = contexts_[camNum];
+    if (ctx->recordPool) {
+        ctx->recordPool->release_record_frame(data);
+    }
 }

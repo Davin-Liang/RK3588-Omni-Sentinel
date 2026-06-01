@@ -96,7 +96,8 @@ body{
 #bottomRow{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);margin-bottom:var(--gap)}
 #bottomLeft{display:flex;flex-direction:column}
 #bottomRight{display:flex;flex-direction:column;gap:var(--gap)}
-#bottomRight>*{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#sysBacktrackRow{flex:0 0 auto;display:flex;gap:var(--gap)}
+#bottomRight>.video-card{flex:1}
 .sys-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:10px}
 .sys-title{font-size:15px;font-weight:600}
 .sys-row{display:flex;align-items:center;gap:8px}
@@ -211,17 +212,45 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       </div>
     </div>
   </div>
-  <!-- Right: System (top) + Videos (bottom) -->
+  <!-- Right: System+Backtrack (top) + Videos (bottom) -->
   <div id="bottomRight">
-    <div class="sys-card">
-      <div class="sys-title">系统控制</div>
-      <div class="sys-row">
-        <span class="sys-label">相机1 录像分辨率</span>
-        <select id="resSelect" onchange="changeRes()"><option value="1080">1080p</option><option value="720">720p</option></select>
+    <div id="sysBacktrackRow">
+      <div class="sys-card" style="flex:1">
+        <div class="sys-title">系统控制</div>
+        <div class="sys-row">
+          <span class="sys-label">相机1 录像分辨率</span>
+          <select id="resSelect" onchange="changeRes()"><option value="1080">1080p</option><option value="720">720p</option></select>
+        </div>
+        <div class="sys-row">
+          <button class="btn btn-red" id="btnSystem" style="flex:1">关闭系统</button>
+          <button class="btn btn-blue" id="btnReboot" style="flex:1;font-size:12px;padding:7px">重启应用</button>
+        </div>
       </div>
-      <div class="sys-row">
-        <button class="btn btn-red" id="btnSystem" style="flex:1">关闭系统</button>
-        <button class="btn btn-blue" id="btnReboot" style="flex:1;font-size:12px;padding:7px">重启应用</button>
+      <div class="sys-card" id="backtrackCard" style="flex:1;overflow:hidden">
+        <div class="sys-title">数据回溯</div>
+        <div class="sys-row">
+          <span class="sys-label">回溯秒数</span>
+          <input type="number" id="backtrackSecs" value="5.0" step="0.5" min="0.1" max="30"
+                 style="width:60px;font-size:12px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px">
+        </div>
+        <div class="sys-row">
+          <span class="sys-label">摄像头</span>
+          <select id="backtrackCam" style="font-size:12px">
+            <option value="-1">全部</option>
+            <option value="0">CAM0</option>
+            <option value="1">CAM1</option>
+          </select>
+        </div>
+        <div class="sys-row">
+          <button class="btn btn-accent" id="btnBacktrack" style="flex:1;font-size:12px;padding:5px">回溯</button>
+          <button class="btn btn-cream" id="btnRefrBacktrack" style="flex:1;font-size:11px;padding:5px">刷新</button>
+        </div>
+        <div style="flex:1;overflow-y:auto;min-height:0;margin-top:4px">
+          <table class="video-table">
+            <thead><tr><th>文件名</th><th>大小</th><th>类型</th></tr></thead>
+            <tbody id="backtrackBody"><tr><td colspan="3" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
     <div class="video-card">
@@ -248,7 +277,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 <script>
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
-let ws,wsTimer,fusionEnabled=!1;
+let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
 let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,fps:0,width:1280,height:720,recordResolution:720,recordingElapsedSec:0}};
 let trackingTargets=[],mjpegTimer=[null,null],mjpegImg=[null,null];
 
@@ -306,6 +335,21 @@ function updateUI(data){
   // Fusion
   if(data.fusionEnabled!==undefined){fusionEnabled=data.fusionEnabled;const bf=document.getElementById('btnFusionToggle');bf.textContent=fusionEnabled?'停止融合':'启用融合';bf.className='btn '+(fusionEnabled?'btn-on':'btn-off');bf.style.fontSize='12px';bf.style.padding='5px 14px';document.getElementById('fusionHdrStatus').textContent=fusionEnabled?'运行中':'关闭'}
   if(data.trackingTargets){trackingTargets=data.trackingTargets;updateFusionStatus();drawRadar()}
+
+  // Backtrack state (Qt → Web sync, only when web user hasn't touched inputs)
+  if(data.backtrack && !btrDirty){
+    document.getElementById('backtrackSecs').value = data.backtrack.seconds || 5.0;
+    document.getElementById('backtrackCam').value = (data.backtrack.cam !== undefined) ? data.backtrack.cam : -1;
+  }
+  // System control (Qt → Web sync)
+  if(data.system && !sysDirty){
+    document.getElementById('resSelect').value = data.system.recordResolution || 1080;
+  }
+  // Fusion config (Qt → Web sync, reload when version changes)
+  if(data.fusionConfigVersion !== undefined && data.fusionConfigVersion > fusionCfgVer && !fusionCfgDirty){
+    fusionCfgVer = data.fusionConfigVersion;
+    loadFusionConfig();
+  }
 }
 function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus();drawRadar()}}
 function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''}
@@ -362,8 +406,10 @@ async function loadFusionConfig(){
   for(let i=0;i<2;i++){const cd=d['cam'+i];if(!cd)continue;['fx','fy','cx','cy'].forEach(f=>{const el=document.getElementById('fp_cam'+i+'_'+f);if(el&&cd[f]!==undefined)el.value=Number(cd[f]).toFixed(1)})}
 }
 async function saveFusionConfig(){
+  fusionCfgDirty=true;
   const cfg={};['clusterEpsMeters','alpha','beta','maxAssociationDistMeters','minHitsToConfirm','maxCoastingFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters'].forEach(k=>{const el=document.getElementById('fp_'+k);if(el)cfg[k]=parseFloat(el.value)||0});await api('POST','/fusion/config',cfg);
-  for(let i=0;i<2;i++){const intr={};['fx','fy','cx','cy'].forEach(f=>{const el=document.getElementById('fp_cam'+i+'_'+f);if(el)intr[f]=parseFloat(el.value)||0});await api('POST','/fusion/camera/'+i+'/intrinsics',intr)};toast('参数已保存')
+  for(let i=0;i<2;i++){const intr={};['fx','fy','cx','cy'].forEach(f=>{const el=document.getElementById('fp_cam'+i+'_'+f);if(el)intr[f]=parseFloat(el.value)||0});await api('POST','/fusion/camera/'+i+'/intrinsics',intr)};toast('参数已保存');
+  fusionCfgDirty=false;
 }
 
 // ===== Videos =====
@@ -372,14 +418,42 @@ function playVideo(path){const overlay=document.getElementById('playerOverlay'),
 function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.pause();video.src='';overlay.classList.remove('show')}
 async function delVideo(p){if(confirm('确认删除?')){await api('DELETE','/videos',{path:decodeURIComponent(p)});loadVideos()}}
 
+// ===== Backtrack =====
+document.getElementById('btnBacktrack').onclick = async function() {
+    const secs = parseFloat(document.getElementById('backtrackSecs').value) || 5.0;
+    const cam = parseInt(document.getElementById('backtrackCam').value);
+    const r = await api('POST', '/backtrack/query', {cam: cam, seconds: secs});
+    if (r.ok) { toast('回溯请求已提交，详见终端日志'); btrDirty = false; }
+    else { toast(r.error || '回溯失败'); }
+    loadBacktrackFiles();
+};
+document.getElementById('btnRefrBacktrack').onclick = function() { loadBacktrackFiles(); };
+document.getElementById('backtrackSecs').oninput = function() { btrDirty = true; };
+document.getElementById('backtrackCam').onchange = function() { btrDirty = true; };
+async function loadBacktrackFiles() {
+    const d = await api('GET', '/backtrack/files');
+    const tb = document.getElementById('backtrackBody');
+    tb.innerHTML = '';
+    if (!d || !d.files || d.files.length === 0) {
+        tb.innerHTML = '<tr><td colspan="3" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr>';
+        return;
+    }
+    d.files.forEach(v => {
+        const tr = document.createElement('tr');
+        const sizeKB = v.size ? (v.size / 1024).toFixed(1) + ' KB' : '--';
+        tr.innerHTML = '<td>' + v.name + '</td><td>' + sizeKB + '</td><td>' + (v.type || '--') + '</td>';
+        tb.appendChild(tr);
+    });
+}
+
 // ===== Misc =====
-function changeRes(){api('PUT','/cam/0/record-resolution',{resolution:document.getElementById('resSelect').value+'p'})}
+function changeRes(){sysDirty=true;api('PUT','/cam/0/record-resolution',{resolution:document.getElementById('resSelect').value+'p'}).then(()=>{sysDirty=false})}
 function updateClock(){const n=new Date();document.getElementById('clock').textContent=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0')+' '+String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0')+':'+String(n.getSeconds()).padStart(2,'0')}
 
 // ===== Init =====
 connectWS();updateClock();setInterval(updateClock,1000);buildFusionParams();
 window.addEventListener('resize',()=>{initCanvas();drawRadar()});
-setTimeout(()=>{initCanvas();loadVideos();loadFusionConfig()},1000);
+setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig()},1000);
 document.getElementById('fusionCanvasWrap').addEventListener('click',()=>{loadFusionConfig()});
 </script>
 </body>
