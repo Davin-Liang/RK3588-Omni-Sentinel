@@ -203,3 +203,23 @@
 **原因**: `update_camera_button_states_()` 仅更新推流/录像按钮的状态和样式，未处理暂停按钮。Web 的 REST handler `web_pause_`/`web_resume_` 调用此函数后暂停按钮文本和样式不变。
 
 **解决**: 在 `update_camera_button_states_()` 中增加暂停按钮状态更新：根据 `cameraPaused_[camNum]` 设置按钮文本为"暂停"或"恢复"及对应样式。
+
+---
+
+## 21. MediaMTX HLS m3u8 文件 401 Unauthorized
+
+**现象**: 板端 `wget http://127.0.0.1:8888/live/cam0/stream.m3u8` 返回 401，但内置播放器页面可访问。网页端无法播放 HLS 流。
+
+**原因**: MediaMTX `authInternalUsers` 配置中 `any` 用户的 `read`/`playback` action 的 `path` 被误设为字面字符串 `all`，空 path 才表示任意路径。`all` 被当作路径名匹配，导致 m3u8 文件路径认证失败。
+
+**解决**: 将 `path: all` 改为 `path:`（空值表示任意路径）。同时最终方案放弃 HLS，改用 MediaMTX WebRTC iframe 嵌入（端口 8889），零认证问题、零 CDN 依赖、延迟 <1s。
+
+---
+
+## 22. ffmpeg HLS 输出方案退化
+
+**现象**: 修改 `ffmpeg_stream_open` 同时输出 RTSP + HLS，增加代码复杂度，且与已有 MediaMTX 功能重叠。
+
+**原因**: 未意识到项目已部署 MediaMTX（COTS 流媒体服务器，自带 RTSP/HLS/WebRTC 多协议输出）。另起 ffmpeg HLS 输出属于重复造轮子。
+
+**解决**: 回退 ffmpeg_stream_open 修改，保持单一 RTSP 推送职责。Web 前端改用 iframe 嵌入 MediaMTX 内置 WebRTC 播放器（`http://<ip>:8889/live/cam{i}/`），删除 hls.js CDN 依赖和 HLS 代理代码。

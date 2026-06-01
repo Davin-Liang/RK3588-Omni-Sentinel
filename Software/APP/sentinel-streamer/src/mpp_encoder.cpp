@@ -93,7 +93,7 @@ FILE* ffmpeg_stream_open(const char* url)
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
              "ffmpeg -loglevel error -f h264 -i pipe:0 "
-             "-c copy -f rtsp %s",
+             "-c copy -rtsp_transport tcp -f rtsp %s",
              url);
 
     FILE* pipe = popen(cmd, "w");

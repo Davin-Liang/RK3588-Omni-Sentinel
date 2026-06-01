@@ -2261,8 +2261,8 @@ void Widget::build_backtrack_page_()
 
     backtrackCamCombo_ = new QComboBox(paramFrame);
     backtrackCamCombo_->addItem("全部", -1);
-    backtrackCamCombo_->addItem("CAM0", 0);
-    backtrackCamCombo_->addItem("CAM1", 1);
+    backtrackCamCombo_->addItem("相机1", 0);
+    backtrackCamCombo_->addItem("相机2", 1);
     backtrackCamCombo_->setFixedWidth(80);
     backtrackCamCombo_->setStyleSheet("QComboBox { font-size: 13px; color: #2d3535; background: #F5F0D7; border: 1px solid #30363d; border-radius: 6px; padding: 2px 4px; }");
     paramLayout->addWidget(backtrackCamCombo_);

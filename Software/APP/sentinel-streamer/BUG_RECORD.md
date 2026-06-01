@@ -209,3 +209,13 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 **原因**: `try_get_record_frame` 消费帧时只设置 `checkedOut=true` 和 `count_--`，没有将 `written` 重置为 `false`。`write_frame` 覆写时检查 `!slots_[idx].written` 为 false（因首次写入时已置 true），跳过 count_ 递增。
 
 **解决**: 在 `try_get_record_frame` 中消费帧时增加 `slots_[idx].written = false`，使后续 write_frame 覆写该槽位时能正确递增 count_。
+
+---
+
+## 20. ffmpeg RTSP 推流 RTP 包过大导致丢包
+
+**现象**: MediaMTX 日志 `RTP packets are too big (1460 > 1440)`, `106 RTP packets lost`, `90 processing errors, last was: invalid FU-A packet (non-starting)`。WebRTC/HLS 画面异常。
+
+**原因**: ffmpeg 推流默认使用 UDP，RTP 包超过 MTU 限制且分片异常。
+
+**解决**: ffmpeg 推流命令增加 `-rtsp_transport tcp`，使用 TCP 传输避免 RTP 包大小限制和丢包问题。
