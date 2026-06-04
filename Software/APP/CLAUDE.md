@@ -398,11 +398,11 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 
 ## 飞书文档
 
-项目核心技术手册：https://my.feishu.cn/docx/WDmEd9HnKo8eg1xAlN9cwez6nUb
+项目核心技术手册：https://my.feishu.cn/docx/BcgLdpq2bo4qz9xxGCNc2M2Ynog
 
 ### 文档结构
 
-5 个 H1 章节（按组件），每章 9 个 H2 小节：
+6 个 H1 章节（按组件），每章 9 个 H2 小节：
 
 | 节号 | 节名 | 内容 |
 |------|------|------|
