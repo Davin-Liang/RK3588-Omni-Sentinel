@@ -101,6 +101,14 @@ private:
 | `is_recording(camNum)` | 查询录像状态 |
 | `set_stream_osd_mode(camNum, mode)` | OSD 模式（`WITH_OSD` 预留） |
 
+### 录像帧缓冲（数据回溯）
+
+| 方法 | 说明 |
+|------|------|
+| `init_record_buffer(camNum, slots, w, h)` | 初始化环形缓冲池（默认 150 槽 ≈ 5s @30fps），RGA DMA 硬件拷贝暂存 NV12 帧 |
+| `try_get_record_frame(camNum, &data, &size, &ts)` | 非阻塞 FIFO 消费一帧原始 NV12 数据 + 时间戳 |
+| `release_record_frame(camNum, data)` | 归还帧引用（必须调用，否则槽位泄漏） |
+
 ---
 
 ## Demo

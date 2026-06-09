@@ -55,6 +55,7 @@ SentinelVisioner::capture_thread_
 | `src/mpp_encoder.h` | MPP 编码器 + ffmpeg 管道内部头文件 |
 | `src/mpp_encoder.cpp` | MPP 编码器封装、ffmpeg 子进程管理、MP4 复用器 |
 | `src/rga_scaler.cpp` | RGA 硬件 1080p→720p NV12 缩放 |
+| `src/record_buffer_pool.h` / `.cpp` | 录像帧环形缓冲池，基于 DmaBufferPool + RGA DMA 拷贝 |
 | `src/demo_stream.cpp` | 基础推流+录像 Demo |
 | `src/demo_cycle.cpp` | 反复启停循环压测 Demo |
 
@@ -83,6 +84,7 @@ struct StreamerContext {
     FILE* ffmpegPipe;                    // ffmpeg 子进程管道写端
     char  streamUrl[256];               // RTSP URL（用于断线重连）
     AVFormatContext* mp4Ctx;             // MP4 输出上下文
+    RecordBufferPool* recordPool;        // 录像帧环形缓冲（供数据回溯）
 };
 ```
 
@@ -131,6 +133,37 @@ using StreamerCallback = void (*)(int camNum, StreamerEvent event, const char* d
 ```
 
 回调在 SentinelStreamer 内部线程调用。启停时通知，ffmpeg 重连成功/失败也通知。
+
+---
+
+### 4.4 RecordBufferPool — 录像帧环形缓冲
+
+在编码前暂存 NV12 原始帧的环形缓冲区，供数据回溯查询历史帧。
+
+```
+推流线程每收到一帧
+  └─ write_frame(srcFd, w, h, tsUs)
+       ├─ 取空闲槽位（无空闲则丢弃最老帧）
+       ├─ RGA imcopy 硬件 DMA 拷贝 (srcFd → 槽位 buffer)
+       └─ count_++
+
+外部消费（磁盘写入 / 回溯查询）
+  ├─ try_get_record_frame(&data, &size, &ts)  ← 非阻塞 FIFO
+  │   └─ slots_[readIdx_].written = false   ← 允许覆写
+  └─ release_record_frame(data)              ← O(1) 查找归还
+```
+
+| 成员 | 说明 |
+|------|------|
+| `DmaBufferPool pool_` | 底层 DMA 内存池，槽位数为 `slotCount` |
+| `Slot* slots_` | 固定数组，每槽记录 `buffer` + `timestampUs` + `written` + `checkedOut` |
+| `writeIdx_ / readIdx_` | 环形写入/读取指针 |
+| `addrToIdx_` | `unordered_map`，`release_record_frame` 时通过 data 指针 O(1) 反向查找槽位索引 |
+
+关键设计点：
+- 写入失败时自动丢弃最老帧（`writeIdx_` 回退），保证缓冲池始终存最新数据
+- `release_record_frame` 必须调用，否则槽位永久标记为 `checkedOut`，最终所有槽位不可用
+- 入队前通过 RGA `imcopy` 硬件 DMA 拷贝帧数据，避免 CPU memcpy 与 DMA-BUF 生命周期冲突
 
 ---
 
