@@ -476,15 +476,20 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                                                               nv12Stride, targetPreviewBuf);
                     }
 
-                    if (npuOk && previewOk) {
-                        NpuPreview task = {targetNpuBuf, targetPreviewBuf};
-                        ctx->previewTaskQueue.push(task);
+                    if (npuOk) {
+                        ctx->npuTaskQueue.push(targetNpuBuf);
                     } else {
-                        // 处理失败，归还内存
-                        std::cerr << "[RGA Error] 转换失败，立即归还避免内存泄漏." << std::endl;
+                        std::cerr << "[RGA Error] NPU 转换失败，归还内存." << std::endl;
                         ctx->npuRgbPool->release_buffer(targetNpuBuf);
-                        if (targetPreviewBuf != nullptr)
+                    }
+
+                    if (targetPreviewBuf != nullptr) {
+                        if (previewOk) {
+                            ctx->previewTaskQueue.push(targetPreviewBuf);
+                        } else {
+                            std::cerr << "[RGA Error] 预览转换失败，归还内存." << std::endl;
                             ctx->previewPool->release_buffer(targetPreviewBuf);
+                        }
                     }
 
                     auto end_time = std::chrono::high_resolution_clock::now();
@@ -595,36 +600,55 @@ void SentinelVisioner::release_camera_resources_(CameraContext* ctx) {
     }
 }
 
-NpuPreview SentinelVisioner::wait_get_preview(int camNum) {
+DmaBuffer_t* SentinelVisioner::wait_get_npu(int camNum) {
     auto it = _cameraContextMap.find(camNum);
     if (it == _cameraContextMap.end()) {
-        return {nullptr, nullptr};
+        return nullptr;
     }
-
-    CameraContext* ctx = it->second.get();
-
-    return ctx->previewTaskQueue.pop();
+    return it->second->npuTaskQueue.pop();
 }
 
-NpuPreview SentinelVisioner::try_get_preview(int camNum, int timeoutMs) {
+DmaBuffer_t* SentinelVisioner::try_get_npu(int camNum, int timeoutMs) {
     auto it = _cameraContextMap.find(camNum);
     if (it == _cameraContextMap.end()) {
-        return {nullptr, nullptr};
+        return nullptr;
     }
-    CameraContext* ctx = it->second.get();
-    NpuPreview result = {nullptr, nullptr};
-    ctx->previewTaskQueue.try_pop(result, timeoutMs);
+    DmaBuffer_t* result = nullptr;
+    it->second->npuTaskQueue.try_pop(result, timeoutMs);
     return result;
 }
 
-void SentinelVisioner::release_preview(int camNum, NpuPreview* preview) {
-    if (preview == nullptr) return;
-
+void SentinelVisioner::release_npu(int camNum, DmaBuffer_t* buf) {
+    if (buf == nullptr) return;
     auto it = _cameraContextMap.find(camNum);
     if (it != _cameraContextMap.end()) {
-        it->second->npuRgbPool->release_buffer(preview->npuImage);
-        if (preview->previewImage != nullptr)
-            it->second->previewPool->release_buffer(preview->previewImage);
+        it->second->npuRgbPool->release_buffer(buf);
+    }
+}
+
+DmaBuffer_t* SentinelVisioner::wait_get_preview(int camNum) {
+    auto it = _cameraContextMap.find(camNum);
+    if (it == _cameraContextMap.end()) {
+        return nullptr;
+    }
+    return it->second->previewTaskQueue.pop();
+}
+
+DmaBuffer_t* SentinelVisioner::try_get_preview(int camNum, int timeoutMs) {
+    auto it = _cameraContextMap.find(camNum);
+    if (it == _cameraContextMap.end()) {
+        return nullptr;
+    }
+    DmaBuffer_t* result = nullptr;
+    it->second->previewTaskQueue.try_pop(result, timeoutMs);
+    return result;
+}
+
+void SentinelVisioner::release_preview(int camNum, DmaBuffer_t* buf) {
+    if (buf == nullptr) return;
+    auto it = _cameraContextMap.find(camNum);
+    if (it != _cameraContextMap.end()) {
+        it->second->previewPool->release_buffer(buf);
     }
 }
 

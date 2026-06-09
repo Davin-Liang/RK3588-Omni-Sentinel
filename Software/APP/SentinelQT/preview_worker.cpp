@@ -21,23 +21,23 @@ void PreviewWorker::start()
     fprintf(stderr, "[PreviewWorker] start() running, cam=%d\n", camNum_);
 
     while (running_.load()) {
-        NpuPreview task = visioner_->try_get_preview(camNum_, 200);
+        DmaBuffer_t* previewBuf = visioner_->try_get_preview(camNum_, 200);
 
         if (!running_.load()) {
             fprintf(stderr, "[PreviewWorker] stopped, exiting loop\n");
-            if (task.npuImage || task.previewImage)
-                visioner_->release_preview(camNum_, &task);
+            if (previewBuf != nullptr)
+                visioner_->release_preview(camNum_, previewBuf);
             break;
         }
 
-        if (task.previewImage != nullptr) {
+        if (previewBuf != nullptr) {
             consecutiveFailures = 0;
-            QImage img(static_cast<uchar*>(task.previewImage->virtAddr),
-                       task.previewImage->width,
-                       task.previewImage->height,
+            QImage img(static_cast<uchar*>(previewBuf->virtAddr),
+                       previewBuf->width,
+                       previewBuf->height,
                        QImage::Format_RGB888);
             emit frameReady(img.copy());
-        } else if (task.npuImage == nullptr) {
+        } else {
             consecutiveFailures++;
             if (consecutiveFailures >= 5) {
                 fprintf(stderr, "[PreviewWorker] no frame for %d cycles\n", consecutiveFailures);
@@ -48,7 +48,7 @@ void PreviewWorker::start()
             }
         }
 
-        visioner_->release_preview(camNum_, &task);
+        visioner_->release_preview(camNum_, previewBuf);
     }
 
     fprintf(stderr, "[PreviewWorker] start() exited\n");

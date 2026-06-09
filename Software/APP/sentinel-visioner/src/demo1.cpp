@@ -10,58 +10,47 @@
 std::atomic<bool> g_is_running(true);
 
 // ============================================================================
-// 消费者线程 1：负责 NPU 推理与预览 (消费 previewTaskQueue)
+// 消费者线程 1：负责 NPU 推理 (消费 npuTaskQueue)
 // ============================================================================
-void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum) {
+void npu_consumer_thread(SentinelVisioner* visioner, int camNum) {
     std::cout << "[NPU Thread] Started for Camera " << camNum << " - Waiting for data..." << std::endl;
 
     int total_frame_count = 0;
     int fps_frame_count = 0;
-    auto start_time = std::chrono::steady_clock::now(); 
+    auto start_time = std::chrono::steady_clock::now();
 
     while (g_is_running) {
-        // 1. 阻塞等待：获取 NPU 专用小图和 1080P 预览图像
-        NpuPreview task = visioner->wait_get_preview(camNum);
+        DmaBuffer_t* npuBuf = visioner->wait_get_npu(camNum);
 
-        if (task.npuImage != nullptr) {
+        if (npuBuf != nullptr) {
             total_frame_count++;
             fps_frame_count++;
-            
-            // --- 每隔 30 帧 (约 1 秒) 打印一次心跳和详细状态 ---
+
             if (total_frame_count % 30 == 0) {
                 auto current_time = std::chrono::steady_clock::now();
                 auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
 
-                // 测算端到端延迟 (当前系统时间 - 底层驱动打上的硬件时间戳)
                 struct timespec ts;
                 clock_gettime(CLOCK_MONOTONIC, &ts);
                 uint64_t current_sys_us = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
-                uint64_t latency_ms = (current_sys_us - task.npuImage->timestampUs) / 1000;
+                uint64_t latency_ms = (current_sys_us - npuBuf->timestampUs) / 1000;
 
                 double fps = fps_frame_count * 1000.0 / elapsed_ms;
-                
-                // 使用绿色字体打印 NPU 线程状态
-                std::cout << "\033[1;32m[NPU Pipeline Cam " << camNum << "]\033[0m " 
+
+                std::cout << "\033[1;32m[NPU Pipeline Cam " << camNum << "]\033[0m "
                           << "Total: " << total_frame_count << " frames | "
-                          << "FPS: " << std::fixed << std::setprecision(2) << fps 
+                          << "FPS: " << std::fixed << std::setprecision(2) << fps
                           << " | Latency: " << latency_ms << " ms" << std::endl;
 
                 fps_frame_count = 0;
                 start_time = current_time;
             }
 
-            // 2. 模拟 NPU 推理 (使用 task.npuImage)
-            // auto results = yolo_infer(task.npuImage->dmaFd);
+            // 模拟 NPU 推理
+            // auto results = yolo_infer(npuBuf->dmaFd);
 
-            // 3. 预览处理
-            if (task.previewImage != nullptr) {
-                // 模拟 QT 界面直接使用 1080P RGB888 图像渲染
-            }
-
-            // 4. 【极度重要】：用完之后释放结构体中的所有 DMA 内存
-            visioner->release_preview(camNum, &task);
+            visioner->release_npu(camNum, npuBuf);
         } else {
-            // 如果拿到 nullptr，说明可能是由于唤醒或退出，稍微休眠防止 CPU 空转
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
@@ -69,7 +58,27 @@ void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum) {
 }
 
 // ============================================================================
-// 消费者线程 2：负责原始 1080P 图像推流或录像 (消费 processTaskQueue)
+// 消费者线程 2：负责预览显示 (消费 previewTaskQueue)
+// ============================================================================
+void preview_consumer_thread(SentinelVisioner* visioner, int camNum) {
+    std::cout << "[Preview Thread] Started for Camera " << camNum << " - Waiting for data..." << std::endl;
+
+    int frame_count = 0;
+    while (g_is_running) {
+        DmaBuffer_t* previewBuf = visioner->try_get_preview(camNum, 200);
+
+        if (previewBuf != nullptr) {
+            frame_count++;
+            // 模拟 QT 界面使用 1080P RGB888 图像渲染
+            // qt_render(previewBuf->virtAddr);
+            visioner->release_preview(camNum, previewBuf);
+        }
+    }
+    std::cout << "[Preview Thread] Exited cleanly. (" << frame_count << " frames)" << std::endl;
+}
+
+// ============================================================================
+// 消费者线程 3：负责原始 1080P 图像推流或录像 (消费 processTaskQueue)
 // ============================================================================
 void stream_consumer_thread(SentinelVisioner* visioner, int camNum) {
     std::cout << "[Stream Thread] Started for Camera " << camNum << " - Waiting for data..." << std::endl;
@@ -125,8 +134,9 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 3. 拉起下游的两个消费者线程
-    std::thread npu_thread(npu_osd_consumer_thread, &visioner, camNum);
+    // 3. 拉起下游的消费者线程（NPU + 预览 + 推流）
+    std::thread npu_thread(npu_consumer_thread, &visioner, camNum);
+    std::thread preview_thread(preview_consumer_thread, &visioner, camNum);
     std::thread stream_thread(stream_consumer_thread, &visioner, camNum);
 
     // 主线程保持运行
@@ -137,20 +147,21 @@ int main(int argc, char* argv[]) {
 
     // 4. 优雅关闭系统
     std::cout << "\nShutting down..." << std::endl;
-    
+
     // a. 停止底层的 V4L2 采集和 RGA 捕获线程
     visioner.camera_stream_ctrl(camNum, false);
-    
-    // b. 通知用户态的消费者线程退出
-    g_is_running = false; 
 
-    // c. 唤醒可能卡在 wait_get_xxx 的队列
-    NpuPreview dummy_task = {nullptr, nullptr};
-    visioner.release_preview(camNum, &dummy_task);
+    // b. 通知用户态的消费者线程退出
+    g_is_running = false;
+
+    // c. 释放空指针（触发队列条件变量唤醒）
+    visioner.release_npu(camNum, nullptr);
+    visioner.release_preview(camNum, nullptr);
     visioner.release_orig_copy_buffer(camNum, nullptr);
 
     // d. 回收线程
     if (npu_thread.joinable()) npu_thread.join();
+    if (preview_thread.joinable()) preview_thread.join();
     if (stream_thread.joinable()) stream_thread.join();
 
     std::cout << "System successfully shut down." << std::endl;

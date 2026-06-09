@@ -18,9 +18,9 @@ void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum, const char*
     auto start_time = std::chrono::steady_clock::now();
 
     while (g_is_running) {
-        NpuPreview task = visioner->wait_get_preview(camNum);
+        DmaBuffer_t* npuBuf = visioner->wait_get_npu(camNum);
 
-        if (task.npuImage != nullptr) {
+        if (npuBuf != nullptr) {
             total_frame_count++;
             fps_frame_count++;
 
@@ -32,7 +32,7 @@ void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum, const char*
                 struct timespec ts;
                 clock_gettime(CLOCK_MONOTONIC, &ts);
                 uint64_t current_sys_us = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
-                uint64_t latency_ms = (current_sys_us - task.npuImage->timestampUs) / 1000;
+                uint64_t latency_ms = (current_sys_us - npuBuf->timestampUs) / 1000;
 
                 double fps = fps_frame_count * 1000.0 / elapsed_ms;
 
@@ -45,7 +45,7 @@ void npu_osd_consumer_thread(SentinelVisioner* visioner, int camNum, const char*
                 start_time = current_time;
             }
 
-            visioner->release_preview(camNum, &task);
+            visioner->release_npu(camNum, npuBuf);
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
@@ -160,8 +160,8 @@ int main(int argc, char* argv[]) {
 
     // 唤醒所有可能阻塞在队列上的消费者线程
     for (int camNum : {ispCamNum, usbCamNum}) {
-        NpuPreview dummy = {nullptr, nullptr};
-        visioner.release_preview(camNum, &dummy);
+        visioner.release_npu(camNum, nullptr);
+        visioner.release_preview(camNum, nullptr);
         visioner.release_orig_copy_buffer(camNum, nullptr);
     }
 

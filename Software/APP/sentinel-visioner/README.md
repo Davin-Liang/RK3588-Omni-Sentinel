@@ -68,34 +68,46 @@ make install
 
 `SentinelVisioner` 的标准生命周期为： **注册设备 -> 开启流 -> 消费者异步阻塞拉取 -> 处理后归还内存 -> 关闭流** 。
 
-以下展示了如何拉起”NPU推理+预览显示”与”原始视频推流”两个并发消费者线程：
+以下展示了如何拉起”NPU推理”、”预览显示”与”原始视频推流”三个独立并发消费者线程：
 
 **C++**
 
 ```
 #include <iostream>
 #include <thread>
-#include "sentinel-visioner.h"
+#include “sentinel-visioner.h”
 
-// 消费者 1：负责 NPU 推理与预览显示
-void npu_preview_consumer_thread(SentinelVisioner* visioner, int camNum) {
+// 消费者 1：负责 NPU 推理 (独立消费 npuTaskQueue)
+void npu_consumer_thread(SentinelVisioner* visioner, int camNum) {
     while (true) { // (实际应用中替换为全局运行标志)
-        // 1. 阻塞等待：获取打包好的 NPU RGB888小图 和 1080P 预览图像
-        NpuPreview task = visioner->wait_get_preview(camNum);
-        if (task.npuImage == nullptr) continue; // 退出或虚假唤醒拦截
+        // 1. 阻塞等待：获取 NPU 640x640 RGB888 小图
+        DmaBuffer_t* npuBuf = visioner->wait_get_npu(camNum);
+        if (npuBuf == nullptr) continue;
 
         // 2. 硬件加速送进 NPU 运算
-        // auto results = do_yolo_inference(task.npuImage->dmaFd);
+        // auto results = do_yolo_inference(npuBuf->dmaFd);
 
-        // 3. 直接在 1080P RGB888 预览图像上显示
-        // qt_render(task.previewImage->virtAddr);
-
-        // 4. 【必须】交还 DMA 内存，避免内存干涸
-        visioner->release_preview(camNum, &task);
+        // 3. 【必须】交还 DMA 内存
+        visioner->release_npu(camNum, npuBuf);
     }
 }
 
-// 消费者 2：负责原始高分辨率图像编码推流
+// 消费者 2：负责预览显示 (独立消费 previewTaskQueue)
+void preview_consumer_thread(SentinelVisioner* visioner, int camNum) {
+    while (true) {
+        // 1. 超时轮询：获取 1080P RGB888 预览图像
+        DmaBuffer_t* previewBuf = visioner->try_get_preview(camNum, 200);
+        if (previewBuf == nullptr) continue;
+
+        // 2. 在 QT 界面上渲染
+        // qt_render(previewBuf->virtAddr);
+
+        // 3. 【必须】交还 DMA 内存
+        visioner->release_preview(camNum, previewBuf);
+    }
+}
+
+// 消费者 3：负责原始高分辨率图像编码推流
 void stream_consumer_thread(SentinelVisioner* visioner, int camNum) {
     while (true) {
         // 1. 阻塞等待：获取 1080P NV12 原图的独立零拷贝副本
@@ -113,7 +125,7 @@ void stream_consumer_thread(SentinelVisioner* visioner, int camNum) {
 int main() {
     SentinelVisioner visioner;
     int camNum = 0;
-    std::string devName = "/dev/video11"; // ISP 输出节点
+    std::string devName = “/dev/video11”; // ISP 输出节点
 
     // 1. 初始化 1080P 摄像机并预分配内存池 (缓冲块数=8)
     //    USB 相机: visioner.add_camera(usbDev, 1280, 720, 8, 1, CameraType::USB_CAM);
@@ -122,8 +134,9 @@ int main() {
     // 2. 开启硬件视频流与 epoll 捕获分发守护线程
     if (!visioner.camera_stream_ctrl(camNum, true)) return -1;
 
-    // 3. 拉起下游双链路异步消费者
-    std::thread npu_thread(npu_preview_consumer_thread, &visioner, camNum);
+    // 3. 拉起下游三路独立异步消费者
+    std::thread npu_thread(npu_consumer_thread, &visioner, camNum);
+    std::thread preview_thread(preview_consumer_thread, &visioner, camNum);
     std::thread stream_thread(stream_consumer_thread, &visioner, camNum);
 
     // 主线程保持运行...
@@ -133,6 +146,7 @@ int main() {
     visioner.camera_stream_ctrl(camNum, false);
     // (需配合唤醒消费者线程逻辑退出)
     npu_thread.join();
+    preview_thread.join();
     stream_thread.join();
 
     return 0;

@@ -23,15 +23,6 @@ struct DmaBufferInfo {
 };
 
 /**
- * @brief 打包传递给下游的 NPU 推理和预览图像
- * @note 包含了缩放给 NPU 推理用的小图，以及供 QT 预览的 1080P RGB888 图像
- */
-struct NpuPreview {
-    DmaBuffer_t* npuImage;     ///< 指向供 NPU 推理的 640x640 RGB888 小图
-    DmaBuffer_t* previewImage; ///< 指向供预览的 1920x1080 RGB888 图像 (可能为 nullptr)
-};
-
-/**
  * @brief 摄像头类型枚举，区分 MIPI CSI/ISP 摄像头和 USB UVC 摄像头
  */
 enum class CameraType {
@@ -66,8 +57,9 @@ struct CameraContext {
     std::unique_ptr<DmaBufferPool> usbConvertPool;  ///< USB YUYV→NV12 中间转换缓冲池
     std::unique_ptr<DmaBufferPool> usbSafePool;     ///< USB NV12 安全拷贝缓冲池（RGA 兼容性）
 
-    ThreadSafeQueue<NpuPreview> previewTaskQueue;   ///< 供 NPU/预览消费者消费的任务队列
-    ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; ///< 供推流/录像等后处理消费的原图队列
+    ThreadSafeQueue<DmaBuffer_t*> npuTaskQueue;      ///< 供 NPU 推理消费者消费的 640x640 RGB888 小图队列
+    ThreadSafeQueue<DmaBuffer_t*> previewTaskQueue;   ///< 供预览消费者消费的 RGB888 图像队列
+    ThreadSafeQueue<DmaBuffer_t*> processTaskQueue;  ///< 供推流/录像等后处理消费的原图队列
 
     CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false),
         isPaused(false), camType(CameraType::ISP_CAM),
@@ -109,26 +101,48 @@ public:
     void camera_pause(int camNum, bool paused);
 
     /**
-     * @brief: 阻塞等待并获取打包好的 NPU 推理和预览图像数据
+     * @brief: 阻塞等待并获取 NPU 推理图像数据
      * @param: camNum - 摄像头编号
-     * @return: NpuPreview 结构体。若获取失败或摄像头不存在，返回 {nullptr, nullptr}
+     * @return: DmaBuffer_t* 640x640 RGB888 NPU 推理小图。若摄像头不存在，返回 nullptr
      */
-    NpuPreview wait_get_preview(int camNum);
+    DmaBuffer_t* wait_get_npu(int camNum);
+
+    /**
+     * @brief: 带超时的阻塞等待 NPU 推理图像数据
+     * @param: camNum - 摄像头编号
+     * @param: timeoutMs - 超时毫秒数
+     * @return: DmaBuffer_t* NPU 推理小图。超时返回 nullptr
+     */
+    DmaBuffer_t* try_get_npu(int camNum, int timeoutMs);
+
+    /**
+     * @brief: 归还 NPU 推理图像内存块
+     * @param: camNum - 摄像头编号
+     * @param: buf - 需要归还的内存块指针
+     */
+    void release_npu(int camNum, DmaBuffer_t* buf);
+
+    /**
+     * @brief: 阻塞等待并获取预览图像数据
+     * @param: camNum - 摄像头编号
+     * @return: DmaBuffer_t* RGB888 预览图像。若摄像头不存在，返回 nullptr
+     */
+    DmaBuffer_t* wait_get_preview(int camNum);
 
     /**
      * @brief: 带超时的阻塞等待预览图像数据
      * @param: camNum - 摄像头编号
      * @param: timeoutMs - 超时毫秒数
-     * @return: NpuPreview 结构体。超时返回 {nullptr, nullptr}
+     * @return: DmaBuffer_t* 预览图像。超时返回 nullptr
      */
-    NpuPreview try_get_preview(int camNum, int timeoutMs);
+    DmaBuffer_t* try_get_preview(int camNum, int timeoutMs);
 
     /**
-     * @brief: 业务层使用完毕后，将 NPU 和预览图像内存块归还给底层的内存池
+     * @brief: 归还预览图像内存块
      * @param: camNum - 摄像头编号
-     * @param: preview - 需要归还的任务结构体指针
+     * @param: buf - 需要归还的内存块指针
      */
-    void release_preview(int camNum, NpuPreview* preview);
+    void release_preview(int camNum, DmaBuffer_t* buf);
 
     /**
      * @brief: 阻塞等待并获取拷贝好的原始高分辨率图像 (用于推流或存盘)
