@@ -1,7 +1,8 @@
 #pragma once
-#include <queue>
-#include <mutex>
+#include <chrono>
 #include <condition_variable>
+#include <mutex>
+#include <queue>
 
 template<typename T>
 class ThreadSafeQueue {
@@ -16,11 +17,24 @@ public:
         return val;
     }
 
-    // 非阻塞尝试弹出（可选）
-    bool try_pop(T& val) 
+    // 非阻塞尝试弹出
+    bool try_pop(T& val)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (queue_.empty()) return false;
+        val = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    // 带超时的阻塞弹出：timeoutMs 毫秒内无数据则返回 false
+    bool try_pop(T& val, int timeoutMs)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cond_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                            [this] { return !queue_.empty(); })) {
+            return false;
+        }
         val = queue_.front();
         queue_.pop();
         return true;

@@ -21,6 +21,7 @@ struct DmaBuffer_t {
     int bufferSize;          ///< 内存块的实际字节大小
     int width;               ///< 图像宽度
     int height;              ///< 图像高度
+    uint64_t timestampUs;    ///< 时间戳
     DmaBuffer_t* next;       ///< 指向下一个空闲节点的指针
 
     DmaBuffer_t() : dmaFd(-1), virtAddr(nullptr), ifUse(false), 

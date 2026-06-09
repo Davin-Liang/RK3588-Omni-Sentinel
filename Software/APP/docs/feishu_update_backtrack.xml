@@ -1,0 +1,108 @@
+<h2>sentinel-streamer 章节更新 — 数据回溯</h2>
+
+<callout emoji="🆕" background-color="light-blue" border-color="blue">
+本次新增：录像帧环形缓冲池 RecordBufferPool，用于在推流编码前暂存 NV12 历史帧，支持告警触发时回溯查询。
+</callout>
+
+<h3>RecordBufferPool 环形帧缓冲</h3>
+
+<p>基于 DmaBufferPool + RGA DMA 硬件拷贝的 NV12 帧环形缓冲区。streamer worker 线程每帧通过 RGA imcopy 零拷贝写入环形缓冲，Qt 磁盘写入线程（后续开发）通过 try_get/release 接口消费帧并写入硬盘。</p>
+
+<p>数据流：</p>
+<pre lang="text">
+Streamer Worker → write_frame(dmaFd, w, h, ts) → Ring Buffer
+                                                      ↓
+Qt Disk Writer Thread → try_get_record_frame() → DMA virtAddr → 写盘 → release_record_frame()
+</pre>
+
+<h4>核心参数</h4>
+<ul>
+<li>槽位数: 150（可配，≈ 5s @30fps）</li>
+<li>帧格式: NV12 (width × height × 3/2 bytes)</li>
+<li>拷贝方式: RGA imcopy 硬件 DMA 零拷贝（源 dmaFd → 目标 dmaFd）</li>
+<li>环形覆盖: 写指针环绕，checkedOut 槽位跳过不覆盖</li>
+<li>FIFO 消费: try_get 按时间顺序返回最早未消费帧</li>
+</ul>
+
+<h4>公共 API 新增</h4>
+<table>
+<tr><th>方法</th><th>说明</th></tr>
+<tr><td>init_record_buffer(camNum, slotCount, width, height)</td><td>初始化环形缓冲池，双路相机各自独立</td></tr>
+<tr><td>try_get_record_frame(camNum, &data, &size, &ts)</td><td>非阻塞 FIFO 获取一帧（返回 uint8_t* 隐藏 DmaBuffer_t）</td></tr>
+<tr><td>release_record_frame(camNum, data)</td><td>归还帧引用（通过 addrToIdx_ 映射表 O(1) 查找）</td></tr>
+</table>
+
+<hr/>
+
+<h2>SentinelQT 章节更新 — 数据回溯</h2>
+
+<callout emoji="🆕" background-color="light-blue" border-color="blue">
+本次新增：数据回溯子页面（QStackedWidget page 3），支持手动回溯和告警自动回溯，双向 Web↔Qt 状态同步。
+</callout>
+
+<h3>页面布局</h3>
+
+<p>QStackedWidget 由三页扩展为四页（主控页 / 视频管理页 / 融合管理页 / 数据回溯页）。回溯页底部导航栏新增"数据回溯"按钮。</p>
+
+<p>回溯页布局：标题栏 + 参数区（回溯秒数 QLineEdit + 摄像头 QComboBox + 手动回溯按钮 + 刷新按钮）+ 文件列表 QTableWidget（文件名/大小/类型）。</p>
+
+<h3>手动回溯</h3>
+
+<p>用户输入回溯秒数（0.1–30.0s）和摄像头选择（全部/CAM0/CAM1），点击"手动回溯"按钮触发。当前为终端打印占位符，待硬盘数据管理类就绪后从磁盘检索帧。</p>
+
+<h3>告警自动回溯</h3>
+
+<p>融合跟踪检测到目标进入告警范围（warningEnterDistMeters）时，fusion_warning_callback_ 通过 QMetaObject::invokeMethod 触发 Qt 主线程的 on_fusion_alert_backtrack_。根据 Backtrack/maxBacktrackSeconds 配置计算回溯时间窗口，双路相机 CAM0 + CAM1 同时回溯。当前为终端打印占位。</p>
+
+<pre lang="cpp">
+// 终端输出示例
+[SentinelQT] ========================================
+[SentinelQT] alert backtrack triggered!
+[SentinelQT]   target id    : 1
+[SentinelQT]   alert ts     : 1234567890 us
+[SentinelQT]   back seconds : 5.0 s
+[SentinelQT]   time range   : [1234067890, 1234567890] us
+[SentinelQT]   cameras      : CAM0 + CAM1
+[SentinelQT]   status       : disk manager not ready, skip disk query
+[SentinelQT] ========================================
+</pre>
+
+<h3>双向 Web↔Qt 同步</h3>
+
+<p>为回溯参数（秒数/摄像头）、系统控制（录像分辨率）、融合参数引入 dirty flag 同步机制：</p>
+<ul>
+<li>Web 用户修改输入 → 置脏标志 → 阻止 Qt 周期推送覆盖</li>
+<li>提交操作（点击回溯/保存参数） → REST API 更新 Qt → 清脏标志 → 恢复同步</li>
+<li>Qt 用户修改 → 脏标志为 false → Web 接收 status push 自动刷新</li>
+</ul>
+
+<h3>虚拟键盘跨页面共享</h3>
+
+<p>keyboardContainer 从 pageFusion 内部移到 QStackedWidget 同级根布局，所有页面（融合页 + 回溯页）共享。回溯秒数输入框采用 QLineEdit + QDoubleValidator（与融合参数一致），eventFilter 增加 FocusOut 延迟隐藏逻辑。</p>
+
+<h3>配置新增</h3>
+<pre lang="ini">
+[Backtrack]
+enabled=true
+ringBufferSlots=150
+maxBacktrackSeconds=5.0
+backtrackDir=/mnt/sdcard/backtrack
+</pre>
+
+<h3>REST API 新增</h3>
+<table>
+<tr><th>方法</th><th>路径</th><th>说明</th></tr>
+<tr><td>POST</td><td>/api/v1/backtrack/query</td><td>手动触发回溯（body: {cam, seconds}）</td></tr>
+<tr><td>GET</td><td>/api/v1/backtrack/files</td><td>获取回溯文件列表 JSON</td></tr>
+</table>
+
+<h3>关键 Bug 记录</h3>
+<table>
+<tr><th>编号</th><th>问题</th><th>根因</th><th>解决</th></tr>
+<tr><td>19</td><td>RecordBufferPool 消费归还后 count_ 不递增</td><td>try_get 未重置 written 标志</td><td>消费时 set written=false</td></tr>
+<tr><td>16</td><td>回溯页虚拟键盘不弹出</td><td>keyboardContainer 在 pageFusion 内（其他页隐藏）</td><td>移至根布局</td></tr>
+<tr><td>17</td><td>Web↔Qt 同步覆盖冲突</td><td>周期推送覆盖用户输入</td><td>dirty flag 机制</td></tr>
+<tr><td>18</td><td>QDoubleSpinBox 无法安装 eventFilter</td><td>lineEdit() protected + findChild 返回 nullptr</td><td>改用 QLineEdit + QDoubleValidator</td></tr>
+<tr><td>19</td><td>键盘弹出后 FocusOut 立即隐藏</td><td>键盘按钮获取焦点触发输入框失焦</td><td>QTimer 延迟 + focusWidget 判断</td></tr>
+<tr><td>20</td><td>Web 暂停后 Qt 按钮不更新</td><td>update_camera_button_states_ 未处理暂停按钮</td><td>增加暂停按钮状态更新</td></tr>
+</table>

@@ -66,6 +66,26 @@ target_link_libraries(sentinel_visioner_demo1
     # ${OpenCV_LIBS}
 )
 
+# USB 摄像头测试
+add_executable(sentinel_visioner_demo2
+    src/demo2.cpp
+)
+
+target_link_libraries(sentinel_visioner_demo2
+    sentinel_visioner_lib
+)
+
+# 双路混合相机测试
+add_executable(sentinel_visioner_demo3
+    src/demo3.cpp
+)
+
+target_link_libraries(sentinel_visioner_demo3
+    sentinel_visioner_lib
+)
+
 # 安装规则
 install(TARGETS sentinel_visioner_demo1 DESTINATION ./)
+install(TARGETS sentinel_visioner_demo2 DESTINATION ./)
+install(TARGETS sentinel_visioner_demo3 DESTINATION ./)
 # install(DIRECTORY ${OPENCV_LIB_SRC_DIR}/ DESTINATION lib)
