@@ -102,9 +102,9 @@ visioner.camera_stream_ctrl(0, false);  // 完全停流
 
 | 对比维度 | 阻塞 `read()`（替代方案） | `epoll` + `VIDIOC_DQBUF`（我们的方案） |
 |----------|------------------------|--------------------------------------|
-| 多路复用 | 一路摄像头一个线程阻塞 read，不能同时等多个 fd | 一个 epoll fd 监听多个摄像头 fd，单线程搞定 |
+| 多路复用 | 一路摄像头一个线程阻塞 read，不能同时等多个 fd | 每路独立 epoll fd + 独立捕获线程，框架设计支持扩展至单 epoll 多路复用 |
 | 超时控制 | 阻塞 read 没有超时，线程退出必须靠信号打断（EINTR） | `epoll_wait(..., 1000)` 1秒超时，循环检查 `isThreadRunning` 标志，优雅退出 |
-| 资源开销 | N 路摄像头 = N 个阻塞线程 | N 路摄像头 = 1 个 epoll fd + 1 个线程（本实现一路一个线程，但框架支持扩展） |
+| 资源开销 | N 路摄像头 = N 个阻塞线程 | N 路摄像头 = N 个 epoll fd + N 个线程（框架设计支持扩展至单 epoll 多路复用） |
 | Linux 生态 | read() 是通用 I/O，但 V4L2 不直接用 read 取帧 | V4L2 标准做法就是 `VIDIOC_DQBUF` + `VIDIOC_QBUF`，epoll 是社区推荐组合 |
 | 帧完整性 | 直接 read 可能读到半帧 | DQBUF 保证返回完整帧，配合 epoll 实现帧就绪通知 |
 
@@ -202,40 +202,6 @@ if (task.npuImage == nullptr && !running_) break;  // 超时或退出
 
 ---
 
-### 决策 7：为什么用 CameraType 枚举而不是自动探测相机类型？
-
-| 对比维度 | 自动探测（替代方案） | 显式指定 CameraType（我们的方案） |
-|----------|---------------------|---------------------------------|
-| 实现方式 | `VIDIOC_QUERYCAP` 获取 driver name，匹配 "uvcvideo" vs "rkisp" | 调用者传入 `CameraType::ISP_CAM` 或 `CameraType::USB_CAM` |
-| 依赖 | 依赖驱动的 name 字段稳定不变，第三方 USB 驱动可能不以 "uvcvideo" 命名 | 无外部依赖，逻辑完全在应用层 |
-| 确定性 | 驱动名匹配失败会导致误判，USB 相机被当作 ISP 初始化 → 必崩 | 调用者自己知道插的是什么，100% 确定 |
-| 边缘场景 | 同是 USB 但走不同协议（UVC vs gspca），驱动名不同；未来 MIPI→USB bridge 的 driver name 不可预测 | 所有边缘场景由调用者处理，库内逻辑简单 |
-| 代码复杂度 | 需要维护驱动名匹配表，每次新硬件都要更新 | 一个 enum + 两路分支，代码量极少 |
-
-**核心逻辑**：
-
-```cpp
-enum class CameraType { ISP_CAM, USB_CAM };
-
-// 调用者显式指定，库内据此分流
-ctx->v4l2BufType = (camType == CameraType::ISP_CAM)
-    ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
-    : V4L2_BUF_TYPE_VIDEO_CAPTURE;
-```
-
-**面试话术**: "自动探测看起来很智能，但在嵌入式异构相机场景下是个陷阱。不同 USB 芯片的驱动名不一样，甚至同一个摄像头在不同内核版本下 driver name 都可能变化。我们用显式指定——调用者插的什么相机自己清楚，库内只负责按类型走不同 V4L2 初始化路径。这样做代码量极少，没有任何外部依赖，边缘场景不会出现归类错误导致的崩溃。"
-
-### 决策 8：为什么 USB 先尝试 NV12 而不是直接上 YUYV？
-
-| 对比维度 | 统一 YUYV 路径（替代方案） | NV12 优先 + YUYV 回退（我们的方案） |
-|----------|-------------------------|---------------------------------|
-| 最优路径 | 每帧多一次 RGA YUYV→NV12 转换，无论摄像头是否支持 NV12 | 摄像头原生支持 NV12 时零额外开销 |
-| 代码复杂度 | 少一个分支 | 多一次 `VIDIOC_S_FMT` 重试 + 条件化 convert pool 分配 |
-| 实际效果 | 市面上越来越多 USB 摄像头原生支持 NV12（UVC 1.5+） | 自适应：NV12 时路径等同 ISP，YUYV 时自动加一层 RGA |
-| RGA 负载 | 多一次 RGA 调用（每帧约 1-3ms） | NV12 时 RGA 负载不变，YUYV 时多一次 |
-
-**面试话术**: "USB UVC 规范 1.5 之后越来越多的摄像头支持 NV12 原生输出，这是趋势。如果一刀切走 YUYV，等于给所有相机都加了一层不必要的 RGA 转换——这在多路相机场景下会累加 RGA 负载。我们的方案是先尝试 NV12，失败了再回退 YUYV。对用户来说完全透明，但性能上 NV12 时零额外开销。"
-
 ---
 
 ## 第三层：能讲清 bug 和教训（面试加分项）
@@ -276,7 +242,7 @@ ctx->v4l2BufType = (camType == CameraType::ISP_CAM)
 
 ### Bug 3：`pop()` 无限阻塞导致消费者线程死锁
 
-**现象**: 用户点击"关闭"按钮后，程序界面卡死，不响应任何操作。检查进程状态发现 `wait_get_preview()` 所在线程卡在 `futex()` 系统调用上永久休眠。必须 `kill -9` 强杀进程。
+**现象**: 程序退出时，SentinelQT 析构函数停止相机捕获线程，PreviewWorker 线程卡在 `futex()` 系统调用上永久休眠，界面卡死不响应。必须 `kill -9` 强杀进程。
 
 **原因**: 关闭流程的执行顺序是：
 
@@ -290,7 +256,7 @@ ctx->v4l2BufType = (camType == CameraType::ISP_CAM)
   │   └─ VIDIOC_STREAMOFF               │         永久阻塞，永远检查不到 isThreadRunning
 ```
 
-问题在于：主线程先停了捕获线程（帧来源断了），但消费者线程还在 `pop()` 里等帧。`pop()` 使用的 `cond_.wait()` 没有超时，必须有人 push 才能唤醒。但捕获线程已死，再无 push，消费者线程永远卡在 `wait()` 里，`running_` 标志永远检查不到，`join()` 永远等不到。
+问题在于：主线程先停了捕获线程（帧来源断了），但消费者线程还在我们自定义的 `ThreadSafeQueue::pop()` 里等帧。`pop()` 内部是 `std::condition_variable::wait()` 无超时阻塞——必须有人 push 才能唤醒（为低功耗设计，空闲时零 CPU 占用）。但捕获线程已死，再无 push，消费者永远卡在 `wait()` 里，`running_` 标志永远检查不到，`join()` 永远等不到。
 
 **解决**: 分两步：
 1. 在 `ThreadSafeQueue` 中新增 `try_pop(T& val, int timeoutMs)` 超时版本
@@ -311,7 +277,7 @@ while (running_) {
 }
 ```
 
-**面试话术**: "这是 C++ 多线程里最经典的死锁模式——生产者停了，消费者永远等不到数据。`std::condition_variable::wait` 无罪，有罪的是不给它设超时。我们在 SentinelVisioner 里加了 `try_get_preview` 超时版接口，PreivewWorker 改用 200ms 超时轮询，确保退出信号最多 200ms 内被响应。记住一条铁律——凡是用条件变量的阻塞等，要么设超时，要么在析构前手动 notify。"
+**面试话术**: "这是 C++ 多线程里最经典的死锁模式——生产者停了，消费者永远等不到数据。我们的 `ThreadSafeQueue::pop()` 底层是 `std::condition_variable::wait()` 无超时版，空闲时 CPU 零占用，但在线程退出场景成了致命陷阱。修复方案是新增 `try_pop` 超时版（内部走 `wait_for`），PreviewWorker 改用 `try_get_preview(camNum, 200)` 轮询，确保退出信号最多 200ms 内被响应。记住铁律——生产级代码中凡是用条件变量的阻塞等待，要么设超时，要么在析构前手动 notify。"
 
 ---
 

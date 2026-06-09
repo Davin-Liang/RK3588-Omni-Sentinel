@@ -109,3 +109,26 @@ DQBUF → sync_dma → imcopy(相机BUF → usbSafePool) → QBUF(立即归还�
 **原因**: 早期预览管线使用 `rga_scale_nv12_to_nv12_` 将 1080p NV12 降级缩放到 720p NV12，走 RGA `imresize`。但 NV12 是 YUV 4:2:0 半平面格式，QT `QImage` 无法直接渲染，且 720p 分辨率损失了大量细节，预览质量差。
 
 **解决**: 废弃 `rga_scale_nv12_to_nv12_`，新增 `rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf)`，使用 RGA `improcess` 将 1080p NV12 一次转为 1080p RGB888（无缩放、无 letterbox），RGB888 可直接构造 `QImage(QImage::Format_RGB888)` 零开销渲染。更改后预览画面：全分辨率、全彩、与 QT 渲染管线完全兼容。
+
+---
+
+## 8. V4L2 MPLANE 模式未设 planes 数组导致静默失败
+
+**现象**: `VIDIOC_QBUF` / `VIDIOC_DQBUF` 返回 `EINVAL`，`strerror` 仅显示 "Invalid argument"，无帧产出，应用端感知不到明显错误，但管道始终无数据。
+
+**原因**: MPLANE 模式下，内核要求 `struct v4l2_buffer` 的 `m.planes` 必须指向用户空间的有效 `v4l2_plane` 数组。若代码未显式分配和赋值，`m.planes` 就是栈或堆上的未初始化值（野指针）。它大概率非 NULL，内核用该非法地址进行 `copy_from_user` 时会触发段错误（`SIGSEGV`）或返回 `-EFAULT`；部分校验路径也可能因 `length` 等字段不合法而直接返回 `-EINVAL`。无论哪种现象，根因都是没有给内核提供合法的 planes 内存。
+
+另外，RK3588 ISP 驱动只支持 MPLANE，且铁律是：`VIDIOC_REQBUFS` 用的 `type`（如 `V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE`），后续所有 buf 操作的 `type` 都必须严格一致，否则同样会得到 `EINVAL`。
+
+**解决**: 每次 QBUF/DQBUF 前，显式声明 `struct v4l2_plane planes[1] = {};`，然后设置 `buf.m.planes = planes; buf.length = 1;`（内核需要知道 plane 数量）。更稳妥的做法是先用 `memset(&buf, 0, sizeof(buf))` 清零整个 `v4l2_buffer`，再赋值，避免任何遗留的垃圾值。
+
+```c
+// MPLANE 模式 QBUF/DQBUF 的正确姿势
+struct v4l2_plane planes[1] = {};
+memset(&buf, 0, sizeof(buf));
+buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+buf.memory = V4L2_MEMORY_MMAP;
+buf.index = i;
+buf.m.planes = planes;
+buf.length = 1;
+```

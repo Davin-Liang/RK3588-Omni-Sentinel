@@ -75,7 +75,33 @@ streamer.set_callback([](int cam, StreamerEvent e, const char* detail) {
 | 帧率不变时 | 没问题 | 没问题 |
 | 帧率波动/降帧时 | 播放加速/慢放 | 始终正确，反映真实时间 |
 
-**教训**: 帧计数器假设帧率恒定，实际硬件会降频。
+PTS 计算的关键代码（`stream_thread_func_` 线程内）：
+
+```cpp
+// 1. start_stream()/start_record() 启动时，记录"此刻"为基准
+ctx->baselineTsUs = current_monotonic_time_in_us();
+
+// 2. 线程启动时，快照一份作为 PTS 原点
+uint64_t firstTsUs = ctx->baselineTsUs;
+
+// 3. 丢弃时间戳早于启动时刻的旧帧
+if (tsUs < firstTsUs) { 释放并 continue; }
+
+// 4. 硬件时间戳 → PTS：归零 + 时基转换
+int64_t pts = (tsUs - firstTsUs) * 90000 / 1000000;
+```
+
+| 术语 | 对应代码 | 含义 |
+|------|---------|------|
+| **帧计数器**（替代方案） | `pts += 6000` | 每帧固定加 6000（90kHz 下约 15fps），假设帧率绝对稳定。帧率波动/降帧时播放会加速或慢放 |
+| **硬件时间戳**（我们的方案） | `tsUs = origBuf->timestampUs` | V4L2 驱动打的 CLOCK_MONOTONIC 微秒时间戳，反映帧的真实曝光时刻 |
+| **首帧偏移 / baselineTsUs** | `ctx->baselineTsUs = now` | start 被调用时的系统时刻，PTS 从这里算起，确保第一帧 PTS 接近 0 |
+| **baselineTsUs 归零** | `(tsUs - firstTsUs)` | 所有帧减去同一基准，本质是把绝对时间戳平移成以启动时刻为零点的相对时间 |
+| **旧帧过滤** | `if (tsUs < firstTsUs)` | 丢弃启动前积压的旧帧，避免 PTS 为负数或首帧跳跃 |
+
+举个例子：假设摄像头以 29.7fps 跑了 10 分钟。帧计数器每帧固定 +6000，累积偏移约 6 秒，音视频不同步。硬件时间戳用每帧的真实曝光时刻做 PTS，完全不受帧率波动影响。
+
+**面试话术**: "一开始直接用帧计数器做 PTS，没意识到实际硬件帧率会波动。后来改用 CLOCK_MONOTONIC 硬件时间戳——启动时记录 baselineTsUs 做归零，所有帧减去这个基准转成相对时间，再乘以 90000/1000000 转成 MPEG 时基。还有一个细节是旧帧过滤：摄像头一直在跑，队列里可能积压了启动前的帧，必须丢。最后用实际例子说明——29.7fps 跑 10 分钟，帧计数器偏差能达到 6 秒。"
 
 ### 决策 2：为什么编码器惰性创建？
 
@@ -85,7 +111,15 @@ streamer.set_callback([](int cam, StreamerEvent e, const char* detail) {
 两路都开   → 两个都建
 ```
 
-`add_camera` 只建缩放池，编码器在 `start_stream` / `start_record` 时才创建。不用不占资源。
+`add_camera` 只建缩放池，编码器在 `start_stream` / `start_record` 时才创建。不用不占 MPP 硬件资源。
+
+**编码器状态问题**：MPP 编码器内部维护帧序号、GOP 计数、码率控制参数等一整组运行时状态。不销毁重建的话，第二轮推流时帧序号从 5001 开始，但新流时间戳从 0 开始——VLC 播放器拿到 PTS=0 的帧，帧头却写着"第 5001 帧"，直接黑屏或报"无法播放"。RTSP 推流场景下客户端反复断开重连，始终无法建立稳定会话。每轮 stop 销毁 → start 重建，整组状态清零。
+
+**为什么不调 `avcodec_flush_buffers()` 而要销毁重建？** FFmpeg 提供了 `avcodec_flush_buffers()` 可以重置编码器内部状态——理论上比销毁重建更轻量。但 `h264_rkmpp` 是 Rockchip 社区维护的硬件编码器 wrapper，其 flush 实现是否清空帧序号、GOP 计数、码率控制历史窗口，文档没有明确承诺。对第三方硬件 wrapper 的内部行为做假设，一旦 flush 漏掉某个冷门状态字段，排查代价远超多花几十毫秒重建。销毁→alloc→open 三步走，整个 context 都不存在了，100% 确定状态清零。这是防御性编程——不赌硬件 wrapper 的实现质量。
+
+**关于 B 帧**：实时推流场景关闭 B 帧是业界通用做法——WebRTC 规范明确禁止 B 帧，视频会议（Zoom、腾讯会议）一律不用，安防监控的 RTSP 推流也普遍关闭。B 帧要等"未来帧"到达才能编码，每级 B 帧至少多 1 帧延迟（30fps 下 ≈ 33ms），实时场景要的是低延迟不是压缩率。我们用 `max_b_frames = 0` 关掉 B 帧——结果流中 PTS ≡ DTS。DTS 这个术语本身是通用 H.264 概念，值得了解以备面试，但对我们项目而言，编码器整体状态的累积才是实际的坑。
+
+**面试话术**: "惰性创建不只是省资源。编码器是有状态的——帧序号、GOP 计数、码率控制都在内部维护。不销毁重建的话新流 PTS 从 0 开始，帧头却写着第 5001 帧，VLC 直接黑屏。我们用 `max_b_frames = 0` 关 B 帧是实时推流的通用做法——WebRTC、视频会议、安防监控都一样——但整体状态的跨启停累积才是实际问题，销毁重建是最彻底的清零方案。"
 
 ### 决策 3：为什么 ffmpeg 走子进程管道，不用 FFmpeg C API 的 RTSP muxer？
 
