@@ -843,7 +843,7 @@ bool SentinelVisioner::rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
         return false;
     }
 
-    int srcFmt = RK_FORMAT_YUYV_422;
+    int srcFmt = RK_FORMAT_YVYU_422;  // 部分 USB 相机实际 U/V 与 YUYV 相反
     int dstFmt = RK_FORMAT_YCrCb_420_SP;
 
     im_handle_param_t in_param = { srcWidth, srcHeight, srcFmt };
@@ -876,7 +876,7 @@ bool SentinelVisioner::rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
     releasebuffer_handle(rga_handle_dst);
 
     if (ret_rga <= 0) {
-        std::cerr << "[RGA Error] YUYV_422 -> NV12 failed: "
+        std::cerr << "[RGA Error] YVYU_422 -> NV12 failed: "
                   << imStrError(ret_rga) << std::endl;
         return false;
     }
