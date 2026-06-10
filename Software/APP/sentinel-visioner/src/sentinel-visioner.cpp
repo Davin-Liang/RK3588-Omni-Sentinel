@@ -125,6 +125,25 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
             ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_YUYV;
     }
 
+    // 驱动可能接受 NV12 但实际选了 MJPG，强制改回 YUYV
+    if (ctx->actualPixelFormat == V4L2_PIX_FMT_MJPEG) {
+        std::cout << "[USB Cam] Driver chose MJPG, forcing YUYV..." << std::endl;
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.type = ctx->v4l2BufType;
+        fmt.fmt.pix.width = ctx->width;
+        fmt.fmt.pix.height = ctx->height;
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+        fmt.fmt.pix.field = V4L2_FIELD_NONE;
+        if (ioctl(ctx->camFd, VIDIOC_S_FMT, &fmt) == 0) {
+            ioctl(ctx->camFd, VIDIOC_G_FMT, &fmt);
+            ctx->actualPixelFormat = fmt.fmt.pix.pixelformat;
+            ctx->srcBytesPerLine = fmt.fmt.pix.bytesperline;
+            ctx->width = fmt.fmt.pix.width;
+            ctx->height = fmt.fmt.pix.height;
+            std::cout << "[USB Cam] Forced to YUYV " << ctx->width << "x" << ctx->height << std::endl;
+        }
+    }
+
     // USB YUYV 需要中间 NV12 转换缓冲池
     if (ctx->actualPixelFormat == V4L2_PIX_FMT_YUYV) {
         ctx->usbConvertPool = std::make_unique<DmaBufferPool>();
@@ -448,60 +467,53 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     }
                 }
 
-                /* 从内存池获取空闲的 DMA 块 */
+                /* 从内存池获取空闲的 DMA 块。NPU 与预览各自独立，互不阻塞 */
                 DmaBuffer_t* targetNpuBuf = ctx->npuRgbPool->get_buffer();
                 DmaBuffer_t* targetPreviewBuf = ctx->previewPool->get_buffer();
 
+                auto start_time = std::chrono::high_resolution_clock::now();
+
+                // NPU 处理：有 buffer 就做，池空就跳过，不影响预览
                 if (targetNpuBuf != nullptr) {
-                    // TODO: 这里的偏移量(横向/纵向)通常由外部 IMU 陀螺仪计算后传入
-                    // 此处模拟获取实时的防抖平移参数
                     int currentHorizOffset = 0;
                     int currentVertOffset  = 0;
-
-                    // 记录时间戳
                     targetNpuBuf->timestampUs = timestampUs;
-                    if (targetPreviewBuf) targetPreviewBuf->timestampUs = timestampUs;
 
-                    auto start_time = std::chrono::high_resolution_clock::now();
-
-                    // 操作 A: RGA 缩放并转码给 NPU (1080P NV12 -> 640 RGB888)
                     bool npuOk = rga_process_to_rgb_(nv12DmaFd, ctx->width, ctx->height,
                                                     nv12Stride, targetNpuBuf,
                                                     currentHorizOffset, currentVertOffset);
-
-                    // 操作 B: RGA 转码 (1080P NV12 -> 1080P RGB888 预览)
-                    bool previewOk = true;
-                    if (targetPreviewBuf != nullptr) {
-                        previewOk = rga_convert_to_rgb_full_(nv12DmaFd, ctx->width, ctx->height,
-                                                              nv12Stride, targetPreviewBuf);
-                    }
-
                     if (npuOk) {
-                        ctx->npuTaskQueue.push(targetNpuBuf);
+                        // TODO: NPU 推理接入后改为 npuTaskQueue.push(targetNpuBuf)
+                        ctx->npuRgbPool->release_buffer(targetNpuBuf);
                     } else {
                         std::cerr << "[RGA Error] NPU 转换失败，归还内存." << std::endl;
                         ctx->npuRgbPool->release_buffer(targetNpuBuf);
                     }
-
-                    if (targetPreviewBuf != nullptr) {
-                        if (previewOk) {
-                            ctx->previewTaskQueue.push(targetPreviewBuf);
-                        } else {
-                            std::cerr << "[RGA Error] 预览转换失败，归还内存." << std::endl;
-                            ctx->previewPool->release_buffer(targetPreviewBuf);
-                        }
-                    }
-
-                    auto end_time = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                    if (raw_frame_count % 30 == 0)
-                        std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
-                } else {
-                    // 缓冲池干涸策略：通常意味着下游处理太慢，此时直接丢弃当前帧 (Drop Frame)
-                    std::cerr << "[Thread] Warning: RGA buffer pool empty! Dropping frame." << std::endl;
-                    if (targetNpuBuf) ctx->npuRgbPool->release_buffer(targetNpuBuf);
-                    if (targetPreviewBuf) ctx->previewPool->release_buffer(targetPreviewBuf);
                 }
+
+                // 预览处理：有 buffer 就做，池空就跳过，不影响 NPU
+                if (targetPreviewBuf != nullptr) {
+                    targetPreviewBuf->timestampUs = timestampUs;
+
+                    bool previewOk = rga_convert_to_rgb_full_(nv12DmaFd, ctx->width, ctx->height,
+                                                              nv12Stride, targetPreviewBuf);
+                    if (previewOk) {
+                        ctx->previewTaskQueue.push(targetPreviewBuf);
+                    } else {
+                        std::cerr << "[RGA Error] 预览转换失败，归还内存." << std::endl;
+                        ctx->previewPool->release_buffer(targetPreviewBuf);
+                    }
+                }
+
+                // 连预览 buffer 都拿不到，说明预览池已枯竭（下游消费太慢）
+                if (targetPreviewBuf == nullptr) {
+                    std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
+                }
+
+                auto end_time = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+                if (raw_frame_count % 30 == 0)
+                    std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
 
                 // 推流/录像用的 origCopy 缓冲区
                 {
@@ -707,6 +719,7 @@ bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeigh
     // 2. 包装 RGA Buffer
     rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, srcStride, srcHeight, srcFmt, srcStride, srcHeight);
     rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, dstFmt, dstBuf->width, dstBuf->height);
+    imsetColorSpace(&rga_buf_src, IM_YUV_BT601_LIMIT_RANGE);
 
     // 3. 计算 Letterbox 参数
     float scale = std::min((float)dstBuf->width / srcWidth, (float)dstBuf->height / srcHeight);
@@ -770,6 +783,7 @@ bool SentinelVisioner::rga_convert_to_rgb_full_(int srcFd, int srcWidth, int src
                                                   srcStride, srcHeight);
     rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, dstFmt,
                                                   dstBuf->width, dstBuf->height);
+    imsetColorSpace(&rga_buf_src, IM_YUV_BT601_LIMIT_RANGE);
 
     im_rect srect = { 0, 0, srcWidth, srcHeight };
     im_rect drect = { 0, 0, dstBuf->width, dstBuf->height };
