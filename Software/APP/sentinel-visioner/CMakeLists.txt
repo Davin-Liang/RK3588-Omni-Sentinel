@@ -44,15 +44,23 @@ add_library(sentinel_visioner_lib STATIC
 target_include_directories(sentinel_visioner_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${LIBRGA_INCLUDES}
+    ${FFMPEG_ROOT}/include
 )
 
 find_package(Threads REQUIRED)
+
+# FFmpeg (用于 MJPG 软件解码)
+set(FFMPEG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/ffmpeg)
+set(AVCODEC_LIB  ${FFMPEG_ROOT}/lib/libavcodec.so)
+set(AVUTIL_LIB   ${FFMPEG_ROOT}/lib/libavutil.so)
 
 # 链接对应的库
 target_link_libraries(sentinel_visioner_lib PUBLIC
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib
+    ${AVCODEC_LIB}
+    ${AVUTIL_LIB}
 )
 
 # 编译可执行测试程序 (Demo)

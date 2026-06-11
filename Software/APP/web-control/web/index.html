@@ -219,8 +219,12 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <div class="sys-card" style="flex:1">
         <div class="sys-title">系统控制</div>
         <div class="sys-row">
-          <span class="sys-label">相机1 录像分辨率</span>
-          <select id="resSelect" onchange="changeRes()"><option value="1080">1080p</option><option value="720">720p</option></select>
+          <span class="sys-label">相机1 录像</span>
+          <select id="resSelect0" onchange="changeRes(0)"><option value="1080">1080p</option><option value="720">720p</option></select>
+        </div>
+        <div class="sys-row">
+          <span class="sys-label">相机2 录像</span>
+          <select id="resSelect1" onchange="changeRes(1)"><option value="1080">1080p</option><option value="720">720p</option></select>
         </div>
         <div class="sys-row">
           <button class="btn btn-red" id="btnSystem" style="flex:1">关闭系统</button>
@@ -279,7 +283,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
-let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,fps:0,width:1280,height:720,recordResolution:720,recordingElapsedSec:0}};
+let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
 let trackingTargets=[],hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
@@ -344,7 +348,9 @@ function updateUI(data){
   }
   // System control (Qt → Web sync)
   if(data.system && !sysDirty){
-    document.getElementById('resSelect').value = data.system.recordResolution || 1080;
+    var r0=document.getElementById('resSelect0'), r1=document.getElementById('resSelect1');
+    if(document.activeElement!==r0) r0.value = (data.cam0&&data.cam0.recordResolution) || data.system.recordResolution || 1080;
+    if(document.activeElement!==r1) r1.value = (data.cam1&&data.cam1.recordResolution) || 1080;
   }
   // Fusion config (Qt → Web sync, reload when version changes)
   if(data.fusionConfigVersion !== undefined && data.fusionConfigVersion > fusionCfgVer && !fusionCfgDirty){
@@ -447,7 +453,8 @@ async function loadBacktrackFiles() {
 }
 
 // ===== Misc =====
-function changeRes(){sysDirty=true;api('PUT','/cam/0/record-resolution',{resolution:document.getElementById('resSelect').value+'p'}).then(()=>{sysDirty=false})}
+let sysDirtyTimer=0;
+function changeRes(n){sysDirty=true;clearTimeout(sysDirtyTimer);sysDirtyTimer=setTimeout(()=>{sysDirty=false},3000);api('PUT','/cam/'+n+'/record-resolution',{resolution:document.getElementById('resSelect'+n).value+'p'})}
 function updateClock(){const n=new Date();document.getElementById('clock').textContent=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0')+' '+String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0')+':'+String(n.getSeconds()).padStart(2,'0')}
 
 // ===== Init =====

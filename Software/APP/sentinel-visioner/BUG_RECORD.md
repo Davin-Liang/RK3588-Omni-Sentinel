@@ -132,3 +132,43 @@ buf.index = i;
 buf.m.planes = planes;
 buf.length = 1;
 ```
+
+---
+
+## 9. NPU 和预览共用 buffer 门控，NPU 池空导致预览停摆
+
+**现象**: 预览画面启动后约 8 帧卡住，日志刷 `[Thread] Warning: RGA buffer pool empty! Dropping frame.`，PreviewWorker 报 `no frame for N cycles`。
+
+**原因**: NPU 缓冲区和预览缓冲区的获取放在同一个 `if (targetNpuBuf != nullptr)` 门控内。`npuRgbPool` 只有 8 个 buffer，无人消费 `npuTaskQueue`，8 帧后 NPU 池枯竭 → `get_buffer()` 返回 nullptr → 跳过整个 NPU+预览处理块 → 预览帧停止产出。
+
+**解决**: 将 NPU 和预览处理拆为独立 `if` 块，各自 buffer 池互不阻塞。NPU buffer 无人消费时直接 `release_buffer` 回池子（预留 `TODO: NPU 推理接入后改为 npuTaskQueue.push`）。
+
+---
+
+## 10. USB 相机不支持 NV12，驱动接受 NV12 请求但实际选 MJPG → usbSafePool 空指针崩溃
+
+**现象**: 更换 USB 相机后程序启动即 segfault，dmesg 无 kernel 报错。G_FMT 读回 `actualPixelFormat = MJPG`。
+
+**原因**: `VIDIOC_S_FMT` 请求 NV12 时驱动未拒绝，但实际选了默认格式 MJPG。`usbSafePool` 仅在 `actualPixelFormat == NV12` 时分配，MJPG 路径进入 `camType == USB_CAM && convBufToRelease == nullptr` 分支后访问未分配的 `usbSafePool` → 空指针 segfault。
+
+**解决**: 新增 MJPG 格式检测，分配 `mjpegDecodePool`（FFmpeg 软件解码 NV12 输出池）。捕获线程新增 MJPG→NV12 解码分支（FFmpeg avcodec），解码后送入统一下游管线。
+
+---
+
+## 11. USB 相机声明 YUYV 但实际输出 YVYU，U/V 通道互换致肤色偏紫
+
+**现象**: USB 相机预览画面人脸肤色偏紫偏绿，类似中毒。ISP 相机正常。
+
+**原因**: RGA `rga_yuyv_to_nv12_()` 使用 `RK_FORMAT_YUYV_422`（Y0:U0:Y1:V0），但相机实际输出 YVYU（Y0:V0:Y1:U0）。U/V 通道互换后 RGA NV12→RGB 转换产生错误的红蓝色度，肤色变为紫色。
+
+**解决**: 将 RGA 源格式改为 `RK_FORMAT_YVYU_422`。
+
+---
+
+## 12. FFmpeg MJPG 解码器输出 YUVJ422P，UV 子采样处理错误
+
+**现象**: MJPG 1080p 画面显示正常但肤色再次偏色。
+
+**原因**: FFmpeg MJPEG 解码器输出 `yuvj422p`（YUJV 4:2:2 平面格式），U/V 平面高度与 Y 平面相同（非 4:2:0 的一半）。原有 YUV420P→NV12 打包代码按半高度采样 UV，丢失一半色度数据。
+
+**解决**: 检测实际像素格式，422 时 `uvRowStep = 2`（垂直跳行子采样），420 时 `uvRowStep = 1`（直通）。

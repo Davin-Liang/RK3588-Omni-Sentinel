@@ -20,6 +20,7 @@
 struct DmaBufferInfo {
     int index;
     int dmaFd;
+    void* virtAddr;  ///< MMAP 地址，供 CPU 读取 JPEG 等压缩数据
 };
 
 /**
@@ -56,6 +57,7 @@ struct CameraContext {
     std::unique_ptr<DmaBufferPool> previewPool;      ///< 1080P RGB888 预览图像内存池
     std::unique_ptr<DmaBufferPool> usbConvertPool;  ///< USB YUYV→NV12 中间转换缓冲池
     std::unique_ptr<DmaBufferPool> usbSafePool;     ///< USB NV12 安全拷贝缓冲池（RGA 兼容性）
+    std::unique_ptr<DmaBufferPool> mjpegDecodePool; ///< USB MJPG→NV12 软件解码输出池
 
     ThreadSafeQueue<DmaBuffer_t*> npuTaskQueue;      ///< 供 NPU 推理消费者消费的 640x640 RGB888 小图队列
     ThreadSafeQueue<DmaBuffer_t*> previewTaskQueue;   ///< 供预览消费者消费的 RGB888 图像队列
@@ -174,4 +176,7 @@ private:
     bool rga_copy_buffer_(int srcFd, int width, int height, int srcStride, DmaBuffer_t* dstBuf);
 
     bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight, int srcStride, DmaBuffer_t* dstBuf);
+
+    bool mjpeg_decode_to_nv12_(const uint8_t* jpegData, size_t jpegSize,
+                               DmaBuffer_t* dstBuf);
 };
