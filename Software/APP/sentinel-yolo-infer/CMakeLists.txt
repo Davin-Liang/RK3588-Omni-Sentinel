@@ -4,83 +4,83 @@ project(sentinel_yolo_infer)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--allow-shlib-undefined")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--allow-shlib-undefined")
 
-option(SENTINEL_YOLO_BUILD_DEMO "Build demo executable" ON)
-
-# 默认工程结构：
-# workspace/
-#   sentinel-visioner/
-#   sentinel-yolo-infer/
-# 可通过 -DSENTINEL_VISIONER_DIR=/path/to/sentinel-visioner 覆盖。
-set(WORKSPACE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "Workspace root directory")
-set(SENTINEL_VISIONER_DIR "${WORKSPACE_DIR}/sentinel-visioner" CACHE PATH "Path to sentinel-visioner project")
-
-# RKNN Runtime 并不要求目录名一定叫 rknpu2；只要能找到 rknn_api.h 和 librknnrt.so 即可。
-# 如果板端已经安装到系统路径，通常无需传参；否则可使用：
-#   -DRKNN_ROOT=/path/to/rknpu2
-# 或分别指定：
-#   -DRKNN_API_INCLUDE_DIR=/path/to/include -DRKNNRT_LIB=/path/to/librknnrt.so
-set(RKNN_ROOT "" CACHE PATH "Optional RKNN/rknpu2 root directory")
-set(RKNN_API_INCLUDE_DIR "" CACHE PATH "Directory containing rknn_api.h")
-set(RKNNRT_LIB "" CACHE FILEPATH "Path to librknnrt.so")
+option(SENTINEL_YOLO_BUILD_DEMO "Build sentinel-yolo-infer demo" ON)
 
 find_package(Threads REQUIRED)
 
-# ---------- RKNN auto-detect ----------
-if(NOT RKNN_API_INCLUDE_DIR)
-    set(_rknn_include_candidates
-        "${RKNN_ROOT}/runtime/Linux/librknn_api/include"
-        "${WORKSPACE_DIR}/rknpu2/runtime/Linux/librknn_api/include"
-        "/usr/include"
-        "/usr/local/include"
-        "/usr/include/rknn"
-        "/usr/local/include/rknn"
-    )
-    foreach(_dir ${_rknn_include_candidates})
-        if(EXISTS "${_dir}/rknn_api.h")
-            set(RKNN_API_INCLUDE_DIR "${_dir}" CACHE PATH "Directory containing rknn_api.h" FORCE)
-            break()
-        endif()
-    endforeach()
-endif()
+# ============================================================
+# CMAKE_CURRENT_SOURCE_DIR = APP/sentinel-yolo-infer
+# APP_ROOT_DIR             = APP
+# ============================================================
 
-if(NOT RKNNRT_LIB)
-    set(_rknn_lib_candidates
-        "${RKNN_ROOT}/runtime/Linux/librknn_api/aarch64/librknnrt.so"
-        "${WORKSPACE_DIR}/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"
-        "/usr/lib/librknnrt.so"
-        "/usr/local/lib/librknnrt.so"
-        "/usr/lib/aarch64-linux-gnu/librknnrt.so"
-        "/usr/local/lib/aarch64-linux-gnu/librknnrt.so"
-    )
-    foreach(_lib ${_rknn_lib_candidates})
-        if(EXISTS "${_lib}")
-            set(RKNNRT_LIB "${_lib}" CACHE FILEPATH "Path to librknnrt.so" FORCE)
-            break()
-        endif()
-    endforeach()
-endif()
+set(APP_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH "APP root directory")
+
+set(SENTINEL_VISIONER_DIR
+    "${APP_ROOT_DIR}/sentinel-visioner"
+    CACHE PATH "Path to sentinel-visioner project"
+)
+
+set(RKNN_API_INCLUDE_DIR
+    "${APP_ROOT_DIR}/3rdparty/rknpu2/include"
+    CACHE PATH "Directory containing rknn_api.h"
+)
+
+set(RKNNRT_LIB
+    "${APP_ROOT_DIR}/3rdparty/rknpu2/lib/librknnrt.so"
+    CACHE FILEPATH "Path to librknnrt.so"
+)
+
+# ============================================================
+# 检查 RKNN Runtime
+# ============================================================
 
 if(NOT EXISTS "${RKNN_API_INCLUDE_DIR}/rknn_api.h")
     message(FATAL_ERROR
-        "Cannot find rknn_api.h. Install RKNN Runtime or pass -DRKNN_ROOT=/path/to/rknpu2 "
-        "or -DRKNN_API_INCLUDE_DIR=/path/to/librknn_api/include")
+        "Cannot find rknn_api.h at: ${RKNN_API_INCLUDE_DIR}/rknn_api.h"
+    )
 endif()
 
-# ---------- sentinel-visioner dependency ----------
-# 如果上层工程已经 add_subdirectory(sentinel-visioner) 并定义 sentinel_visioner_lib，
-# 这里不会重复添加；否则默认从兄弟目录自动添加。
+if(NOT EXISTS "${RKNNRT_LIB}")
+    message(FATAL_ERROR
+        "Cannot find librknnrt.so at: ${RKNNRT_LIB}"
+    )
+endif()
+
+get_filename_component(RKNNRT_LIB_DIR "${RKNNRT_LIB}" DIRECTORY)
+
+# 运行时优先从 APP/3rdparty/rknpu2/lib 找 librknnrt.so
+set(CMAKE_BUILD_RPATH "${RKNNRT_LIB_DIR}")
+set(CMAKE_INSTALL_RPATH "${RKNNRT_LIB_DIR}")
+
+message(STATUS "APP_ROOT_DIR             = ${APP_ROOT_DIR}")
+message(STATUS "SENTINEL_VISIONER_DIR    = ${SENTINEL_VISIONER_DIR}")
+message(STATUS "RKNN_API_INCLUDE_DIR     = ${RKNN_API_INCLUDE_DIR}")
+message(STATUS "RKNNRT_LIB               = ${RKNNRT_LIB}")
+
+# ============================================================
+# sentinel-visioner 依赖
+# ============================================================
+
 if(NOT TARGET sentinel_visioner_lib)
     if(EXISTS "${SENTINEL_VISIONER_DIR}/CMakeLists.txt")
-        add_subdirectory(${SENTINEL_VISIONER_DIR} ${CMAKE_CURRENT_BINARY_DIR}/sentinel_visioner.out)
+        add_subdirectory(
+            ${SENTINEL_VISIONER_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}/sentinel_visioner.out
+        )
     else()
         message(FATAL_ERROR
-            "Cannot find sentinel-visioner. Expected at ${SENTINEL_VISIONER_DIR}. "
-            "Keep workspace/sentinel-visioner and workspace/sentinel-yolo-infer as sibling directories, "
-            "or pass -DSENTINEL_VISIONER_DIR=/path/to/sentinel-visioner")
+            "Cannot find sentinel-visioner at: ${SENTINEL_VISIONER_DIR}"
+        )
     endif()
 endif()
+
+# ============================================================
+# sentinel-yolo-infer 静态库
+# ============================================================
 
 add_library(sentinel_yolo_infer_lib STATIC
     src/SentinelYoloInfer.cpp
@@ -100,24 +100,26 @@ target_link_libraries(sentinel_yolo_infer_lib PUBLIC
     sentinel_visioner_lib
     Threads::Threads
     dl
+    ${RKNNRT_LIB}
 )
 
-if(RKNNRT_LIB)
-    target_link_libraries(sentinel_yolo_infer_lib PUBLIC ${RKNNRT_LIB})
-else()
-    # 若系统默认链接路径中已有 librknnrt.so，可直接链接 rknnrt。
-    target_link_libraries(sentinel_yolo_infer_lib PUBLIC rknnrt)
-endif()
+# ============================================================
+# demo
+# ============================================================
 
 if(SENTINEL_YOLO_BUILD_DEMO)
     add_executable(sentinel_yolo_infer_demo
         src/demo_yolo_infer.cpp
     )
-    target_link_libraries(sentinel_yolo_infer_demo PRIVATE sentinel_yolo_infer_lib)
+
+    target_link_libraries(sentinel_yolo_infer_demo PRIVATE
+        sentinel_yolo_infer_lib
+    )
 endif()
 
 install(TARGETS sentinel_yolo_infer_lib DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
+
 if(SENTINEL_YOLO_BUILD_DEMO)
     install(TARGETS sentinel_yolo_infer_demo DESTINATION bin)
 endif()
