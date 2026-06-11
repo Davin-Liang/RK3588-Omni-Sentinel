@@ -56,6 +56,7 @@ sentinel-visioner (相机视觉管线 + RGA 硬件加速)
   │           ├── 3rdparty/librga (RGA 2D 加速库)
   │           └── 3rdparty/libdrm (DRM 头文件 + .so)
   ├── 3rdparty/librga (直接依赖)
+  ├── 3rdparty/ffmpeg (libavcodec/libavutil，MJPG 软件解码)
   ├── 3rdparty/opencv (OpenCV 3.4.5, 预编译 aarch64)
   └── 3rdparty/rknpu2 (RKNN NPU 运行时，CMake 已就绪但未完全接入)
 
@@ -142,8 +143,8 @@ SentinelQT (QT5 嵌入式触控界面)
 
 支持两种相机类型混合接入，通过 `CameraType` 枚举区分（`ISP_CAM` / `USB_CAM`），两路通过 `camNum` 索引完全隔离：
 
-- **CameraContext**: 每路相机状态。包含 4~5 个 DmaBufferPool：`npuRgbPool`(640×640)、`previewPool`(全分辨率 RGB888)、`origCopyPool`(全分辨率 NV12)；USB 额外 `usbConvertPool`(YUYV→NV12) 和 `usbSafePool`(NV12 安全拷贝，4 buffer)
-- **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd。ISP 路径 MPLANE + NV12 直通；USB 路径单平面，先协商 NV12/YUYV 格式（NV12 不支持时回退 YUYV + RGA 转换）。USB NV12 先 `imcopy` 到 `usbSafePool`（缓解横向花屏问题，根因未确定），后续 RGA 操作从安全池读取。所有 `improcess` 使用 `IM_SYNC` 同步模式。
+- **CameraContext**: 每路相机状态。包含 5~7 个 DmaBufferPool：`npuRgbPool`(640×640)、`previewPool`(全分辨率 RGB888)、`origCopyPool`(全分辨率 NV12)；USB 额外 `usbConvertPool`(YUYV→NV12)、`usbSafePool`(NV12 安全拷贝，4 buffer)、`mjpegDecodePool`(MJPG→NV12 FFmpeg 软件解码输出，支持 1080p@30fps)
+- **捕获线程**: epoll 监听 V4L2 `VIDIOC_DQBUF`，只传递 dmaFd。ISP 路径 MPLANE + NV12 直通；USB 路径单平面，自动协商 NV12/YUYV/MJPG：NV12 直通，YUYV 时 RGA 硬件转为 NV12（含 YVYU 变体适配），MJPG 时 V4L2 buffer mmap 读取 JPEG 数据 → FFmpeg 软件解码为 NV12 → 统一下游管线。USB NV12 先 `imcopy` 到 `usbSafePool`（缓解横向花屏问题，根因未确定）。所有 `improcess` 使用 `IM_SYNC` 同步模式。
 - **消费者线程**: 通过 `wait_get_preview()` / `try_get_preview(camNum, timeoutMs)` / `wait_get_orig_copy_buffer()` 拉取，条件变量休眠（空闲 CPU 0.0%）。**必须调用对应的 `release_*()` 归还 DMA 缓冲区**
 - **camera_pause**: `camera_pause(camNum, paused)` 可在不执行 STREAMOFF 的前提下暂停/恢复 RGA 处理，避免 RK3588 ISP 管线重建问题
 - **ThreadSafeQueue**: 泛型阻塞队列模板（`include/ThreadSafeQueue.h`），`std::mutex` + `std::condition_variable`
@@ -199,7 +200,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **双路控制**: 每路相机独立 4 按钮（预览切换、推流、录像、暂停），全局系统按钮一键启停两路
 - **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
 - **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI。两路独立 RTSP URL
-- **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。USB 相机强制 720p
+- **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。双路均支持 1080p/720p 录制分辨率（底部栏 per-camera QComboBox 选择），Web 远程切换双向同步
 - **视频管理**: QTableWidget 列表展示录制文件（libavformat 读分辨率/时长），支持删除
 - **融合目标跟踪**: 第三页独立子页面，集成 SentinelLslidarer + LidarCameraFusion：
   - **俯视图**: `TopDownView` 自定义 QWidget，paintEvent 绘制距离网格、目标（按 TrackState 着色）、速度箭头、告警脉冲圈、中文图例
@@ -218,7 +219,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **线程模型**: 两个 PreviewWorker + 一个 FusionWorker 各自独立 QThread + std::atomic<bool>；LidarCameraFusion 内部 std::thread；主线程处理 UI 和定时器。FusionWorker 100ms 轮询 + 目标变化去重。析构逆序释放（FusionWorker → fusion → lidar → preview → visioner/streamer）
 - **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
 - **Web 远程控制**: 嵌入 WebServer（cpp-httplib），提供 REST API + WebSocket 实时推送。浏览器打开 `http://<IP>:8080` 即可远程操控。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889）
-- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]` 七节，USB 分辨率上限 720p 钳位
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]` 七节，USB 相机支持 1080p（MJPG 模式）
 
 关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置，`[Backtrack]` 节）、`build.sh`（构建脚本）
 
