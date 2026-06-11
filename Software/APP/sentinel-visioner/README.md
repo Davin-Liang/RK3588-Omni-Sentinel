@@ -9,13 +9,13 @@
 ## ✨ 核心架构与特性
 
 * **多路并发与一转多架构** ：基于 `epoll` 监听底层 V4L2 节点，单路物理视频流输入后，通过 RGA 硬件瞬间裂变为三路独立数据流（NPU 专用小图、1080P RGB888 预览图像、1080P 原始推流大图），互不干扰。
-* **双路双类型相机支持** ：统一 API 同时管理两路相机（CAM0 ISP 1080p + CAM1 USB 720p），通过 `CameraType` 枚举和 `camNum` 索引区分，每路拥有完全隔离的 DMA 内存池和捕获线程。USB 相机自动协商 NV12/YUYV 像素格式，NV12 直通，YUYV 时由 RGA 硬件转为 NV12 再送入统一下游管线。USB NV12 相机自带安全拷贝池（`usbSafePool`），缓解 DMA 缓冲区兼容性导致的横向花屏问题（根因待查，详见 BUG_RECORD.md #7）。
+* **双路双类型相机支持** ：统一 API 同时管理两路相机（CAM0 ISP 1080p + CAM1 USB），通过 `CameraType` 枚举和 `camNum` 索引区分，每路拥有完全隔离的 DMA 内存池和捕获线程。USB 相机自动协商 NV12/YUYV/MJPG 像素格式：NV12 直通，YUYV 时由 RGA 硬件转为 NV12，MJPG 时由 FFmpeg 软件解码为 NV12（支持 1080p@30fps）。USB NV12 相机自带安全拷贝池（`usbSafePool`），缓解 DMA 缓冲区兼容性导致的横向花屏问题（根因待查，详见 BUG_RECORD.md #7）。
 * **极致零拷贝 (Zero-Copy)** ：应用层不涉及任何内存映射 (`mmap`) 与 CPU 像素搬运，百兆级别的高清视频流转仅依靠轻量级的 DMA 文件描述符 (`dmaFd`) 传递。
 * **硬件级 ISP 与 RGA 联动** ：
 * **智能缩放与转换** ：纯硬件完成 `YCrCb_420_SP` (NV12) 到 `RGB_888` 的转换与等比例缩放。
 * **边缘填充 (Letterbox)** ：自动进行灰边 Padding 防脏数据。
 * **EIS 电子防抖接入点** ：原生预留有符号横纵坐标偏移量接口，无缝对接外部 IMU 陀螺仪数据进行像素级平移补偿。
-* **池化生命周期管理** ：每路相机内置 4~5 个独立的 `DmaBufferPool`（`npuRgbPool`、`previewPool`、`origCopyPool`；USB 额外 `usbConvertPool`、`usbSafePool`），不仅防止了内存碎片化，更通过严格的”借出-归还”机制彻底根绝了 Fd 句柄与 DMA 内存泄漏。
+* **池化生命周期管理** ：每路相机内置 5~7 个独立的 `DmaBufferPool`（`npuRgbPool`、`previewPool`、`origCopyPool`；USB 额外 `usbConvertPool`、`usbSafePool`、`mjpegDecodePool`），不仅防止了内存碎片化，更通过严格的"借出-归还"机制彻底根绝了 Fd 句柄与 DMA 内存泄漏。
 * **休眠级线程安全队列** ：内置基于条件变量（Condition Variable）的 `ThreadSafeQueue`，在无数据时彻底挂起消费者线程，告别自旋锁，CPU 空闲占用率降至  **0.0%** 。
 * **带超时的非阻塞拉取**：`try_get_preview(camNum, timeoutMs)` 支持毫秒级超时轮询，替代无限阻塞的 `wait_get_preview`，适合需要周期性检查退出标志的消费者线程。
 * **硬件流热暂停**：`camera_pause(camNum, paused)` 可在不执行 VIDIOC_STREAMOFF 的前提下暂停/恢复 RGA 处理，避免 V4L2 管线重建开销。

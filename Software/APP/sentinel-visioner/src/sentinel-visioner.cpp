@@ -6,6 +6,14 @@
 #include <cstring>
 #include <cerrno>
 #include <linux/dma-buf.h>
+#include <sys/mman.h>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
+}
 
 namespace {
 void sync_dma_buf_for_device(int fd) {
@@ -125,6 +133,19 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
             ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_YUYV;
     }
 
+    // USB MJPG 需要软件解码缓冲池（FFmpeg MJPG→NV12）
+    if (ctx->actualPixelFormat == V4L2_PIX_FMT_MJPEG) {
+        ctx->mjpegDecodePool = std::make_unique<DmaBufferPool>();
+        if (!ctx->mjpegDecodePool->alloc_pool(bufferCount, ctx->width, ctx->height,
+                                              BufferFormat::NV12)) {
+            std::cerr << "MJPG decode pool allocation failed!" << std::endl;
+            release_camera_resources_(ctx.get());
+            return false;
+        }
+        std::cout << "[USB Cam] MJPG mode, " << ctx->width << "x" << ctx->height
+                  << " bufferCount=" << bufferCount << std::endl;
+    }
+
     // USB YUYV 需要中间 NV12 转换缓冲池
     if (ctx->actualPixelFormat == V4L2_PIX_FMT_YUYV) {
         ctx->usbConvertPool = std::make_unique<DmaBufferPool>();
@@ -212,6 +233,27 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
             return false;
         }
         ctx->buffers[i].dmaFd = expbuf.fd;
+
+        // QUERYBUF 获取内存偏移，mmap 供 CPU 读取（MJPG 解码等场景）
+        struct v4l2_buffer qbuf = {};
+        qbuf.type = ctx->v4l2BufType;
+        qbuf.memory = V4L2_MEMORY_MMAP;
+        qbuf.index = i;
+        struct v4l2_plane qplanes[1] = {};
+        if (ctx->v4l2BufType == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+            qbuf.m.planes = qplanes;
+            qbuf.length = 1;
+        }
+        if (ioctl(ctx->camFd, VIDIOC_QUERYBUF, &qbuf) == 0) {
+            unsigned int offset = (ctx->v4l2BufType == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+                ? qbuf.m.planes[0].m.mem_offset : qbuf.m.offset;
+            unsigned int length = (ctx->v4l2BufType == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+                ? qbuf.m.planes[0].length : qbuf.length;
+            ctx->buffers[i].virtAddr = mmap(nullptr, length, PROT_READ | PROT_WRITE,
+                                            MAP_SHARED, ctx->camFd, offset);
+        } else {
+            ctx->buffers[i].virtAddr = nullptr;
+        }
 
         struct v4l2_buffer buf = {};
         buf.type = ctx->v4l2BufType;
@@ -359,9 +401,47 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                 // DMA 缓存同步: 确保 USB 相机写入的数据对 RGA 硬件可见
                 sync_dma_buf_for_device(currentDmaFd);
 
-                // USB YUYV→NV12 格式转换
                 int nv12DmaFd = currentDmaFd;
                 DmaBuffer_t* convBufToRelease = nullptr;
+
+                // USB MJPG→NV12 软件解码（FFmpeg）
+                if (ctx->actualPixelFormat == V4L2_PIX_FMT_MJPEG) {
+                    void* jpegVirtAddr = ctx->buffers[buf.index].virtAddr;
+                    if (!jpegVirtAddr || buf.bytesused == 0) {
+                        std::cerr << "[Thread] MJPG: no CPU mapping or zero size, drop" << std::endl;
+                        if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                            perror("[Thread] VIDIOC_QBUF requeue failed");
+                            ctx->isThreadRunning = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    DmaBuffer_t* decodeBuf = ctx->mjpegDecodePool->get_buffer();
+                    if (!decodeBuf) {
+                        std::cerr << "[Thread] MJPG decode pool empty! Dropping frame." << std::endl;
+                        if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                            perror("[Thread] VIDIOC_QBUF requeue failed");
+                            ctx->isThreadRunning = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    decodeBuf->timestampUs = timestampUs;
+                    if (!mjpeg_decode_to_nv12_((const uint8_t*)jpegVirtAddr, buf.bytesused, decodeBuf)) {
+                        std::cerr << "[Thread] MJPG decode failed, drop frame" << std::endl;
+                        ctx->mjpegDecodePool->release_buffer(decodeBuf);
+                        if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
+                            perror("[Thread] VIDIOC_QBUF requeue failed");
+                            ctx->isThreadRunning = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    nv12DmaFd = decodeBuf->dmaFd;
+                    convBufToRelease = decodeBuf;
+                }
+
+                // USB YUYV→NV12 格式转换
                 if (ctx->actualPixelFormat == V4L2_PIX_FMT_YUYV) {
                     DmaBuffer_t* convBuf = ctx->usbConvertPool->get_buffer();
                     if (convBuf == nullptr) {
@@ -399,7 +479,11 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                 // 暂停模式: 跳过所有 RGA 处理和队列推送，只归还 buffer
                 if (ctx->isPaused.load()) {
                     if (convBufToRelease != nullptr) {
-                        ctx->usbConvertPool->release_buffer(convBufToRelease);
+                        if (ctx->actualPixelFormat == V4L2_PIX_FMT_MJPEG) {
+                            ctx->mjpegDecodePool->release_buffer(convBufToRelease);
+                        } else {
+                            ctx->usbConvertPool->release_buffer(convBufToRelease);
+                        }
                     }
                     if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
                         perror("[Thread] VIDIOC_QBUF requeue failed");
@@ -448,60 +532,53 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     }
                 }
 
-                /* 从内存池获取空闲的 DMA 块 */
+                /* 从内存池获取空闲的 DMA 块。NPU 与预览各自独立，互不阻塞 */
                 DmaBuffer_t* targetNpuBuf = ctx->npuRgbPool->get_buffer();
                 DmaBuffer_t* targetPreviewBuf = ctx->previewPool->get_buffer();
 
+                auto start_time = std::chrono::high_resolution_clock::now();
+
+                // NPU 处理：有 buffer 就做，池空就跳过，不影响预览
                 if (targetNpuBuf != nullptr) {
-                    // TODO: 这里的偏移量(横向/纵向)通常由外部 IMU 陀螺仪计算后传入
-                    // 此处模拟获取实时的防抖平移参数
                     int currentHorizOffset = 0;
                     int currentVertOffset  = 0;
-
-                    // 记录时间戳
                     targetNpuBuf->timestampUs = timestampUs;
-                    if (targetPreviewBuf) targetPreviewBuf->timestampUs = timestampUs;
 
-                    auto start_time = std::chrono::high_resolution_clock::now();
-
-                    // 操作 A: RGA 缩放并转码给 NPU (1080P NV12 -> 640 RGB888)
                     bool npuOk = rga_process_to_rgb_(nv12DmaFd, ctx->width, ctx->height,
                                                     nv12Stride, targetNpuBuf,
                                                     currentHorizOffset, currentVertOffset);
-
-                    // 操作 B: RGA 转码 (1080P NV12 -> 1080P RGB888 预览)
-                    bool previewOk = true;
-                    if (targetPreviewBuf != nullptr) {
-                        previewOk = rga_convert_to_rgb_full_(nv12DmaFd, ctx->width, ctx->height,
-                                                              nv12Stride, targetPreviewBuf);
-                    }
-
                     if (npuOk) {
-                        ctx->npuTaskQueue.push(targetNpuBuf);
+                        // TODO: NPU 推理接入后改为 npuTaskQueue.push(targetNpuBuf)
+                        ctx->npuRgbPool->release_buffer(targetNpuBuf);
                     } else {
                         std::cerr << "[RGA Error] NPU 转换失败，归还内存." << std::endl;
                         ctx->npuRgbPool->release_buffer(targetNpuBuf);
                     }
-
-                    if (targetPreviewBuf != nullptr) {
-                        if (previewOk) {
-                            ctx->previewTaskQueue.push(targetPreviewBuf);
-                        } else {
-                            std::cerr << "[RGA Error] 预览转换失败，归还内存." << std::endl;
-                            ctx->previewPool->release_buffer(targetPreviewBuf);
-                        }
-                    }
-
-                    auto end_time = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                    if (raw_frame_count % 30 == 0)
-                        std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
-                } else {
-                    // 缓冲池干涸策略：通常意味着下游处理太慢，此时直接丢弃当前帧 (Drop Frame)
-                    std::cerr << "[Thread] Warning: RGA buffer pool empty! Dropping frame." << std::endl;
-                    if (targetNpuBuf) ctx->npuRgbPool->release_buffer(targetNpuBuf);
-                    if (targetPreviewBuf) ctx->previewPool->release_buffer(targetPreviewBuf);
                 }
+
+                // 预览处理：有 buffer 就做，池空就跳过，不影响 NPU
+                if (targetPreviewBuf != nullptr) {
+                    targetPreviewBuf->timestampUs = timestampUs;
+
+                    bool previewOk = rga_convert_to_rgb_full_(nv12DmaFd, ctx->width, ctx->height,
+                                                              nv12Stride, targetPreviewBuf);
+                    if (previewOk) {
+                        ctx->previewTaskQueue.push(targetPreviewBuf);
+                    } else {
+                        std::cerr << "[RGA Error] 预览转换失败，归还内存." << std::endl;
+                        ctx->previewPool->release_buffer(targetPreviewBuf);
+                    }
+                }
+
+                // 连预览 buffer 都拿不到，说明预览池已枯竭（下游消费太慢）
+                if (targetPreviewBuf == nullptr) {
+                    std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
+                }
+
+                auto end_time = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+                if (raw_frame_count % 30 == 0)
+                    std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
 
                 // 推流/录像用的 origCopy 缓冲区
                 {
@@ -524,12 +601,16 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     ctx->usbSafePool->release_buffer(safeBufToRelease);
                 }
 
-                // 归还 USB 转换缓冲
+                // 归还 USB 转换/解码缓冲
                 if (convBufToRelease != nullptr) {
-                    ctx->usbConvertPool->release_buffer(convBufToRelease);
+                    if (ctx->actualPixelFormat == V4L2_PIX_FMT_MJPEG) {
+                        ctx->mjpegDecodePool->release_buffer(convBufToRelease);
+                    } else {
+                        ctx->usbConvertPool->release_buffer(convBufToRelease);
+                    }
                 }
 
-                // ISP/YUYV 路径在这里归还相机缓冲区；USB NV12 路径已在上方归还
+                // ISP/YUYV/MJPG 路径在这里归还相机缓冲区；USB NV12 路径已在上方归还
                 if (ctx->camType != CameraType::USB_CAM || convBufToRelease != nullptr) {
                     if (ioctl(ctx->camFd, VIDIOC_QBUF, &buf) < 0) {
                         perror("[Thread] VIDIOC_QBUF requeue failed");
@@ -597,6 +678,11 @@ void SentinelVisioner::release_camera_resources_(CameraContext* ctx) {
     if (ctx->usbSafePool) {
         ctx->usbSafePool->destroy_pool();
         ctx->usbSafePool.reset();
+    }
+
+    if (ctx->mjpegDecodePool) {
+        ctx->mjpegDecodePool->destroy_pool();
+        ctx->mjpegDecodePool.reset();
     }
 }
 
@@ -829,7 +915,7 @@ bool SentinelVisioner::rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
         return false;
     }
 
-    int srcFmt = RK_FORMAT_YUYV_422;
+    int srcFmt = RK_FORMAT_YVYU_422;  // 部分 USB 相机实际 U/V 与 YUYV 相反
     int dstFmt = RK_FORMAT_YCrCb_420_SP;
 
     im_handle_param_t in_param = { srcWidth, srcHeight, srcFmt };
@@ -862,9 +948,89 @@ bool SentinelVisioner::rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
     releasebuffer_handle(rga_handle_dst);
 
     if (ret_rga <= 0) {
-        std::cerr << "[RGA Error] YUYV_422 -> NV12 failed: "
+        std::cerr << "[RGA Error] YVYU_422 -> NV12 failed: "
                   << imStrError(ret_rga) << std::endl;
         return false;
     }
+    return true;
+}
+
+bool SentinelVisioner::mjpeg_decode_to_nv12_(const uint8_t* jpegData, size_t jpegSize,
+                                            DmaBuffer_t* dstBuf) {
+    if (!jpegData || jpegSize == 0 || !dstBuf || dstBuf->dmaFd <= 0) return false;
+
+    const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
+    if (!codec) {
+        std::cerr << "[MJPG] avcodec_find_decoder failed" << std::endl;
+        return false;
+    }
+
+    AVCodecContext* decCtx = avcodec_alloc_context3(codec);
+    if (!decCtx) return false;
+
+    if (avcodec_open2(decCtx, codec, nullptr) < 0) {
+        avcodec_free_context(&decCtx);
+        return false;
+    }
+
+    AVPacket* pkt = av_packet_alloc();
+    if (!pkt) { avcodec_free_context(&decCtx); return false; }
+    pkt->data = const_cast<uint8_t*>(jpegData);
+    pkt->size = static_cast<int>(jpegSize);
+
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) { av_packet_free(&pkt); avcodec_free_context(&decCtx); return false; }
+
+    int ret = avcodec_send_packet(decCtx, pkt);
+    if (ret < 0) {
+        av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&decCtx);
+        return false;
+    }
+
+    ret = avcodec_receive_frame(decCtx, frame);
+    if (ret < 0) {
+        av_frame_free(&frame); av_packet_free(&pkt); avcodec_free_context(&decCtx);
+        return false;
+    }
+
+    static int dbgCount = 0;
+    if (dbgCount++ == 0) {
+        const char* fmtName = av_get_pix_fmt_name((AVPixelFormat)frame->format);
+        fprintf(stderr, "[MJPG] decoded fmt=%s(%d) %dx%d range=%d\n",
+                fmtName ? fmtName : "?", frame->format,
+                frame->width, frame->height, frame->color_range);
+    }
+
+    // YUV → NV12: 复制 Y 平面，UV 交错写（兼容 420/422 子采样）
+    uint8_t* dst = static_cast<uint8_t*>(dstBuf->virtAddr);
+    size_t ySize = static_cast<size_t>(dstBuf->width) * dstBuf->height;
+
+    if (frame->linesize[0] == dstBuf->width) {
+        memcpy(dst, frame->data[0], ySize);
+    } else {
+        for (int r = 0; r < dstBuf->height; ++r)
+            memcpy(dst + r * dstBuf->width, frame->data[0] + r * frame->linesize[0], dstBuf->width);
+    }
+
+    uint8_t* uvDst = dst + ySize;
+    int uvWidth = dstBuf->width / 2;
+    int uvHeight = dstBuf->height / 2;
+    bool is422 = (frame->format == AV_PIX_FMT_YUVJ422P ||
+                  frame->format == AV_PIX_FMT_YUV422P);
+    int uvRowStep = is422 ? 2 : 1;  // 422: UV rows = full height, subsample to half
+
+    for (int r = 0; r < uvHeight; ++r) {
+        int srcR = r * uvRowStep;
+        uint8_t* uSrc = frame->data[1] + srcR * frame->linesize[1];
+        uint8_t* vSrc = frame->data[2] + srcR * frame->linesize[2];
+        for (int c = 0; c < uvWidth; ++c) {
+            *uvDst++ = uSrc[c];
+            *uvDst++ = vSrc[c];
+        }
+    }
+
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    avcodec_free_context(&decCtx);
     return true;
 }
