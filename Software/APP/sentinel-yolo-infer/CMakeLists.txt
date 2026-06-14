@@ -78,7 +78,15 @@ target_link_libraries(sentinel_yolo_infer_demo
     sentinel_yolo_infer_lib
 )
 
+add_executable(sentinel_yolo_infer_dual_demo
+    src/demo_yolo_infer_dual.cpp
+)
+
+target_link_libraries(sentinel_yolo_infer_dual_demo
+    sentinel_yolo_infer_lib
+)
 # 安装规则
 install(TARGETS sentinel_yolo_infer_lib DESTINATION lib)
 install(TARGETS sentinel_yolo_infer_demo DESTINATION ./)
+install(TARGETS sentinel_yolo_infer_dual_demo DESTINATION ./)
 install(DIRECTORY include/ DESTINATION include)
