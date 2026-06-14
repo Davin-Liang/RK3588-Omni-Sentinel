@@ -286,9 +286,225 @@ void run_benchmark() {
     std::cout << "==========================================" << std::endl;
 }
 
-int main() {
+// ============================================================
+//  export_trigger_video_clip 功能测试
+//  模拟前/后双摄像头采集6色循环动态场景，验证回溯10s时间窗口导出
+// ============================================================
+void test_export_video_clip() {
+    // 参数配置
+    static constexpr int FRAME_WIDTH       = 1920;
+    static constexpr int FRAME_HEIGHT      = 1080;
+    static constexpr size_t FRAME_SIZE     = FRAME_WIDTH * FRAME_HEIGHT * 3;  // RGB888
+    static constexpr int FPS               = 15;
+    static constexpr double TIME_WINDOW    = 10.0;        // 回溯10秒
+    static constexpr int TEST_DURATION_SEC = 35;          // 35s，保证前后各有充足帧
+    static constexpr int COLOR_INTERVAL_SEC = 1;          // 每秒切换一种颜色
+    static constexpr int NUM_COLORS          = 6;
+    static constexpr int NUM_FRONT_COLORS    = 3;   // 前视: 红绿蓝
+    static constexpr int NUM_REAR_COLORS     = 3;   // 后视: 黄黑紫
+
+    // 六种纯色定义 (RGB)
+    struct ColorInfo {
+        const char* name;
+        uint8_t r, g, b;
+    };
+    static const ColorInfo COLORS[NUM_COLORS] = {
+        {"红", 255,   0,   0},
+        {"绿",   0, 255,   0},
+        {"蓝",   0,   0, 255},
+        {"黄", 255, 255,   0},
+        {"黑",   0,   0,   0},
+        {"紫", 255,   0, 255},
+    };
+
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "  export_trigger_video_clip 功能测试" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "图像格式: RGB888 " << FRAME_WIDTH << "x" << FRAME_HEIGHT
+              << " (" << (FRAME_SIZE / 1024.0 / 1024.0) << " MB/帧)" << std::endl;
+    std::cout << "帧率: " << FPS << " FPS | 时间窗口: 回溯 " << TIME_WINDOW << "s" << std::endl;
+    std::cout << "测试时长: " << TEST_DURATION_SEC << "s" << std::endl;
+    std::cout << "颜色策略: 每秒切换 | 前视(红→绿→蓝) | 后视(黄→黑→紫)" << std::endl;
+    std::cout << "摄像头: 前视 + 后视 双路同时写入" << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
+
+    // ---- Step 1: CPU 预生成6张纯色图片 ----
+    std::cout << "Step 1/4: CPU 预生成6张纯色图片..." << std::endl;
+    uint8_t* color_frames[NUM_COLORS];
+    for (int i = 0; i < NUM_COLORS; i++) {
+        if (posix_memalign((void**)&color_frames[i], 512, FRAME_SIZE) != 0) {
+            std::cerr << "posix_memalign 失败 at index " << i << std::endl;
+            for (int j = 0; j < i; j++) free(color_frames[j]);
+            return;
+        }
+        for (size_t p = 0; p < FRAME_SIZE; p += 3) {
+            color_frames[i][p + 0] = COLORS[i].r;
+            color_frames[i][p + 1] = COLORS[i].g;
+            color_frames[i][p + 2] = COLORS[i].b;
+        }
+        std::cout << "  [" << i << "] " << COLORS[i].name
+                  << " RGB(" << (int)COLORS[i].r << ","
+                  << (int)COLORS[i].g << "," << (int)COLORS[i].b << ")" << std::endl;
+    }
+
+    // ---- Step 2: 初始化 NVMe 并双路写入 ----
+    NVMeDataManager nvme_manager;
+    if (!nvme_manager.initialize()) {
+        std::cerr << "NVMe 初始化失败！" << std::endl;
+        for (int i = 0; i < NUM_COLORS; i++) free(color_frames[i]);
+        return;
+    }
+
+    std::cout << "\nStep 2/4: 循环写入双路模拟视频帧 " << TEST_DURATION_SEC << "s..." << std::endl;
+
+    // 记录每路的时间戳和对应颜色索引
+    std::vector<uint64_t> front_ts, rear_ts;
+    std::vector<int> front_color_idx, rear_color_idx;
+    front_ts.reserve(FPS * TEST_DURATION_SEC);
+    rear_ts.reserve(FPS * TEST_DURATION_SEC);
+    front_color_idx.reserve(FPS * TEST_DURATION_SEC);
+    rear_color_idx.reserve(FPS * TEST_DURATION_SEC);
+
+    int frame_count = 0, fail_count = 0;
+    auto test_start = std::chrono::steady_clock::now();
+    auto last_frame = test_start;
+
+    signal(SIGINT, signal_handler);
+    g_running = true;
+
+    while (g_running) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+            now - test_start).count();
+        if (elapsed_s >= TEST_DURATION_SEC) break;
+
+        auto frame_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_frame).count();
+        if (frame_ms >= (1000 / FPS)) {
+            // 根据时间确定当前颜色
+            // 前视: 循环 红(0)→绿(1)→蓝(2)
+            // 后视: 循环 黄(3)→黑(4)→紫(5)
+            int front_color = (elapsed_s / COLOR_INTERVAL_SEC) % NUM_FRONT_COLORS;
+            int rear_color  = NUM_FRONT_COLORS + (elapsed_s / COLOR_INTERVAL_SEC) % NUM_REAR_COLORS;
+
+            uint64_t ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now.time_since_epoch()).count();
+
+            auto t0 = std::chrono::steady_clock::now();
+
+            // 前视摄像头（前3色: 红绿蓝）
+            bool f_ok = nvme_manager.write_video_frame_to_disk(
+                color_frames[front_color], FRAME_SIZE, ts, true);
+            if (f_ok) {
+                front_ts.push_back(ts);
+                front_color_idx.push_back(front_color);
+            }
+
+            // 后视摄像头（后3色: 黄黑紫）
+            bool r_ok = nvme_manager.write_video_frame_to_disk(
+                color_frames[rear_color], FRAME_SIZE, ts, false);
+            if (r_ok) {
+                rear_ts.push_back(ts);
+                rear_color_idx.push_back(rear_color);
+            }
+
+            auto dt_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            frame_count++;
+            if (!f_ok || !r_ok) fail_count++;
+
+            // 前5帧 + 每75帧打印进度
+            if (frame_count <= 5 || frame_count % 75 == 0) {
+                std::cout << "[#" << frame_count << " t+" << elapsed_s << "s] "
+                          << "前视=" << COLORS[front_color].name
+                          << " 后视=" << COLORS[rear_color].name
+                          << " ts=" << ts
+                          << " " << std::fixed << std::setprecision(1)
+                          << (dt_us / 1000.0) << "ms"
+                          << (f_ok && r_ok ? "" : " FAIL") << std::endl;
+            }
+
+            last_frame = now;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::cout << "写入完毕: " << frame_count << " 帧"
+              << " | 前视=" << front_ts.size()
+              << " 后视=" << rear_ts.size()
+              << " 失败=" << fail_count << std::endl;
+
+    // ---- Step 3: 关闭写入线程 ----
+    nvme_manager.shutdown();
+    for (int i = 0; i < NUM_COLORS; i++) free(color_frames[i]);
+    std::cout << "\nStep 3/4: NVMe 写入线程已关闭，准备导出..." << std::endl;
+
+    // ---- Step 4: 导出两个摄像头的视频 ----
+    // 选取靠后的触发点（倒数第 N 帧），确保前面有足够10s数据
+    size_t trigger_offset = static_cast<size_t>(FPS * 2);  // 倒数 ~2s
+    const std::string outputs[2] = {
+        "/tmp/front_camera_clip.mp4",
+        "/tmp/rear_camera_clip.mp4",
+    };
+
+    std::cout << "\nStep 4/4: 导出视频片段 (回溯 " << TIME_WINDOW << "s)..." << std::endl;
+
+    for (int cam = 0; cam < 2; cam++) {
+        const auto& ts_vec     = (cam == 0) ? front_ts  : rear_ts;
+        const auto& color_vec  = (cam == 0) ? front_color_idx : rear_color_idx;
+        const char* cam_name   = (cam == 0) ? "前视"   : "后视";
+
+        if (ts_vec.size() < static_cast<size_t>(FPS * TIME_WINDOW)) {
+            std::cerr << "  " << cam_name << ": 帧数不足，跳过 (需要"
+                      << static_cast<int>(FPS * TIME_WINDOW) << "帧)" << std::endl;
+            continue;
+        }
+
+        size_t t_idx = ts_vec.size() - trigger_offset;
+        uint64_t trigger_ts = ts_vec[t_idx];
+
+        std::cout << "  --- " << cam_name << "摄像头 ---" << std::endl;
+        std::cout << "  触发时间戳: " << trigger_ts
+                  << " (帧索引: " << t_idx << "/" << ts_vec.size() << ")" << std::endl;
+        std::cout << "  触发时颜色: " << COLORS[color_vec[t_idx]].name << std::endl;
+
+        auto t0 = std::chrono::steady_clock::now();
+        // camera_id: 0=前视(VIDEO_FRONT), 1=后视(VIDEO_REAR), -1=全部
+        bool ok = nvme_manager.export_trigger_video_clip(
+            trigger_ts, outputs[cam], TIME_WINDOW, FPS,
+            FRAME_WIDTH, FRAME_HEIGHT, cam);
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+
+        std::cout << "  " << cam_name << "导出: " << (ok ? "成功 ✓" : "失败 ✗")
+                  << " | 耗时=" << dt << "ms"
+                  << " | 文件=" << outputs[cam] << std::endl;
+    }
+
+    // ---- 结果汇总 ----
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "  测试完成" << std::endl;
+    std::cout << "  前视视频: /tmp/front_camera_clip.mp4" << std::endl;
+    std::cout << "  后视视频: /tmp/rear_camera_clip.mp4" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "  验证方法:" << std::endl;
+    std::cout << "  1. 前视视频应每1s切换: 红→绿→蓝 (仅3色循环)" << std::endl;
+    std::cout << "  2. 后视视频应每1s切换: 黄→黑→紫 (仅3色循环)" << std::endl;
+    std::cout << "  3. 如果颜色持续变化，说明时间窗口导出正确" << std::endl;
+    std::cout << "  4. 如果全是一帧重复或颜色不对，说明匹配失败" << std::endl;
+    std::cout << "==========================================" << std::endl;
+}
+
+int main(int argc, char* argv[]) {
     try {
-        run_benchmark();
+        if (argc > 1 && std::string(argv[1]) == "bench") {
+            run_benchmark();
+        } else if (argc > 1 && std::string(argv[1]) == "export") {
+            test_export_video_clip();
+        } else {
+            // 默认：运行 Benchmark
+            run_benchmark();
+        }
     } catch (const std::exception& e) {
         std::cerr << "异常: " << e.what() << std::endl;
         return 1;
