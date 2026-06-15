@@ -551,6 +551,7 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                         // TODO: NPU 推理接入后改为 npuTaskQueue.push(targetNpuBuf)
                         //ctx->npuRgbPool->release_buffer(targetNpuBuf);
                         ctx->npuTaskQueue.push(targetNpuBuf);
+
                     } else {
                         std::cerr << "[RGA Error] NPU 转换失败，归还内存." << std::endl;
                         ctx->npuRgbPool->release_buffer(targetNpuBuf);

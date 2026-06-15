@@ -212,9 +212,13 @@ Widget::Widget(QWidget *parent)
 
     load_config_();
 
-    // Resolution combo — controls cam0 record resolution only
+    // Resolution combo — CAM0
     int res0 = recordResolution_[0];
     ui->resCombo->setCurrentIndex(res0 == 720 ? 1 : 0);
+
+    // Resolution combo — CAM1
+    int res1 = recordResolution_[1];
+    ui->resCombo1->setCurrentIndex(res1 == 720 ? 1 : 0);
 
     // 居中 QComboBox 文字
     class CenterDelegate : public QStyledItemDelegate {
@@ -228,11 +232,18 @@ Widget::Widget(QWidget *parent)
         }
     };
     ui->resCombo->setItemDelegate(new CenterDelegate(ui->resCombo));
+    ui->resCombo1->setItemDelegate(new CenterDelegate(ui->resCombo1));
 
     connect(ui->resCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
         recordResolution_[0] = (idx == 1) ? 720 : 1080;
         config_.setValue("Camera0/recordResolution", recordResolution_[0]);
+    });
+
+    connect(ui->resCombo1, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        recordResolution_[1] = (idx == 1) ? 720 : 1080;
+        config_.setValue("Camera1/recordResolution", recordResolution_[1]);
     });
 
     // Per-camera button wiring
@@ -430,18 +441,7 @@ void Widget::load_config_()
     rtspUrl_[1]        = config_.value("Camera1/streamUrl", "rtsp://127.0.0.1:8554/live/cam1").toString();
     recordResolution_[1] = config_.value("Camera1/recordResolution", 720).toInt();
 
-    // USB 720p 强制夹紧
-    if (camWidth_[1] > 1280 || camHeight_[1] > 720) {
-        fprintf(stderr, "[SentinelQT] USB 相机分辨率 %dx%d 超出 720p，已限制为 1280x720\n",
-                camWidth_[1], camHeight_[1]);
-        camWidth_[1]  = 1280;
-        camHeight_[1] = 720;
-    }
-    if (recordResolution_[1] > 720) {
-        fprintf(stderr, "[SentinelQT] USB 录像分辨率 %d 超出 720p，已限制为 720\n",
-                recordResolution_[1]);
-        recordResolution_[1] = 720;
-    }
+    // USB 分辨率允许 1080p（MJPG 硬件支持 30fps）
 
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
 
@@ -1814,9 +1814,7 @@ std::string Widget::web_set_record_resolution_(int camNum, const std::string& bo
         std::string res = j.value("resolution", "1080p");
         int val = (res == "720p") ? 720 : 1080;
         recordResolution_[camNum] = val;
-        if (camNum == 0) {
-            ui->resCombo->setCurrentIndex(val == 720 ? 1 : 0);
-        }
+        (camNum == 0 ? ui->resCombo : ui->resCombo1)->setCurrentIndex(val == 720 ? 1 : 0);
         config_.setValue(QString("Camera%1/recordResolution").arg(camNum), val);
         return R"({"ok":true})";
     } catch (...) {
