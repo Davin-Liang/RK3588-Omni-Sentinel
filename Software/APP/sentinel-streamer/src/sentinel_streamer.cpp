@@ -44,6 +44,7 @@ struct StreamerContext {
     bool recordEnabled;
     uint64_t baselineTsUs;  // 录制/推流开始时的系统时间，PTS 以此为基准
     StreamOsdMode osdMode;
+    StreamOsdProvider osdProvider;
 
     // 录像参数
     RecordResolution recordResolution;
@@ -89,6 +90,144 @@ struct StreamerContext {
         streamUrl[0] = '\0';
     }
 };
+
+// ============================================================================
+// OSD 绘制 — NV12 矩形边框 + 文字标签（CPU 直接写 DMA buffer）
+// ============================================================================
+
+// 3x5 迷你点阵字体（数字 0-9 + "person" 字符 + '.'）
+namespace {
+struct Glyph { uint8_t w; uint8_t rows[5]; };  // 最大 5 行
+
+bool glyphsInit = false;
+Glyph g[128];
+
+void initGlyphs_() {
+    if (glyphsInit) return;
+    // clang-format off
+    g['0'] = {3, {0x7,0x5,0x5,0x5,0x7}};
+    g['1'] = {3, {0x2,0x6,0x2,0x2,0x7}};
+    g['2'] = {3, {0x7,0x1,0x7,0x4,0x7}};
+    g['3'] = {3, {0x7,0x1,0x3,0x1,0x7}};
+    g['4'] = {3, {0x5,0x5,0x7,0x1,0x1}};
+    g['5'] = {3, {0x7,0x4,0x7,0x1,0x7}};
+    g['6'] = {3, {0x7,0x4,0x7,0x5,0x7}};
+    g['7'] = {3, {0x7,0x1,0x2,0x2,0x2}};
+    g['8'] = {3, {0x7,0x5,0x7,0x5,0x7}};
+    g['9'] = {3, {0x7,0x5,0x7,0x1,0x7}};
+    g['.'] = {1, {0x0,0x0,0x0,0x0,0x1}};
+    g['p'] = {3, {0x7,0x5,0x7,0x4,0x4}};
+    g['e'] = {3, {0x7,0x4,0x7,0x4,0x7}};
+    g['r'] = {3, {0x5,0x6,0x4,0x4,0x4}};
+    g['s'] = {3, {0x7,0x4,0x7,0x1,0x7}};
+    g['o'] = {3, {0x7,0x5,0x5,0x5,0x7}};
+    g['n'] = {3, {0x7,0x5,0x5,0x5,0x5}};
+    g[' '] = {2, {0x0,0x0,0x0,0x0,0x0}};
+    // clang-format on
+    glyphsInit = true;
+}
+
+// 在 Y 平面绘制 2x 放大的 3x5 字体字符（最终 6x10 px），返回绘制宽度
+int draw_char_2x(uint8_t* yPlane, int stride, int cx, int cy, char ch, uint8_t val) {
+    const Glyph& gl = g[static_cast<unsigned char>(ch)];
+    if (gl.w == 0) return 0;
+    for (int row = 0; row < 5; ++row) {
+        for (int col = 0; col < gl.w; ++col) {
+            if (gl.rows[row] & (1 << (gl.w - 1 - col))) {
+                int py = cy + row * 2;
+                int px = cx + col * 2;
+                yPlane[py * stride + px] = val;
+                yPlane[py * stride + px + 1] = val;
+                yPlane[(py + 1) * stride + px] = val;
+                yPlane[(py + 1) * stride + px + 1] = val;
+            }
+        }
+    }
+    return gl.w * 2 + 1;  // char width + 1px gap
+}
+
+// 绘制文字串，返回总宽度
+int draw_text_2x(uint8_t* yPlane, int stride, int cx, int cy,
+                  const char* text, uint8_t val) {
+    initGlyphs_();
+    int x = cx;
+    for (const char* p = text; *p; ++p) {
+        x += draw_char_2x(yPlane, stride, x, cy, *p, val);
+    }
+    return x - cx;
+}
+} // anonymous namespace
+
+static void draw_osd_boxes_(void* virtAddr, const std::vector<StreamOsdBBox>& boxes,
+                            int srcWidth, int srcHeight)
+{
+    if (!virtAddr || boxes.empty() || srcWidth <= 0 || srcHeight <= 0) return;
+
+    initGlyphs_();
+
+    uint8_t* yPlane = static_cast<uint8_t*>(virtAddr);
+    const int kStride = 1280;
+    const int kMaxY = 719;
+
+    // 计算 letterbox 参数（与 rga_process_to_rgb_ 一致）
+    float scale   = (std::min)(640.0f / srcWidth, 640.0f / srcHeight);
+    float scaledH = srcHeight * scale;
+    float padY    = (640.0f - scaledH) / 2.0f;
+
+    for (const auto& b : boxes) {
+        if (b.classId != 0) continue;   // 只叠加 person
+
+        // 640x640 NPU letterbox → 原始分辨率
+        float xo = b.x1 / scale;
+        float yo = (b.y1 - padY) / scale;
+        float wo = (b.x2 - b.x1) / scale;
+        float ho = (b.y2 - b.y1) / scale;
+
+        // 原始分辨率 → 1280x720
+        int bx1 = static_cast<int>(xo * 1280.0f / srcWidth);
+        int by1 = static_cast<int>(yo * 720.0f / srcHeight);
+        int bx2 = static_cast<int>((xo + wo) * 1280.0f / srcWidth);
+        int by2 = static_cast<int>((yo + ho) * 720.0f / srcHeight);
+
+        // 裁剪
+        bx1 = (std::max)(0, bx1); by1 = (std::max)(0, by1);
+        bx2 = (std::min)(kStride - 1, bx2); by2 = (std::min)(kMaxY, by2);
+        if (bx1 >= bx2 || by1 >= by2) continue;
+
+        // 画白色边框（Y 平面 2px，不碰 UV）
+        for (int x = bx1; x <= bx2; ++x) {
+            yPlane[by1 * kStride + x] = 255;
+            if (by1 + 1 < 720) yPlane[(by1 + 1) * kStride + x] = 255;
+            yPlane[by2 * kStride + x] = 255;
+            if (by2 - 1 >= 0) yPlane[(by2 - 1) * kStride + x] = 255;
+        }
+        for (int y = by1; y <= by2; ++y) {
+            yPlane[y * kStride + bx1] = 255;
+            if (bx1 + 1 < kStride) yPlane[y * kStride + bx1 + 1] = 255;
+            yPlane[y * kStride + bx2] = 255;
+            if (bx2 - 1 >= 0) yPlane[y * kStride + bx2 - 1] = 255;
+        }
+
+        // 画标签（框顶上方，深色底 + 白色字）
+        char label[32];
+        snprintf(label, sizeof(label), "person %.2f",
+                 static_cast<double>(b.confidence));
+        int labelW = 0;
+        for (const char* p = label; *p; ++p) {
+            labelW += g[static_cast<unsigned char>(*p)].w * 2 + 1;
+        }
+        int lx = bx1 + 3;
+        int ly = (std::max)(2, by1 - 12);  // 标签 10px 高 + 2px 边距
+        // 标签背景
+        for (int y = ly; y < ly + 11 && y < 720; ++y) {
+            for (int x = lx; x < lx + labelW + 4 && x < kStride; ++x) {
+                yPlane[y * kStride + x] = 60;  // 深灰背景
+            }
+        }
+        // 标签文字（白色）
+        draw_text_2x(yPlane, kStride, lx + 2, ly + 1, label, 255);
+    }
+}
 
 // ============================================================================
 // 推流线程主循环
@@ -168,12 +307,20 @@ static void stream_thread_func_(StreamerContext* ctx)
         // ----------------------------------------------------------------
         // 步骤 4: 归还原始 DMA 缓冲
         // ----------------------------------------------------------------
+        int srcW = origBuf->width;
+        int srcH = origBuf->height;
         ctx->visioner->release_orig_copy_buffer(ctx->camNum, origBuf);
 
         // ----------------------------------------------------------------
         // 步骤 5a: 720p RTSP 推流 (streamEncCtx → RTSP)
         // ----------------------------------------------------------------
         if (scaleBuf && ctx->streamEnabled && ctx->streamEncCtx) {
+            if (ctx->osdMode == StreamOsdMode::WITH_OSD && ctx->osdProvider) {
+                std::vector<StreamOsdBBox> boxes;
+                if (ctx->osdProvider(ctx->camNum, boxes, 5)) {
+                    draw_osd_boxes_(scaleBuf->virtAddr, boxes, srcW, srcH);
+                }
+            }
             encode_and_mux(ctx->streamEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
                            pts,
@@ -449,22 +596,17 @@ bool SentinelStreamer::set_stream_osd_mode(int camNum, StreamOsdMode mode)
     if (camNum < 0 || camNum > 1 || !contexts_[camNum]) {
         return false;
     }
-
-    StreamerContext* ctx = contexts_[camNum];
-
-    if (ctx->streamEnabled) {
-        fprintf(stderr, "[SentinelStreamer] cannot change OSD mode while streaming\n");
-        return false;
-    }
-
-    ctx->osdMode = mode;
-
-    if (mode == StreamOsdMode::WITH_OSD) {
-        // 预留：有 OSD 的 720p 推流暂未实现
-        fprintf(stderr, "[SentinelStreamer] OSD mode set to WITH_OSD (stub, not implemented)\n");
-    }
-
+    contexts_[camNum]->osdMode = mode;
     return true;
+}
+
+void SentinelStreamer::set_osd_provider(StreamOsdProvider provider)
+{
+    for (int i = 0; i < 2; ++i) {
+        if (contexts_[i]) {
+            contexts_[i]->osdProvider = provider;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

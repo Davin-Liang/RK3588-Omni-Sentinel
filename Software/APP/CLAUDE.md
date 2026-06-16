@@ -58,10 +58,17 @@ sentinel-visioner (相机视觉管线 + RGA 硬件加速)
   ├── 3rdparty/librga (直接依赖)
   ├── 3rdparty/ffmpeg (libavcodec/libavutil，MJPG 软件解码)
   ├── 3rdparty/opencv (OpenCV 3.4.5, 预编译 aarch64)
-  └── 3rdparty/rknpu2 (RKNN NPU 运行时，CMake 已就绪但未完全接入)
+  └── 3rdparty/rknpu2 (RKNN NPU 运行时)
+
+sentinel-yolo-infer (RKNN YOLOv8 NPU 推理)
+  ├── sentinel-visioner (通过 wait_get_npu/try_get_npu 获取 640x640 RGB888 小图)
+  ├── 3rdparty/rknpu2 (librknnrt.so, DMA-BUF fd 零拷贝导入 RKNN)
+  ├── lidar-camera-fusion (复用 YoloBBox 类型定义)
+  └── Threads::Threads + libdl (pthread + dlopen)
 
 lidar-camera-fusion (视觉-雷达数据融合，纯算法组件)
-  └── sentinel-lslidarer/include (仅依赖 LidarPoint/LidarFrame 类型定义)
+  ├── sentinel-lslidarer/include (仅依赖 LidarPoint/LidarFrame 类型定义)
+  └── DetectionProvider 回调解耦 (不直接依赖 sentinel-yolo-infer)
 
 web-control (Web 远程控制组件)
   ├── cpp-httplib (单头文件 HTTP/WebSocket 库, MIT)
@@ -71,20 +78,22 @@ web-control (Web 远程控制组件)
 sentinel-lslidarer (激光雷达驱动，完全独立)
   └── Threads::Threads (唯一外部依赖)
 
-sentinel-streamer (推流与录像组件)
+sentinel-streamer (推流与录像 + OSD 叠加组件)
   ├── sentinel-visioner (依赖头文件 + 运行时调用 wait/get/release 接口)
   ├── dma-buffer-pool (720p 中间缩放缓冲池 + RecordBufferPool 录像帧环形缓冲)
   ├── 3rdparty/librga (1080p→720p NV12 硬件缩放 + rga_nv12_copy DMA 零拷贝)
-  └── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
+  ├── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
+  └── StreamOsdProvider 回调 (推理结果 → NV12 CPU 绘制，不依赖 yolo-infer 头文件)
 
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
-  ├── sentinel-streamer (推流/录像启停控制)
+  ├── sentinel-yolo-infer (NPU 推理实例管理，懒加载创建/销毁)
+  ├── sentinel-streamer (推流/录像启停 + OSD provider 绑定)
   ├── web-control (嵌入进程内 HTTP/WebSocket 服务器, REST API 远程控制)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
-  ├── Qt5 Widgets (QStackedWidget 三页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] 节)
+  ├── Qt5 Widgets (QStackedWidget 四页布局)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] 节，Fusion 含 modelPath 和外参)
 ```
 
 ### web-control — Web 远程控制组件
@@ -133,6 +142,20 @@ SentinelQT (QT5 嵌入式触控界面)
 - `update_camera_intrinsics(camIndex, fx, fy, cx, cy, w, h)` — 运行时更新相机内参（保留外参矩阵）
 - `get_cam_count()` — 获取当前相机数量
 - `configure_tracker(config)` — 支持运行时热更新（已移除 `trackingEnabled_` 前置守卫）
+- `set_detection_provider(provider)` — 设置外部 YOLO 检测提供者，替换内部假检测回退
+
+### sentinel-yolo-infer — RKNN YOLOv8 NPU 推理
+
+基于哨兵视觉者（SentinelVisioner）的 640×640 RGB888 NPU 小图进行 YOLOv8 RKNN 推理。每路摄像头独立一个推理线程 + RKNN context，零拷贝 DMA-BUF fd 导入 NPU。
+
+- **双队列输出**: 推理结果同时推入 `fusionQueue`（供融合）和 `osdQueue`（供推流 OSD 叠加），各自独立消费
+- **DMA 零拷贝**: `rknn_create_mem_from_fd(dmaFd)` 直接导入 DMA-BUF，无 CPU memcpy
+- **NpuBufferGuard (RAII)**: 作用域守卫确保异常路径也归还 DMA buffer
+- **result provider 回调**: 通过 `SentinelYoloInfer` 提供 `try_get_fusion_result()` / `try_get_osd_result()` 供消费者轮询
+- **模型**: `yolov8n.rknn`（INT8 量化，640×640×3 输入，9 输出分支），通过 `rknn_model_zoo` 转换生成
+- **配置**: `SentinelYoloInferConfig` 含 modelPath、boxThreshold、nmsThreshold、waitTimeoutMs、pushEmptyResult
+
+唯一公共头文件: `include/SentinelYoloInfer.h`，API 类: `SentinelYoloInfer`
 
 ### sentinel-visioner — 多路视觉流水线
 
@@ -153,9 +176,9 @@ SentinelQT (QT5 嵌入式触控界面)
 
 唯一公共头文件: `include/sentinel-visioner.h`，API 类: `SentinelVisioner`
 
-### sentinel-streamer — 推流与录像组件
+### sentinel-streamer — 推流与录像 + OSD 叠加组件
 
-作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 NV12 帧 → RGA 缩放为 720p → MPP 硬件编码 H.264 → 双路输出。
+作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 NV12 帧 → RGA 缩放为 720p → **YOLO 检测框 OSD 叠加（CPU NV12 绘制）** → MPP 硬件编码 H.264 → 双路输出。
 
 - **双编码器架构**: `streamEncCtx`（720p, 推流）和 `recordEncCtx`（1080p/720p, 录像）各自独立，惰性创建，互不干扰
 - **动态源分辨率**: RGA 缩放器 `rga_scale_nv12_to_720p(srcFd, srcWidth, srcHeight, dstFd)` 支持任意源分辨率（1080p→720p 下采样、720p→720p imcopy），不再硬编码 1080p
@@ -166,6 +189,7 @@ SentinelQT (QT5 嵌入式触控界面)
 - **线程安全**: 每路摄像头独立推流线程，编码器和输出上下文严格在 `workerThread.join()` 后销毁，杜绝 use-after-free
 - **状态回调**: `StreamerCallback` 函数指针，通知上层启停/错误事件
 - **反复启停**: 编码器每轮销毁重建，无 DTS 残留
+- **OSD 叠加**: 通过 `StreamOsdProvider` 回调注入检测框，推流线程每帧非阻塞轮询（5ms 超时），仅叠加推流画面不影响录像。Y 平面 2px 白色边框 + 标签（3×5 点阵字体 2x 放大），640×640 NPU → 720p 坐标自动变换（含 letterbox 逆变换）。`set_osd_provider()` 绑定 provider，`set_stream_osd_mode()` 运行时切换
 - **RecordBufferPool 环形缓冲**: 基于 DmaBufferPool + RGA DMA 拷贝的 NV12 帧环形缓冲区，在编码前暂存历史帧供数据回溯。每路独立，槽位数可配
 - **rga_nv12_copy**: RGA IM2D `imcopy` 硬件 DMA 零拷贝，避免 CPU memcpy 开销
 - **回溯公共 API**: `init_record_buffer(camNum, slotCount, width, height)` 初始化缓冲池，`try_get_record_frame(camNum, &data, &size, &ts)` 非阻塞 FIFO 消费帧，`release_record_frame(camNum, data)` 归还缓冲
@@ -192,15 +216,17 @@ SentinelQT (QT5 嵌入式触控界面)
 
 ### SentinelQT — QT5 嵌入式触控界面
 
-RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner 和 SentinelStreamer 的上层集成者。
+RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner、SentinelStreamer 和 SentinelYoloInfer 的上层集成者。
 
 - **技术栈**: Qt5 Widgets，QStackedWidget 四页布局（主控页 / 视频管理页 / 融合管理页 / 数据回溯页），全屏无边框
 - **共享标题栏**: `titleBar`（温度/CPU/RGA/NPU + 标题 + 时钟）位于根布局 QStackedWidget 上方，三页共享。hwLabel 和 clockLabel 均为 280px 确保标题居中
 - **双路预览**: 左右并排 `previewLabel0` / `previewLabel1`，两个独立 PreviewWorker 各自运行在独立 QThread，通过 lambda 捕获 camNum 将 `frameReady` 信号路由到对应 label。每路预览可独立开启/关闭
-- **双路控制**: 每路相机独立 4 按钮（预览切换、推流、录像、暂停），全局系统按钮一键启停两路
+- **双路控制**: 每路相机独立 5 按钮（预览切换、推流、录像、暂停、OSD），全局系统按钮一键启停两路
 - **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
 - **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI。两路独立 RTSP URL
 - **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。双路均支持 1080p/720p 录制分辨率（底部栏 per-camera QComboBox 选择），Web 远程切换双向同步
+- **NPU 推理管理**: `SentinelYoloInfer` 实例懒加载，融合或 OSD 首次需要时创建，两路都关闭且融合未启用时自动销毁。融合和 OSD 各自绑定独立 provider 回调
+- **OSD 叠加控制**: 每路相机独立 OSD 按钮（Qt + Web 双端同步），绑定 `StreamOsdProvider` 回调到 streamer，运行时切换 OSD 模式
 - **视频管理**: QTableWidget 列表展示录制文件（libavformat 读分辨率/时长），支持删除
 - **融合目标跟踪**: 第三页独立子页面，集成 SentinelLslidarer + LidarCameraFusion：
   - **俯视图**: `TopDownView` 自定义 QWidget，paintEvent 绘制距离网格、目标（按 TrackState 着色）、速度箭头、告警脉冲圈、中文图例
@@ -209,7 +235,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
   - **融合启停**: `on_btn_fusion_toggle_()` 控制完整生命周期（lidar start → fusion start → FusionWorker 轮询），失败自动回滚
   - **参数热更新**: `editingFinished` 触发 `configure_tracker()` + `update_camera_intrinsics()` 实时推送，无需重启融合
   - **告警输出**: 三层输出 — 俯视图红色脉冲圈 + 状态栏告警计数 + 终端 stderr `[FusionWarning]` 日志
-  - **假检测模式**: 使用 `generate_fake_detections_()` 虚构检测框，待 NPU 推理就绪后替换
+  - **NPU 推理**: 融合线程通过 `DetectionProvider` 回调从 `SentinelYoloInfer` 获取真实 YOLO 检测结果（替换假检测），仅保留 person (classId=0) 且置信度 ≥ 0.75 的检测框
   - **数据回溯**: 第四页独立子页面，通过 RecordBufferPool 实现历史帧查询：
     - **手动回溯**: 秒数输入框 + 相机选择器 + 回溯按钮，`on_btn_backtrack_()` 触发。当前为终端打印占位（待硬盘数据管理类就绪后从磁盘检索）
     - **自动告警回溯**: 融合告警回调触发 `on_fusion_alert_backtrack_()`，根据告警时间戳和配置的回溯秒数终端打印回溯范围。双路相机同时回溯

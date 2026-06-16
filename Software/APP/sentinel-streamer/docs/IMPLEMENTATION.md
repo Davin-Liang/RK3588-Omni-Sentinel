@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-SentinelStreamer 是 RK3588-Omni-Sentinel 平台的推流与录像组件，作为 `SentinelVisioner` 的下游消费者，从 `processTaskQueue` 拉取 1080p NV12 原始帧，经 RGA 硬件缩放后由 MPP 硬件编码为 H.264，推流通过 `ffmpeg` 子进程管道输出 RTSP，录像通过 FFmpeg API 写入 MP4。
+SentinelStreamer 是 RK3588-Omni-Sentinel 平台的推流与录像组件，作为 `SentinelVisioner` 的下游消费者，从 `processTaskQueue` 拉取 1080p NV12 原始帧，经 RGA 硬件缩放后由 MPP 硬件编码为 H.264，推流通过 `ffmpeg` 子进程管道输出 RTSP，录像通过 FFmpeg API 写入 MP4。支持运行时 YOLO 检测框 OSD 叠加（CPU 直写 NV12 buffer，仅推流路径，不影响录像）。
 
 ---
 
@@ -17,6 +17,11 @@ SentinelVisioner::capture_thread_
                               │
                               ├── RGA 缩放 (1080p → 720p)
                               │     硬件: rga3, < 3% 负载
+                              │
+                              ├── OSD 叠加 (仅推流路径, CPU NV12 直写)
+                              │     StreamOsdProvider 回调 → YOLO bbox
+                              │     640x640 NPU → 720p 坐标变换
+                              │     2px 白框 + 标签文字
                               │
               ┌───────────────┼───────────────┐
               ▼                               ▼
@@ -226,6 +231,66 @@ main thread                     stream thread (每路 1 个)
 | 编码器 time_base | `{1, 90000}` (MPEG 标准时基) |
 | pkt->pts/dts | **始终**强制覆盖为 `sentPts`（不依赖 `AV_NOPTS_VALUE`） |
 | pkt->duration | 不设，由 FFmpeg 根据帧间 PTS 自动计算 |
+
+---
+
+## 6.5. OSD 叠加（仅推流路径）
+
+### 架构
+
+OSD 叠加通过 `StreamOsdProvider` 回调实现，streamer 不直接依赖 sentinel-yolo-infer。回调由上层（SentinelQT）在 yoloInfer_ 创建时注入。
+
+```
+SentinelQT (yoloInfer_)
+  │
+  └── streamer_->set_osd_provider(lambda)
+        │
+        ▼
+  StreamerContext::osdProvider  ← 存储在 per-camera 上下文中
+        │
+        ▼  stream_thread_func_() 每帧调用
+  osdProvider(camNum, boxes, 5ms) → 非阻塞轮询
+        │
+        ▼  有结果时
+  draw_osd_boxes_(virtAddr, boxes, srcW, srcH)
+```
+
+### 坐标系变换
+
+YOLO 推理在 640×640 letterbox 图像上进行，推流是 1280×720 全帧拉伸。需要两步变换：
+
+```
+NPU 640×640 → 原始分辨率 → 1280×720
+```
+
+letterbox 参数（与 rga_process_to_rgb_ 一致）：
+```
+scale = min(640/srcWidth, 640/srcHeight)
+padY  = (640 - srcHeight*scale) / 2    // offset_y
+```
+
+逆变换：
+```
+x_orig = x_npu / scale
+y_orig = (y_npu - padY) / scale
+x_720p = x_orig * 1280 / srcWidth
+y_720p = y_orig * 720  / srcHeight
+```
+
+对于 1920×1080 源（scale=1/3, padY=140），简化为：
+```
+x_720p = x_npu * 2
+y_720p = (y_npu - 140) * 2
+```
+
+### NV12 绘制
+
+直接在 1280×720 DMA buffer 的 Y 平面写像素，不碰 UV 平面（避免去色）。
+
+- **边框**：Y=255（白色），2px 线宽，上下左右各 2px
+- **标签**：深灰底（Y=60）+ 白色字，3×5 点阵字体 ×2 放大（6×10 px/字符）
+- 仅绘制 person（classId=0），标签格式：`person 0.85`
+- 无 RGA 硬件加速（边框像素量少，CPU 直写比 ioctl 更快）
 
 ---
 

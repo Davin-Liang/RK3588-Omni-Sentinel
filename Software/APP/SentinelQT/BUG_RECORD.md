@@ -223,3 +223,21 @@
 **原因**: 未意识到项目已部署 MediaMTX（COTS 流媒体服务器，自带 RTSP/HLS/WebRTC 多协议输出）。另起 ffmpeg HLS 输出属于重复造轮子。
 
 **解决**: 回退 ffmpeg_stream_open 修改，保持单一 RTSP 推送职责。Web 前端改用 iframe 嵌入 MediaMTX 内置 WebRTC 播放器（`http://<ip>:8889/live/cam{i}/`），删除 hls.js CDN 依赖和 HLS 代理代码。
+
+---
+
+## 23. Web 融合第二次启动 segfault
+
+**现象**: 通过 Web API 停止融合后再启动，`fusion_->start()` 后立即 segmentation fault。
+
+**原因**: `web_fusion_start_()` 缺少 `SentinelYoloInfer` 创建逻辑。第一次停止时 `on_btn_fusion_toggle_()` 的禁用路径已将 `yoloInfer_` delete 并置 nullptr，但 `fusion_->stop()` 未清除内部的 `DetectionProvider`（std::function 仍持有已释放的 yoloInfer_ 指针）。第二次 Web 启动时 `fusion_->start()` 发起融合线程，线程调用过期 callback → 访问野指针 → segfault。
+
+**解决**: 在 `web_fusion_start_()` 中添加与 `on_btn_fusion_toggle_()` 启用路径一致的 yoloInfer_ 懒创建 + provider 绑定逻辑。同时将融合 disable 路径的 yoloInfer_ 销毁改为检查 `osdEnabled_` 状态。
+
+## 24. Web OSD 按钮点击返回"网络错误"
+
+**现象**: 网页点击 OSD 按钮显示"网络错误"，桌面端 Qt OSD 按钮正常工作。
+
+**原因**: cpp-httplib 对 HTTP POST 请求采用显式路由注册机制（`impl_->httpServer_.Post(path, handler)`），仅在 `web_server.cpp` 注册的路由才能被匹配。Widget 中的 `handle_web_command()` 路由表对 WebSocket 有效，但 HTTP 请求未注册 `/api/v1/cam/{0,1}/osd/start|stop` 四条路由，返回 404。
+
+**解决**: 在 `web_server.cpp` 中注册四条 OSD POST 路由，与现有 camera 控制路由并列。

@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
+#include <vector>
 
 // 前置声明，避免循环依赖
 struct DmaBuffer_t;
@@ -24,6 +26,24 @@ enum class StreamOsdMode {
     WITHOUT_OSD = 0,  ///< 无 OSD 叠加 720p（已实现）
     WITH_OSD    = 1   ///< 有 OSD 叠加 720p（预留，暂不实现）
 };
+
+/**
+ * @brief OSD 叠加用的检测框（精简版，仅含绘制所需字段）
+ */
+struct StreamOsdBBox {
+    uint32_t x1, y1, x2, y2;
+    uint32_t classId;
+    float    confidence;
+};
+
+/**
+ * @brief OSD 检测结果提供者回调
+ * @param camNum     摄像头编号
+ * @param out        输出检测框列表
+ * @param timeoutMs  超时毫秒数
+ * @return true 成功获取，false 超时
+ */
+using StreamOsdProvider = std::function<bool(int camNum, std::vector<StreamOsdBBox>& out, int timeoutMs)>;
 
 /**
  * @brief 状态回调事件类型
@@ -129,13 +149,19 @@ public:
     // ================================================================
 
     /**
-     * @brief 设置推流 OSD 模式（必须在 start_stream 之前调用）
+     * @brief 设置推流 OSD 模式（支持运行时切换）
      * @param camNum 摄像头编号
-     * @param mode   WITHOUT_OSD: 无 OSD 720p 推流（已实现）
-     *               WITH_OSD:    有 OSD 720p 推流（预留，当前无实际操作）
+     * @param mode   WITHOUT_OSD: 无 OSD 720p 推流
+     *               WITH_OSD:    有 OSD 720p 推流
      * @return true 成功 / false 失败
      */
     bool set_stream_osd_mode(int camNum, StreamOsdMode mode);
+
+    /**
+     * @brief 设置 OSD 检测结果提供者
+     * @param provider 回调函数，streamer 推流线程每帧轮询获取检测框
+     */
+    void set_osd_provider(StreamOsdProvider provider);
 
     // ================================================================
     // 录像

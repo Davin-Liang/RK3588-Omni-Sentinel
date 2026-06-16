@@ -5,20 +5,24 @@
 ```
 SentinelQT 进程
 ├── 主线程 (Qt Event Loop)
-│   ├── Widget (QStackedWidget 三页布局)
-│   │   ├── Page 0: 主控页面 (预览 + 控制 + 监控)
+│   ├── Widget (QStackedWidget 四页布局)
+│   │   ├── Page 0: 主控页面 (预览 + 控制 + OSD + 监控)
 │   │   ├── Page 1: 视频管理页面 (QTableWidget + libavformat)
 │   │   └── Page 2: 融合管理页面 (俯视图 + 参数面板 + 虚拟键盘)
-│   ├── SentinelVisioner visioner_      // 相机采集管线
-│   ├── SentinelStreamer streamer_      // 推流/录像
-│   ├── SentinelLslidarer lidar_        // 激光雷达驱动
-│   ├── LidarCameraFusion fusion_       // 视觉-雷达融合引擎
-│   ├── TopDownView topDownView_        // 鸟瞰俯视图组件
-│   ├── VirtualKeyboard virtualKeyboard_ // 触屏数字键盘
+│   ├── SentinelVisioner visioner_         // 相机采集管线
+│   ├── SentinelYoloInfer yoloInfer_        // NPU 推理（懒加载）
+│   ├── SentinelStreamer streamer_         // 推流/录像 + OSD
+│   ├── SentinelLslidarer lidar_           // 激光雷达驱动
+│   ├── LidarCameraFusion fusion_          // 视觉-雷达融合引擎
+│   ├── TopDownView topDownView_           // 鸟瞰俯视图组件
+│   ├── VirtualKeyboard virtualKeyboard_   // 触屏数字键盘
 │   └── QTimer × 3 (clock + record + fusionStatus)
 │
 ├── PreviewWorker × 2 子线程
 │   └── 循环: try_get_preview(200ms) → QImage → emit frameReady() → release_preview()
+│
+├── SentinelYoloInfer × 2 推理子线程 (每路相机独立)
+│   └── try_get_npu → RKNN infer → push(fusionQueue + osdQueue) → release_npu
 │
 ├── FusionWorker 子线程
 │   └── 100ms 轮询 copy_tracked_targets() → 变化去重 → emit trackingUpdated()
@@ -27,10 +31,10 @@ SentinelQT 进程
 │   └── SerialPort::read_packet() → RingBuffer (10Hz)
 │
 ├── LidarCameraFusion 内部线程 (fusion)
-│   └── fake_detections → get_closest_frame → fuse_data → update_tracking
+│   └── DetectionProvider 回调获取 YOLO → get_closest_frame → fuse_data → update_tracking
 │
 └── SentinelStreamer 内部线程
-    └── 消费 processTaskQueue → RGA缩放 → MPP编码 → RTSP/MP4
+    └── 消费 processTaskQueue → RGA缩放 → OSD叠加(StreamOsdProvider) → MPP编码 → RTSP/MP4
 ```
 
 ## 2. 线程模型
@@ -82,13 +86,22 @@ static void streamer_callback_(int camNum, StreamerEvent event, const char* deta
 ### 2.5 LidarCameraFusion 内部线程
 
 `LidarCameraFusion::start()` 创建独立 `std::thread` 运行 `fusion_thread_()`：
-1. 生成虚构 YOLO 检测框（`generate_fake_detections_`，待 NPU 推理就绪后替换）
-2. 取最近雷达帧（`get_closest_frame`）
-3. 累积融合（`reset` → `fuse_data` × camCount）
-4. 目标跟踪（`update_tracking`，7 步流水线）
-5. 告警回调（`fusion_warning_callback_`，终端 stderr 输出）
+1. 通过 `DetectionProvider` 回调获取 YOLO 检测结果（`try_get_fusion_result`），无 provider 时回退假检测
+2. 类别过滤（classId=0 person）和置信度过滤（≥0.75）
+3. 取最近雷达帧（`get_closest_frame`）
+4. 累积融合（`reset` → `fuse_data` × camCount）
+5. 目标跟踪（`update_tracking`，7 步流水线）
+6. 告警回调（`fusion_warning_callback_`，终端 stderr 输出）
 
-### 2.6 标题栏共享
+### 2.6 SentinelYoloInfer 推理线程
+
+`SentinelYoloInfer` 每路相机独立 `std::thread` 运行 `infer_thread_loop_()`：
+1. `try_get_npu(camNum, 200ms)` 从 NPU 队列拉取 640×640 RGB888 DMA buffer
+2. `inferFromDmaBuffer(dmaFd)` 零拷贝 RKNN 推理
+3. 结果同时推入 `fusionQueue` 和 `osdQueue`
+4. `NpuBufferGuard` RAII 归还 DMA buffer（含异常路径）
+
+### 2.7 标题栏共享
 
 `titleBar`（HW 监控 + 标题 + 时钟）从 pageMain 提升到根布局 `wrapperLayout`，位于 QStackedWidget 上方，所有三页共享显示。通过 `QHBoxLayout` 包裹实现 8px 左右边距，hwLabel 和 clockLabel 均为 280px 确保标题绝对居中。
 
@@ -173,7 +186,29 @@ RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止
 - 录像停止时: "启动录像" 蓝色 `#1f6feb`
 - 录像进行时: "停止录像" 红色 `#da3633`
 
-### 3.4 Web 远程控制集成
+### 3.6 YOLO 推理生命周期管理
+
+`SentinelYoloInfer* yoloInfer_` 采用懒加载模式，由 OSD 按钮或融合启用触发创建，两路都不需要时自动销毁。
+
+**创建条件**（任一满足）：
+- 用户按下 OSD 按钮（`on_btn_osd_`）
+- 用户启用融合（`on_btn_fusion_toggle_` / `web_fusion_start_`）
+
+**销毁条件**（全部满足）：
+- 两路 OSD 都关闭（`!osdEnabled_[0] && !osdEnabled_[1]`）
+- 融合未启用（`!fusionEnabled_`）
+
+**Provider 绑定**：
+- `streamer_->set_osd_provider(lambda)` — 从 `osdQueue` 获取，清空队列取最新帧
+- `fusion_->set_detection_provider(lambda)` — 从 `fusionQueue` 获取
+
+创建时两路 inference thread 都启动（`create_infer_thread(0)` + `create_infer_thread(1)`），与当前使用的相机数无关。
+
+### 3.7 OSD 双端控制同步
+
+OSD 状态通过 WebSocket `status` JSON 推送 `osdEnabled` 字段到 Web 前端，确保 Qt 桌面按钮和 Web 按钮状态一致。Web 端 OSD API 路由（`/api/v1/cam/{0,1}/osd/start|stop`）需在 `web_server.cpp` 显式注册（cpp-httplib HTTP 路由不经过 Widget 的 fallback handler）。
+
+### 3.8 Web 远程控制集成
 
 WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQueuedConnection` 与 Qt 主线程安全通信。
 

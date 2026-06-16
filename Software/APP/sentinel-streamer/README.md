@@ -1,6 +1,6 @@
 # SentinelStreamer
 
-推流与录像组件。从 `SentinelVisioner` 拉取 NV12 帧（支持任意分辨率），RGA 动态缩放为 720p + MPP 硬件编码 H.264，ffmpeg 子进程推 RTSP，FFmpeg API 写 MP4。720p 源直通录像（绕过 RGA 缩放）。
+推流与录像组件。从 `SentinelVisioner` 拉取 NV12 帧（支持任意分辨率），RGA 动态缩放为 720p + MPP 硬件编码 H.264，ffmpeg 子进程推 RTSP，FFmpeg API 写 MP4。720p 源直通录像（绕过 RGA 缩放）。支持运行时 YOLO 检测框 OSD 叠加（通过 `StreamOsdProvider` 回调注入）。
 
 ---
 
@@ -99,7 +99,8 @@ private:
 | `start_record(camNum, path, res)` | 启动 MP4 录像（res 可选 `RES_1080P` / `RES_720P`） |
 | `stop_record(camNum)` | 停止 MP4 录像 |
 | `is_recording(camNum)` | 查询录像状态 |
-| `set_stream_osd_mode(camNum, mode)` | OSD 模式（`WITH_OSD` 预留） |
+| `set_stream_osd_mode(camNum, mode)` | OSD 模式（`WITH_OSD`/`WITHOUT_OSD`），支持运行时切换 |
+| `set_osd_provider(provider)` | 设置 OSD 检测框回调（`StreamOsdProvider`），推流线程每帧轮询 |
 
 ### 录像帧缓冲（数据回溯）
 

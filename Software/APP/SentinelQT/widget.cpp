@@ -257,6 +257,8 @@ Widget::Widget(QWidget *parent)
     connect(ui->btnStream1, &QPushButton::clicked, this, [this]() { on_btn_stream_(1); });
     connect(ui->btnRecord1, &QPushButton::clicked, this, [this]() { on_btn_record_(1); });
     connect(ui->btnPause1,  &QPushButton::clicked, this, [this]() { on_btn_pause_(1); });
+    connect(ui->btnOsd0,    &QPushButton::clicked, this, [this]() { on_btn_osd_(0); });
+    connect(ui->btnOsd1,    &QPushButton::clicked, this, [this]() { on_btn_osd_(1); });
 
     // Global buttons
     connect(ui->btnVideos, &QPushButton::clicked, this, &Widget::on_btn_videos_);
@@ -1417,6 +1419,67 @@ void Widget::sync_ui_to_fusion_config_()
 // Fusion: 事件处理
 // ============================================================================
 
+void Widget::on_btn_osd_(int camNum)
+{
+    osdEnabled_[camNum] = !osdEnabled_[camNum];
+    QPushButton* btn = (camNum == 0) ? ui->btnOsd0 : ui->btnOsd1;
+
+    if (osdEnabled_[camNum]) {
+        // 懒加载：首次开启 OSD 时创建 yoloInfer_
+        if (!yoloInfer_) {
+            SentinelYoloInferConfig inferCfg;
+            inferCfg.modelPath = config_.value("Fusion/modelPath",
+                "./models/yolov8n.rknn").toString().toStdString();
+            inferCfg.boxThreshold = 0.25f;
+            inferCfg.waitTimeoutMs = 200;
+            yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
+            for (int c = 0; c < 2; ++c) {
+                if (!yoloInfer_->create_infer_thread(c))
+                    fprintf(stderr, "[SentinelQT] OSD infer thread cam %d failed\n", c);
+            }
+            streamer_->set_osd_provider(
+                [this](int cam, std::vector<StreamOsdBBox>& out, int) {
+                    // 清空队列只保留最新一帧，避免 FIFO 积压导致 OSD 延迟
+                    YoloBBoxList boxes;
+                    bool gotAny = false;
+                    while (yoloInfer_->try_get_osd_result(cam, boxes, 0))
+                        gotAny = true;
+                    if (!gotAny) return false;
+                    for (const auto& b : boxes) {
+                        out.push_back({b.x1, b.y1, b.x2, b.y2,
+                                       b.classId, b.confidence});
+                    }
+                    return true;
+                });
+            if (fusionEnabled_) {
+                fusion_->set_detection_provider(
+                    [this](int cam, std::vector<YoloBBox>& out, int timeoutMs) {
+                        return yoloInfer_->try_get_fusion_result(cam, out, timeoutMs);
+                    });
+            }
+        }
+        streamer_->set_stream_osd_mode(camNum, StreamOsdMode::WITH_OSD);
+        btn->setText("OSD开");
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
+        fprintf(stderr, "[SentinelQT] cam %d OSD enabled\n", camNum);
+    } else {
+        streamer_->set_stream_osd_mode(camNum, StreamOsdMode::WITHOUT_OSD);
+        btn->setText("OSD关");
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
+            "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
+        fprintf(stderr, "[SentinelQT] cam %d OSD disabled\n", camNum);
+
+        if (!osdEnabled_[0] && !osdEnabled_[1] && !fusionEnabled_) {
+            yoloInfer_->stop_all();
+            delete yoloInfer_;
+            yoloInfer_ = nullptr;
+        }
+    }
+}
+
 void Widget::on_btn_fusion_toggle_()
 {
     if (!fusionEnabled_) {
@@ -1430,17 +1493,32 @@ void Widget::on_btn_fusion_toggle_()
             return;
         }
 
-        // 启动 NPU 推理
+        // 启动 NPU 推理（如果 OSD 已经创建则复用）
         {
-            SentinelYoloInferConfig inferCfg;
-            inferCfg.modelPath = config_.value("Fusion/modelPath",
-                "./models/yolov8n.rknn").toString().toStdString();
-            inferCfg.boxThreshold = 0.25f;
-            inferCfg.waitTimeoutMs = 200;
-            yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
-            for (uint32_t c = 0; c < fusionCamCount_; ++c) {
-                if (!yoloInfer_->create_infer_thread(c))
-                    fprintf(stderr, "[SentinelQT] infer thread cam %u failed\n", c);
+            if (!yoloInfer_) {
+                SentinelYoloInferConfig inferCfg;
+                inferCfg.modelPath = config_.value("Fusion/modelPath",
+                    "./models/yolov8n.rknn").toString().toStdString();
+                inferCfg.boxThreshold = 0.25f;
+                inferCfg.waitTimeoutMs = 200;
+                yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
+                for (int c = 0; c < 2; ++c) {
+                    if (!yoloInfer_->create_infer_thread(c))
+                        fprintf(stderr, "[SentinelQT] infer thread cam %d failed\n", c);
+                }
+                streamer_->set_osd_provider(
+                    [this](int cam, std::vector<StreamOsdBBox>& out, int) {
+                        YoloBBoxList boxes;
+                        bool gotAny = false;
+                        while (yoloInfer_->try_get_osd_result(cam, boxes, 0))
+                            gotAny = true;
+                        if (!gotAny) return false;
+                        for (const auto& b : boxes) {
+                            out.push_back({b.x1, b.y1, b.x2, b.y2,
+                                           b.classId, b.confidence});
+                        }
+                        return true;
+                    });
             }
             fusion_->set_detection_provider(
                 [this](int camNum, std::vector<YoloBBox>& out, int timeoutMs) {
@@ -1453,9 +1531,11 @@ void Widget::on_btn_fusion_toggle_()
         fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
 
         if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
-            yoloInfer_->stop_all();
-            delete yoloInfer_;
-            yoloInfer_ = nullptr;
+            if (!osdEnabled_[0] && !osdEnabled_[1]) {
+                yoloInfer_->stop_all();
+                delete yoloInfer_;
+                yoloInfer_ = nullptr;
+            }
             lidar_->stop();
             ui->fusionStatusLabel->setText("融合启动失败");
             return;
@@ -1494,7 +1574,7 @@ void Widget::on_btn_fusion_toggle_()
 
         fusion_->stop();
 
-        if (yoloInfer_) {
+        if (!osdEnabled_[0] && !osdEnabled_[1] && yoloInfer_) {
             yoloInfer_->stop_all();
             delete yoloInfer_;
             yoloInfer_ = nullptr;
@@ -1634,6 +1714,8 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/cam/0/record/stop")    return web_stop_record_(0);
         if (path == "/api/v1/cam/0/pause")          return web_pause_(0);
         if (path == "/api/v1/cam/0/resume")         return web_resume_(0);
+        if (path == "/api/v1/cam/0/osd/start")      return web_osd_start_(0);
+        if (path == "/api/v1/cam/0/osd/stop")       return web_osd_stop_(0);
         if (path == "/api/v1/cam/1/preview/start")  return web_start_preview_(1);
         if (path == "/api/v1/cam/1/preview/stop")   return web_stop_preview_(1);
         if (path == "/api/v1/cam/1/stream/start")   return web_start_stream_(1);
@@ -1642,6 +1724,8 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/cam/1/record/stop")    return web_stop_record_(1);
         if (path == "/api/v1/cam/1/pause")          return web_pause_(1);
         if (path == "/api/v1/cam/1/resume")         return web_resume_(1);
+        if (path == "/api/v1/cam/1/osd/start")      return web_osd_start_(1);
+        if (path == "/api/v1/cam/1/osd/stop")       return web_osd_stop_(1);
         if (path == "/api/v1/system/start")         return web_system_start_();
         if (path == "/api/v1/system/stop")          return web_system_stop_();
         if (path == "/api/v1/lidar/start")          return web_lidar_start_();
@@ -1816,6 +1900,77 @@ std::string Widget::web_resume_(int camNum)
     return R"({"ok":true})";
 }
 
+// ---- OSD ----
+
+std::string Widget::web_osd_start_(int camNum)
+{
+    if (osdEnabled_[camNum]) return R"({"ok":true})";
+
+    if (!yoloInfer_) {
+        SentinelYoloInferConfig inferCfg;
+        inferCfg.modelPath = config_.value("Fusion/modelPath",
+            "./models/yolov8n.rknn").toString().toStdString();
+        inferCfg.boxThreshold = 0.25f;
+        inferCfg.waitTimeoutMs = 200;
+        yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
+        for (int c = 0; c < 2; ++c) {
+            if (!yoloInfer_->create_infer_thread(c))
+                fprintf(stderr, "[SentinelQT] OSD infer thread cam %d failed\n", c);
+        }
+        streamer_->set_osd_provider(
+            [this](int cam, std::vector<StreamOsdBBox>& out, int) {
+                YoloBBoxList boxes;
+                bool gotAny = false;
+                while (yoloInfer_->try_get_osd_result(cam, boxes, 0))
+                    gotAny = true;
+                if (!gotAny) return false;
+                for (const auto& b : boxes) {
+                    out.push_back({b.x1, b.y1, b.x2, b.y2,
+                                   b.classId, b.confidence});
+                }
+                return true;
+            });
+        if (fusionEnabled_) {
+            fusion_->set_detection_provider(
+                [this](int cam, std::vector<YoloBBox>& out, int to) {
+                    return yoloInfer_->try_get_fusion_result(cam, out, to);
+                });
+        }
+    }
+    streamer_->set_stream_osd_mode(camNum, StreamOsdMode::WITH_OSD);
+    osdEnabled_[camNum] = true;
+
+    QPushButton* btn = (camNum == 0) ? ui->btnOsd0 : ui->btnOsd1;
+    btn->setText("OSD开");
+    btn->setStyleSheet(
+        "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+        "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
+    fprintf(stderr, "[SentinelQT] cam %d OSD enabled via web\n", camNum);
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_osd_stop_(int camNum)
+{
+    if (!osdEnabled_[camNum]) return R"({"ok":true})";
+
+    streamer_->set_stream_osd_mode(camNum, StreamOsdMode::WITHOUT_OSD);
+    osdEnabled_[camNum] = false;
+
+    QPushButton* btn = (camNum == 0) ? ui->btnOsd0 : ui->btnOsd1;
+    btn->setText("OSD关");
+    btn->setStyleSheet(
+        "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
+        "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
+    fprintf(stderr, "[SentinelQT] cam %d OSD disabled via web\n", camNum);
+
+    if (!osdEnabled_[0] && !osdEnabled_[1] && !fusionEnabled_) {
+        yoloInfer_->stop_all();
+        delete yoloInfer_;
+        yoloInfer_ = nullptr;
+    }
+    return R"({"ok":true})";
+}
+
 // ---- System ----
 
 std::string Widget::web_system_start_()
@@ -1913,22 +2068,35 @@ std::string Widget::web_fusion_start_()
         inferCfg.boxThreshold = 0.25f;
         inferCfg.waitTimeoutMs = 200;
         yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
-        for (uint32_t c = 0; c < fusionCamCount_; ++c) {
+        for (int c = 0; c < 2; ++c) {
             if (!yoloInfer_->create_infer_thread(c))
-                fprintf(stderr, "[SentinelQT] infer thread cam %u failed\n", c);
+                fprintf(stderr, "[SentinelQT] infer thread cam %d failed\n", c);
         }
-        fusion_->set_detection_provider(
-            [this](int camNum, std::vector<YoloBBox>& out, int timeoutMs) {
-                return yoloInfer_->try_get_fusion_result(camNum, out, timeoutMs);
+        streamer_->set_osd_provider(
+            [this](int cam, std::vector<StreamOsdBBox>& out, int) {
+                YoloBBoxList boxes;
+                bool gotAny = false;
+                while (yoloInfer_->try_get_osd_result(cam, boxes, 0))
+                    gotAny = true;
+                if (!gotAny) return false;
+                for (const auto& b : boxes) {
+                    out.push_back({b.x1, b.y1, b.x2, b.y2,
+                                   b.classId, b.confidence});
+                }
+                return true;
             });
     }
+    fusion_->set_detection_provider(
+        [this](int camNum, std::vector<YoloBBox>& out, int timeoutMs) {
+            return yoloInfer_->try_get_fusion_result(camNum, out, timeoutMs);
+        });
 
     fusion_->configure_tracker(fusionTrackerCfg_);
     fusion_->enable_tracking(true);
     fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
 
     if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
-        if (yoloInfer_) {
+        if (!osdEnabled_[0] && !osdEnabled_[1] && yoloInfer_) {
             yoloInfer_->stop_all();
             delete yoloInfer_;
             yoloInfer_ = nullptr;
@@ -2019,6 +2187,7 @@ std::string Widget::get_status_json_() const
         nlohmann::json cam;
         cam["previewActive"] = previewActive_[i];
         cam["paused"]        = cameraPaused_[i];
+        cam["osdEnabled"]    = osdEnabled_[i];
         cam["streaming"]     = streamer_ ? streamer_->is_streaming(i) : false;
         cam["recording"]     = streamer_ ? streamer_->is_recording(i) : false;
         cam["width"]         = camWidth_[i];

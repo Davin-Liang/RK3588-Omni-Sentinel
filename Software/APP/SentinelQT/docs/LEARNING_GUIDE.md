@@ -31,9 +31,10 @@ QApplication (eglfs, 全屏无边框)
             └── QTableWidget (文件名/分辨率/时长/删除)
 
 底层组件:
-    ├── SentinelVisioner visioner_   (相机采集 + RGA 预处理)
-    ├── SentinelStreamer streamer_   (RTSP推流 + MP4录像)
-    └── PreviewWorker (子线程)       (try_get_preview → QImage 帧投递)
+    ├── SentinelVisioner visioner_     (相机采集 + RGA 预处理)
+    ├── SentinelYoloInfer yoloInfer_    (NPU 推理，懒加载)
+    ├── SentinelStreamer streamer_     (RTSP推流 + OSD + MP4录像)
+    └── PreviewWorker (子线程)         (try_get_preview → QImage 帧投递)
 ```
 
 ### 关键代码（背下来）
@@ -122,6 +123,30 @@ static void streamer_callback_(int camNum, StreamerEvent event, const char* deta
 - ① 无对象指针 → 用静态单例
 - ② 栈上临时字符串 → 回调返回前转 QString（所有权转移）
 - ③ 直接调 UI 方法 → `QueuedConnection` 确保在主线程事件循环执行
+
+### 决策：YOLO 推理实例为什么用懒加载而不是常驻？
+
+**需求**：融合和 OSD 都需要 NPU 推理，但两者不一定同时启用。
+
+**方案**：`SentinelYoloInfer` 按需创建，两路都不需要时自动销毁。
+
+| 对比维度 | 常驻创建（替代方案） | 懒加载（我们的方案） |
+|---------|-------------------|-------------------|
+| NPU 内存 | 2×RKNN context 常驻 ~50MB | 仅需要时占用 |
+| 启动速度 | 构造即加载 .rknn 模型，拖慢启动 | 首次按 OSD 或融合按钮时才加载 |
+| 销毁逻辑 | 需判断谁在用 | 引用计数式：两路 OSD 都关 + 融合未启用 → 销毁 |
+
+**面试话术**： "NPU 推理资源重，用户不一定开融合和 OSD。我们做成懒加载——谁先用到谁创建，大家都不要了就销毁。跟智能指针的引用计数一个思路。"
+
+### Bug 故事：Web 融合第二次启动 segfault
+
+**现象**：Web API 停融合后再启动，`fusion_->start()` 后立即 segfault。
+
+**原因**：`web_fusion_start_()` 没有创建 `SentinelYoloInfer`，但停止时 `on_btn_fusion_toggle_()` 已经把 `yoloInfer_` delete 了。`LidarCameraFusion` 内部的 `DetectionProvider`（std::function）还持有已释放的指针 → 融合线程调用 callback → 野指针 → segfault。
+
+**解决**：`web_fusion_start_()` 补充完整的 yoloInfer_ 懒创建 + provider 绑定逻辑，与 UI 按钮路径一致。
+
+**面试话术**："std::function 捕获的指针不会因为外部 delete 就自动失效。两个启动路径（UI 按钮和 Web API）必须维护一致的初始化逻辑。这是个典型的'双入口不同步'bug——增功能时只改了 UI 路径忘了改 Web 路径。"
 
 ---
 

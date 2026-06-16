@@ -574,7 +574,7 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
 
                 // 连预览 buffer 都拿不到，说明预览池已枯竭（下游消费太慢）
                 if (targetPreviewBuf == nullptr) {
-                    std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
+                    // std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
                 }
 
                 // auto end_time = std::chrono::high_resolution_clock::now();

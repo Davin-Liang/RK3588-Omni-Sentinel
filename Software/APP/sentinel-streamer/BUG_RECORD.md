@@ -219,3 +219,21 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 **原因**: ffmpeg 推流默认使用 UDP，RTP 包超过 MTU 限制且分片异常。
 
 **解决**: ffmpeg 推流命令增加 `-rtsp_transport tcp`，使用 TCP 传输避免 RTP 包大小限制和丢包问题。
+
+---
+
+## 21. OSD 叠加导致推流画面变黑白
+
+**现象**: 开启 OSD 后 RTSP 推流画面整体变为黑白（灰度），关闭 OSD 恢复彩色。
+
+**原因**: `draw_rect_nv12()` 将 bbox 矩形区域内的 UV 平面全部填充为中性色（128,128），清除了所有色度信息。person 检测框通常覆盖画面大面积，整框区域去色导致画面呈现黑白。
+
+**解决**: 移除 UV 平面全框填充循环。Y 平面 2px 白色边框足够醒目，无需修改 UV。边框本身仅 2 像素宽，即使保留原 UV 值也视觉不受影响。
+
+## 22. USB 相机 OSD 延迟 5-6 秒
+
+**现象**: MIPI 相机 OSD 实时跟随人物，USB 相机 OSD 在人物移动后 5-6 秒才更新，期间框停留在原位。
+
+**原因**: YOLO 推理结果通过 `ThreadSafeQueue`（FIFO）传给 streamer 推流线程。USB 相机 NPU 管线产帧速率（~30fps）高于推流消费速率（~15fps），队列持续积压。`try_get_osd_result(5ms)` 每次从队首取最旧帧 → 叠加的是数秒前的检测结果。
+
+**解决**: OSD provider 回调改为 `while(try_get_osd_result(0))` 清空整个队列，仅保留最后一条（最新）结果。每次推流帧都拿到最新检测框，延迟降至 1 帧以内。

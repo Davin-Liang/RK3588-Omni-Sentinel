@@ -76,6 +76,9 @@ private slots:
     void on_fusion_param_changed_();
     void on_fusion_status_update_();
 
+    // ---- OSD ----
+    void on_btn_osd_(int camNum);
+
 private:
     Ui::Widget *ui;
 
@@ -115,6 +118,7 @@ private:
     SentinelLslidarer*  lidar_;
     LidarCameraFusion*  fusion_;
     SentinelYoloInfer*  yoloInfer_ = nullptr;
+    bool                osdEnabled_[2] = {false, false};
     FusionWorker*       fusionWorker_;
     QThread*            fusionThread_;
     QTimer*             fusionStatusTimer_;
@@ -152,6 +156,8 @@ private:
     std::string web_stop_record_(int camNum);
     std::string web_pause_(int camNum);
     std::string web_resume_(int camNum);
+    std::string web_osd_start_(int camNum);
+    std::string web_osd_stop_(int camNum);
     std::string web_system_start_();
     std::string web_system_stop_();
     std::string web_delete_video_(const std::string& path);
