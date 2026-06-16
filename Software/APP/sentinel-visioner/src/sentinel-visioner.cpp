@@ -577,10 +577,10 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
                 }
 
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                if (raw_frame_count % 30 == 0)
-                    std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
+                // auto end_time = std::chrono::high_resolution_clock::now();
+                // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+                // if (raw_frame_count % 30 == 0)
+                //     std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
 
                 // 推流/录像用的 origCopy 缓冲区
                 {

@@ -61,6 +61,11 @@ if(NOT TARGET lidar_camera_fusion_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion ${CMAKE_CURRENT_BINARY_DIR}/fusion_build)
 endif()
 
+# YOLO NPU 推理
+if(NOT TARGET sentinel_yolo_infer_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer ${CMAKE_CURRENT_BINARY_DIR}/yolo_infer_build)
+endif()
+
 # Web 远程控制
 if(NOT TARGET web_control_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../web-control ${CMAKE_CURRENT_BINARY_DIR}/webcontrol_build)
@@ -92,6 +97,7 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -101,6 +107,7 @@ target_link_libraries(SentinelQT PRIVATE
     sentinel_visioner_lib
     sentinel_lslidarer_lib
     lidar_camera_fusion_lib
+    sentinel_yolo_infer_lib
     web_control_lib
     ${LIBRGA}
     Threads::Threads

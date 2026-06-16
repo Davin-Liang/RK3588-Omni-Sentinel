@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <thread>
 #include <vector>
 
@@ -16,6 +17,8 @@
  * @note   定义在此处是因为项目中 YOLO 模块尚未实现；
  *         当 YOLO 组件就绪后，此结构体可提取到共享头文件中。
  */
+#ifndef YOLO_BBOX_DEFINED
+#define YOLO_BBOX_DEFINED
 struct YoloBBox {
     uint32_t x1, y1;       ///< 左上角像素坐标（包含）
     uint32_t x2, y2;       ///< 右下角像素坐标（不包含），宽度 = x2 - x1
@@ -23,6 +26,7 @@ struct YoloBBox {
     float    confidence;   ///< 置信度 [0.0, 1.0]
     uint64_t timestampNs;  ///< 该检测框对应的图像帧时间戳（CLOCK_MONOTONIC, ns）
 };
+#endif
 
 /**
  * @struct CameraConfig
@@ -53,6 +57,8 @@ struct FusionResult {
     const uint32_t* bboxPointCounts;    ///< 数组，bboxPointCounts[i] = 第 i 个 bbox 的点数量
     uint32_t bboxCount;                 ///< 已累积的 bbox 总数
 };
+
+using DetectionProvider = std::function<bool(int camNum, std::vector<YoloBBox>& out, int timeoutMs)>;
 
 class SentinelLslidarer;
 class LidarTargetTracker;
@@ -119,6 +125,13 @@ public:
     bool start(SentinelLslidarer* lidar,
                const CameraConfig* camConfigs,
                uint32_t camCount);
+
+    /**
+     * @brief  设置外部检测提供者（替换内部假检测）。
+     *         设置后融合线程将从此回调获取 YOLO 检测结果。
+     * @param  provider  回调函数；返回 false 表示超时无数据
+     */
+    void set_detection_provider(DetectionProvider provider);
 
     /**
      * @brief  停止融合线程并等待退出。
@@ -258,7 +271,8 @@ private:
     CameraConfig       camConfigs_[kMaxCameras];
     uint32_t           camCount_;
     LidarPoint*        lidarPointsBuf_;
-    std::vector<YoloBBox> fakeDetections_[kMaxCameras];  ///< 虚构测试数据，推理类就绪后删除
+    DetectionProvider   detectionProvider_;
+    std::vector<YoloBBox> fakeDetections_[kMaxCameras];  ///< 虚构测试数据，检测提供者未设置时使用
 
     // ---- 目标跟踪 ----
     bool               trackingEnabled_{false};

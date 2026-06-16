@@ -2,6 +2,7 @@
 #include "./ui_widget.h"
 
 #include "sentinel-visioner.h"
+#include "SentinelYoloInfer.h"
 #include "sentinel_streamer.h"
 #include "web_server.h"
 #include "preview_worker.h"
@@ -1429,11 +1430,32 @@ void Widget::on_btn_fusion_toggle_()
             return;
         }
 
+        // 启动 NPU 推理
+        {
+            SentinelYoloInferConfig inferCfg;
+            inferCfg.modelPath = config_.value("Fusion/modelPath",
+                "./models/yolov8n.rknn").toString().toStdString();
+            inferCfg.boxThreshold = 0.25f;
+            inferCfg.waitTimeoutMs = 200;
+            yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
+            for (uint32_t c = 0; c < fusionCamCount_; ++c) {
+                if (!yoloInfer_->create_infer_thread(c))
+                    fprintf(stderr, "[SentinelQT] infer thread cam %u failed\n", c);
+            }
+            fusion_->set_detection_provider(
+                [this](int camNum, std::vector<YoloBBox>& out, int timeoutMs) {
+                    return yoloInfer_->try_get_fusion_result(camNum, out, timeoutMs);
+                });
+        }
+
         fusion_->configure_tracker(fusionTrackerCfg_);
         fusion_->enable_tracking(true);
         fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
 
         if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
+            yoloInfer_->stop_all();
+            delete yoloInfer_;
+            yoloInfer_ = nullptr;
             lidar_->stop();
             ui->fusionStatusLabel->setText("融合启动失败");
             return;
@@ -1471,6 +1493,13 @@ void Widget::on_btn_fusion_toggle_()
         }
 
         fusion_->stop();
+
+        if (yoloInfer_) {
+            yoloInfer_->stop_all();
+            delete yoloInfer_;
+            yoloInfer_ = nullptr;
+        }
+
         lidar_->stop();
         fusionStatusTimer_->stop();
 
@@ -1876,11 +1905,34 @@ std::string Widget::web_fusion_start_()
             return R"({"ok":false,"error":"LiDAR 启动失败（检查串口设备）"})";
     }
 
+    // 启动 NPU 推理
+    if (!yoloInfer_) {
+        SentinelYoloInferConfig inferCfg;
+        inferCfg.modelPath = config_.value("Fusion/modelPath",
+            "./models/yolov8n.rknn").toString().toStdString();
+        inferCfg.boxThreshold = 0.25f;
+        inferCfg.waitTimeoutMs = 200;
+        yoloInfer_ = new SentinelYoloInfer(visioner_, inferCfg);
+        for (uint32_t c = 0; c < fusionCamCount_; ++c) {
+            if (!yoloInfer_->create_infer_thread(c))
+                fprintf(stderr, "[SentinelQT] infer thread cam %u failed\n", c);
+        }
+        fusion_->set_detection_provider(
+            [this](int camNum, std::vector<YoloBBox>& out, int timeoutMs) {
+                return yoloInfer_->try_get_fusion_result(camNum, out, timeoutMs);
+            });
+    }
+
     fusion_->configure_tracker(fusionTrackerCfg_);
     fusion_->enable_tracking(true);
     fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
 
     if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
+        if (yoloInfer_) {
+            yoloInfer_->stop_all();
+            delete yoloInfer_;
+            yoloInfer_ = nullptr;
+        }
         lidar_->stop();
         return R"({"ok":false,"error":"融合启动失败（检查相机内参配置）"})";
     }

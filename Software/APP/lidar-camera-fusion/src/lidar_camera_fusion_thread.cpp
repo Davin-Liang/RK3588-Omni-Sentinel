@@ -1,6 +1,7 @@
 #include "lidar_camera_fusion.h"
 #include "lidar_target_tracker.h"
 
+#include <algorithm>
 #include <cstdio>
 
 // ============================================================================
@@ -41,6 +42,11 @@ bool LidarCameraFusion::is_running() const
     return running_;
 }
 
+void LidarCameraFusion::set_detection_provider(DetectionProvider provider)
+{
+    detectionProvider_ = std::move(provider);
+}
+
 void LidarCameraFusion::fusion_thread_()
 {
     printf("[LidarCameraFusion] fusion thread started, %u camera(s)\n", camCount_);
@@ -49,11 +55,18 @@ void LidarCameraFusion::fusion_thread_()
 
     while (running_) {
         // ---- 步骤 1：获取 YOLO 检测结果 ----
-        // TODO: 替换为从推理类队列获取真实数据
-        //   YoloResult result;
-        //   if (!yoloQueue_->try_pop(result, 33)) { ... }
         for (uint32_t c = 0; c < camCount_; ++c) {
-            generate_fake_detections_(c);
+            if (detectionProvider_) {
+                if (!detectionProvider_(c, fakeDetections_[c], 33))
+                    fakeDetections_[c].clear();
+            } else {
+                generate_fake_detections_(c);
+            }
+            // 过滤：只保留 person (classId=0) 且置信度 >= 0.75
+            auto& dets = fakeDetections_[c];
+            dets.erase(std::remove_if(dets.begin(), dets.end(),
+                [](const YoloBBox& b) { return b.classId != 0 || b.confidence < 0.75f; }),
+                dets.end());
         }
 
         // ---- 步骤 2：从检测结果中提取时间戳 ----
@@ -105,8 +118,17 @@ void LidarCameraFusion::fusion_thread_()
         }
 
         // ---- 步骤 6：输出结果 ----
-        // TODO: 推入下游队列
         ++iterationCount;
+        if (iterationCount % 10 == 0 && iterationCount % 100 != 0) {
+            uint32_t tcnt = 0;
+            if (trackingEnabled_ && tracker_) {
+                TrackedTarget tmp[1];
+                tracker_->copy_snapshot(tmp, 1, &tcnt);
+            }
+            printf("[LidarCameraFusion] #%lu bboxes:%u matched:%u tracks:%u\n",
+                   (unsigned long)iterationCount, result_.bboxCount,
+                   totalCandidateCount, tcnt);
+        }
         if (iterationCount % 100 == 0) {
             uint32_t frameTotal = totalCandidateCount
                                   + behindCameraCount

@@ -15,6 +15,7 @@
 class SentinelVisioner;
 class SentinelStreamer;
 class SentinelLslidarer;
+class SentinelYoloInfer;
 class PreviewWorker;
 class FusionWorker;
 class TopDownView;
@@ -113,6 +114,7 @@ private:
     // ---- Fusion ----
     SentinelLslidarer*  lidar_;
     LidarCameraFusion*  fusion_;
+    SentinelYoloInfer*  yoloInfer_ = nullptr;
     FusionWorker*       fusionWorker_;
     QThread*            fusionThread_;
     QTimer*             fusionStatusTimer_;

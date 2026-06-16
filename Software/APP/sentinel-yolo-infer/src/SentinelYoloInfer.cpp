@@ -14,6 +14,7 @@ struct SentinelYoloInfer::InferThreadContext {
     std::unique_ptr<Yolov8RknnEngine> engine;
     ThreadSafeQueue<YoloBBoxList> fusionQueue;
     ThreadSafeQueue<YoloBBoxList> osdQueue;
+    uint64_t frameCount = 0;
 };
 
 namespace {
@@ -208,6 +209,22 @@ void SentinelYoloInfer::infer_thread_loop_(std::shared_ptr<InferThreadContext> c
         if (!ok) {
             std::cerr << "[SentinelYoloInfer] inference failed, camNum=" << camNum << std::endl;
             continue;
+        }
+
+        ++ctx->frameCount;
+        {
+            uint32_t personCount = 0;
+            for (const auto& b : boxes) {
+                if (b.classId == 0) ++personCount;
+            }
+            printf("[YOLO] cam %d frame %lu: %zu detections (%u person)\n",
+                   camNum, (unsigned long)ctx->frameCount, boxes.size(), personCount);
+            for (const auto& b : boxes) {
+                printf("  class=%u conf=%.2f center=(%.0f,%.0f) box=(%u,%u,%u,%u)\n",
+                       b.classId, b.confidence,
+                       (b.x1 + b.x2) * 0.5f, (b.y1 + b.y2) * 0.5f,
+                       b.x1, b.y1, b.x2, b.y2);
+            }
         }
 
         if (!boxes.empty() || config_.pushEmptyResult) {
