@@ -240,4 +240,20 @@
 
 **原因**: cpp-httplib 对 HTTP POST 请求采用显式路由注册机制（`impl_->httpServer_.Post(path, handler)`），仅在 `web_server.cpp` 注册的路由才能被匹配。Widget 中的 `handle_web_command()` 路由表对 WebSocket 有效，但 HTTP 请求未注册 `/api/v1/cam/{0,1}/osd/start|stop` 四条路由，返回 404。
 
-**解决**: 在 `web_server.cpp` 中注册四条 OSD POST 路由，与现有 camera 控制路由并列。
+## 25. EIS 按钮网页点击返回"网络错误"
+
+**现象**: 网页点击 EIS 按钮显示"网络错误"，桌面端 Qt EIS 按钮正常工作。
+
+**原因**: 与 #24 OSD 按钮同因。cpp-httplib 对 HTTP POST 请求采用显式路由注册，未在 `web_server.cpp` 中注册 `/api/v1/cam/{0,1}/eis/start|stop` 四条 POST 路由。
+
+**解决**: 在 `web_server.cpp` 中注册四条 EIS POST 路由。
+
+---
+
+## 26. EIS 偏移始终为 0
+
+**现象**: EIS 初始化成功、IMU 数据正常读取（samples=4），但 `offset` 始终打印 (+0,+0)，晃动相机无变化。
+
+**原因**: EIS 回调 `eis_offset_callback_()` 放在 `capture_thread_func_` 的 `if (targetNpuBuf != nullptr)` 块内。当 NPU 推理未启动时，`npuRgbPool` 的 8 个 buffer 全部推入 `npuTaskQueue` 后 `get_buffer()` 返回 null，整个 NPU 处理块被跳过，EIS 回调永不执行。
+
+**解决**: 将 EIS 偏移计算提升到 `if (targetNpuBuf != nullptr)` 块外部，每帧独立于 NPU buffer 执行。偏移值仍仅在有 NPU buffer 时传入 `rga_process_to_rgb_()`。

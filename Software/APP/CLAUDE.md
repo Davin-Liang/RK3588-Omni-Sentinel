@@ -92,8 +92,9 @@ SentinelQT (QT5 嵌入式触控界面)
   ├── web-control (嵌入进程内 HTTP/WebSocket 服务器, REST API 远程控制)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
+  ├── icm45686-eis-app (IMU 电子防抖, 回调注入 sentinel-visioner NPU 路径)
   ├── Qt5 Widgets (QStackedWidget 四页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] 节，Fusion 含 modelPath 和外参)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] 8 节)
 ```
 
 ### web-control — Web 远程控制组件
@@ -111,6 +112,20 @@ SentinelQT (QT5 嵌入式触控界面)
 - **SPA 热加载**: HTML 从文件系统多路径搜索加载（`web/index.html`），编辑后无需重编译
 
 唯一公共头文件: `include/web_server.h`，API 类: `WebServer`
+
+### icm45686-eis-app — ICM45686 电子防抖
+
+基于 ICM45686 SPI 内核驱动的用户态 EIS（电子防抖）组件。通过 `/dev/icm45686` 字符设备读取 IMU 数据，在用户态完成陀螺仪积分和像素偏移计算。通过回调注入模式集成到 SentinelQT 的 sentinel-visioner 管线。
+
+- **Icm45686Reader**: 后台 `std::thread` 以可配置频率（默认 100Hz）轮询 `/dev/icm45686` ioctl，推入线程安全 `ImuRingBuffer`（默认 512 样本 `std::deque` + `std::mutex`）
+- **EisStabilizer**: 梯形陀螺仪积分 → 像素偏移。核心 API `calculate_eis_offset(focalX, focalY, targetTimestampNs, halfWindowMs, offsetX, offsetY)`，目标时间窗口查询 IMU 样本，小角度近似 `offset ≈ focal × angle`，裁剪到 `maxOffsetPixel`
+- **回调注入**: SentinelVisioner 加入 `set_eis_offset_callback(std::function)`，采集线程每帧调用回调获取偏移，传入 `rga_process_to_rgb_()` 的 `horizontalOffset/verticalOffset` 参数。仅作用于 NPU 640×640 RGB888 推理路径
+- **两路隔离**: 两路相机共用 IMU 硬件和 Reader，但各自独立 `eisEnabled_[camNum]` 开关、`focalX/Y`、`axisSignX/Y`。线程安全：`setAxisSign()` 不在回调内调用，符号在回调结果上手动乘
+- **配置**: `config.ini` 中 `[EIS]` 节：`device`、`sampleHz`、`gyroRange/accelRange`、`halfWindowMs`、`maxOffsetPixel`、per-camera `focalX/Y` 和 `axisSignX/Y`
+- **API**: REST `POST /api/v1/cam/{0,1}/eis/start|stop`，WebSocket status 含 `eisEnabled` 字段
+- **依赖**: POSIX + pthread + libm + `<functional>`（回调），不依赖 ICM45686 头文件（sentinel-visioner 侧解耦）
+
+构建: `icm45686_eis_lib` (STATIC, C++14, `src/imu_eis.cpp`) + `icm45686_user_lib` (STATIC, C99, `src/icm45686_user.c`)
 
 ### sentinel-lslidarer — 镭神 N10Plus 单线雷达驱动
 
@@ -221,7 +236,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **技术栈**: Qt5 Widgets，QStackedWidget 四页布局（主控页 / 视频管理页 / 融合管理页 / 数据回溯页），全屏无边框
 - **共享标题栏**: `titleBar`（温度/CPU/RGA/NPU + 标题 + 时钟）位于根布局 QStackedWidget 上方，三页共享。hwLabel 和 clockLabel 均为 280px 确保标题居中
 - **双路预览**: 左右并排 `previewLabel0` / `previewLabel1`，两个独立 PreviewWorker 各自运行在独立 QThread，通过 lambda 捕获 camNum 将 `frameReady` 信号路由到对应 label。每路预览可独立开启/关闭
-- **双路控制**: 每路相机独立 5 按钮（预览切换、推流、录像、暂停、OSD），全局系统按钮一键启停两路
+- **双路控制**: 每路相机独立 6 按钮（预览切换、推流、录像、暂停、OSD、EIS），全局系统按钮一键启停两路
 - **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
 - **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI。两路独立 RTSP URL
 - **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。双路均支持 1080p/720p 录制分辨率（底部栏 per-camera QComboBox 选择），Web 远程切换双向同步
@@ -245,7 +260,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **线程模型**: 两个 PreviewWorker + 一个 FusionWorker 各自独立 QThread + std::atomic<bool>；LidarCameraFusion 内部 std::thread；主线程处理 UI 和定时器。FusionWorker 100ms 轮询 + 目标变化去重。析构逆序释放（FusionWorker → fusion → lidar → preview → visioner/streamer）
 - **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
 - **Web 远程控制**: 嵌入 WebServer（cpp-httplib），提供 REST API + WebSocket 实时推送。浏览器打开 `http://<IP>:8080` 即可远程操控。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889）
-- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]` 七节，USB 相机支持 1080p（MJPG 模式）
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]`/`[EIS]` 八节，USB 相机支持 1080p（MJPG 模式）
 
 关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置，`[Backtrack]` 节）、`build.sh`（构建脚本）
 

@@ -6,7 +6,7 @@
 |_| \_\_|\_\____/____/ \___/ \___/    \___/|_| |_| |_|_| |_|_|    |____/ \___|_| |_|\__|_|_| |_|\___|_|
 ```
 
-基于瑞芯微 **RK3588** 的边缘端多传感器融合平台。集成激光雷达驱动、相机视觉管线、NPU YOLO 推理、传感器融合跟踪、RTSP 推流录像（含 OSD 叠加）、嵌入式触控界面六大组件，全部脱离 ROS，以 C++14 静态库形式存在，通过 **DMA-BUF** 在 NPU / RGA / V4L2 硬件加速器之间实现零拷贝数据流转。
+基于瑞芯微 **RK3588** 的边缘端多传感器融合平台。集成激光雷达驱动、相机视觉管线、NPU YOLO 推理、传感器融合跟踪、RTSP 推流录像（含 OSD 叠加）、IMU 电子防抖、嵌入式触控界面七大组件，全部脱离 ROS，以 C++14 静态库形式存在，通过 **DMA-BUF** 在 NPU / RGA / V4L2 硬件加速器之间实现零拷贝数据流转。
 
 ---
 
@@ -61,6 +61,7 @@
 | **LidarCameraFusion** | `Software/APP/lidar-camera-fusion/` | 视觉-雷达数据融合，Alpha-Beta 多目标跟踪，四态生命周期管理 | sentinel-lslidarer (仅头文件) |
 | **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像 + OSD 叠加，MPP 硬件编码 H.264，双编码器独立架构 | sentinel-visioner, librga, ffmpeg |
 | **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 推流/录像/暂停/OSD 控制 + 融合管理 | sentinel-visioner, sentinel-streamer, sentinel-yolo-infer, Qt5 |
+| **icm45686-eis-app** | `Software/APP/icm45686-eis-app/` | ICM45686 电子防抖，陀螺仪积分 → 像素偏移，回调注入 sentinel-visioner NPU 路径 | 仅 libpthread + libm |
 | **DmaBufferPool** | `Software/APP/dma-buffer-pool/` | DMA 内存池，O(1) 空闲链表分配/归还 | librga, libdrm |
 
 每个组件目录下均有独立的 `README.md` 和完整文档，详见各组件的 `docs/` 目录。

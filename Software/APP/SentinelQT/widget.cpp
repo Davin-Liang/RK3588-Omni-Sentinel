@@ -9,6 +9,7 @@
 #include "fusion_worker.h"
 #include "top_down_view.h"
 #include "virtual_keyboard.h"
+#include "imu_eis.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -207,6 +208,10 @@ Widget::Widget(QWidget *parent)
     , topDownView_(nullptr)
     , virtualKeyboard_(nullptr)
     , fusionCamCount_(1)
+    , eisReader_(nullptr), eisStabilizer_(nullptr)
+    , eisFocalX_{1200.0f, 1200.0f}, eisFocalY_{1200.0f, 1200.0f}
+    , eisAxisSignX_{1.0f, 1.0f}, eisAxisSignY_{1.0f, 1.0f}
+    , eisMaxOffsetPixel_(200), eisHalfWindowMs_(20)
 {
     instance_ = this;
     ui->setupUi(this);
@@ -259,6 +264,8 @@ Widget::Widget(QWidget *parent)
     connect(ui->btnPause1,  &QPushButton::clicked, this, [this]() { on_btn_pause_(1); });
     connect(ui->btnOsd0,    &QPushButton::clicked, this, [this]() { on_btn_osd_(0); });
     connect(ui->btnOsd1,    &QPushButton::clicked, this, [this]() { on_btn_osd_(1); });
+    connect(ui->btnEis0,    &QPushButton::clicked, this, [this]() { on_btn_eis_(0); });
+    connect(ui->btnEis1,    &QPushButton::clicked, this, [this]() { on_btn_eis_(1); });
 
     // Global buttons
     connect(ui->btnVideos, &QPushButton::clicked, this, &Widget::on_btn_videos_);
@@ -293,8 +300,9 @@ Widget::Widget(QWidget *parent)
         return;
     }
 
-    if (ok0) start_preview_(0);
-    if (ok1) start_preview_(1);
+    // 预览默认关闭，由用户手动开启
+    // if (ok0) start_preview_(0);
+    // if (ok1) start_preview_(1);
 
     // --- Fusion 初始化 (不启动 radar/fusion，仅创建对象和加载配置) ---
 
@@ -422,6 +430,7 @@ Widget::~Widget()
         }
     }
     delete streamer_;
+    deinit_eis_();
     delete visioner_;
     delete ui;
 }
@@ -449,6 +458,27 @@ void Widget::load_config_()
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
 
     backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
+
+    // EIS 防抖配置
+    {
+        bool eisCfgEnabled = config_.value("EIS/enabled", false).toBool();
+        float eisSampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
+        int eisGyroRange = config_.value("EIS/gyroRange", 0).toInt();
+        int eisAccelRange = config_.value("EIS/accelRange", 0).toInt();
+        eisHalfWindowMs_ = config_.value("EIS/halfWindowMs", 20).toUInt();
+        eisMaxOffsetPixel_ = config_.value("EIS/maxOffsetPixel", 200).toInt();
+        eisFocalX_[0] = config_.value("EIS/Cam0FocalX", 1200.0f).toFloat();
+        eisFocalY_[0] = config_.value("EIS/Cam0FocalY", 1200.0f).toFloat();
+        eisAxisSignX_[0] = config_.value("EIS/Cam0AxisSignX", 1.0f).toFloat();
+        eisAxisSignY_[0] = config_.value("EIS/Cam0AxisSignY", 1.0f).toFloat();
+        eisFocalX_[1] = config_.value("EIS/Cam1FocalX", 1200.0f).toFloat();
+        eisFocalY_[1] = config_.value("EIS/Cam1FocalY", 1200.0f).toFloat();
+        eisAxisSignX_[1] = config_.value("EIS/Cam1AxisSignX", 1.0f).toFloat();
+        eisAxisSignY_[1] = config_.value("EIS/Cam1AxisSignY", 1.0f).toFloat();
+        if (eisCfgEnabled) {
+            init_eis_();
+        }
+    }
 }
 
 // ---- Camera init ----
@@ -906,6 +936,19 @@ void Widget::update_camera_button_states_(int camNum)
     } else {
         btnPause->setText("暂停");
         btnPause->setStyleSheet(PAUSE_ON_STYLE);
+    }
+
+    QPushButton* btnEis = cam_btn(ui->btnEis0, ui->btnEis1, camNum);
+    if (eisEnabled_[camNum]) {
+        btnEis->setText(QString::fromUtf8("EIS\xe5\xbc\x80"));
+        btnEis->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
+    } else {
+        btnEis->setText(QString::fromUtf8("EIS\xe5\x85\xb3"));
+        btnEis->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
+            "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
     }
 
     bool controlsEnabled = !cameraPaused_[camNum];
@@ -1726,6 +1769,10 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/cam/1/resume")         return web_resume_(1);
         if (path == "/api/v1/cam/1/osd/start")      return web_osd_start_(1);
         if (path == "/api/v1/cam/1/osd/stop")       return web_osd_stop_(1);
+        if (path == "/api/v1/cam/0/eis/start")      return web_eis_start_(0);
+        if (path == "/api/v1/cam/0/eis/stop")       return web_eis_stop_(0);
+        if (path == "/api/v1/cam/1/eis/start")      return web_eis_start_(1);
+        if (path == "/api/v1/cam/1/eis/stop")       return web_eis_stop_(1);
         if (path == "/api/v1/system/start")         return web_system_start_();
         if (path == "/api/v1/system/stop")          return web_system_stop_();
         if (path == "/api/v1/lidar/start")          return web_lidar_start_();
@@ -1971,6 +2018,165 @@ std::string Widget::web_osd_stop_(int camNum)
     return R"({"ok":true})";
 }
 
+// ============================================================================
+// EIS 防抖
+// ============================================================================
+
+void Widget::init_eis_()
+{
+    if (eisReader_) return;
+
+    std::string devPath = config_.value("EIS/device",
+        "/dev/icm45686").toString().toStdString();
+    float sampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
+    int gyroRange = config_.value("EIS/gyroRange", 0).toInt();
+    int accelRange = config_.value("EIS/accelRange", 0).toInt();
+
+    eisReader_ = new Icm45686Reader(512);
+    if (!eisReader_->openDevice(devPath)) {
+        fprintf(stderr, "[SentinelQT] EIS: failed to open %s\n", devPath.c_str());
+        delete eisReader_;
+        eisReader_ = nullptr;
+        set_status_("EIS IMU设备打开失败!", "#f85149");
+        return;
+    }
+
+    eisReader_->setAccelRange(static_cast<uint8_t>(accelRange));
+    eisReader_->setGyroRange(static_cast<uint8_t>(gyroRange));
+
+    if (!eisReader_->start(sampleHz)) {
+        fprintf(stderr, "[SentinelQT] EIS: IMU reader thread start failed\n");
+        eisReader_->closeDevice();
+        delete eisReader_;
+        eisReader_ = nullptr;
+        set_status_("EIS IMU读取线程启动失败!", "#f85149");
+        return;
+    }
+
+    eisStabilizer_ = new EisStabilizer();
+    eisStabilizer_->bindReader(eisReader_);
+    eisStabilizer_->setAxisSign(1.0f, 1.0f);
+    eisStabilizer_->setMaxOffset(eisMaxOffsetPixel_);
+
+    visioner_->set_eis_offset_callback(
+        [this](uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY) -> bool {
+            return eis_offset_callback_(timestampUs, camNum, offsetX, offsetY);
+        });
+
+    fprintf(stderr, "[SentinelQT] EIS initialized: %s @ %.0f Hz\n",
+            devPath.c_str(), (double)sampleHz);
+}
+
+void Widget::deinit_eis_()
+{
+    visioner_->set_eis_offset_callback(nullptr);
+
+    if (eisStabilizer_) {
+        delete eisStabilizer_;
+        eisStabilizer_ = nullptr;
+    }
+    if (eisReader_) {
+        eisReader_->stop();
+        eisReader_->closeDevice();
+        delete eisReader_;
+        eisReader_ = nullptr;
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        eisEnabled_[i] = false;
+        QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
+        if (btn) {
+            btn->setText(QString::fromUtf8("EIS\xe5\x85\xb3"));
+            btn->setStyleSheet(
+                "QPushButton { font-size: 12px; font-weight: 600; "
+                "color: #e6edf3; background-color: #6e7681; "
+                "border: 1px solid #8b949e; border-radius: 8px; }");
+        }
+    }
+
+    fprintf(stderr, "[SentinelQT] EIS deinitialized\n");
+}
+
+bool Widget::eis_offset_callback_(uint64_t timestampUs, int camNum,
+                                   int32_t& offsetX, int32_t& offsetY)
+{
+    if (!eisStabilizer_ || !eisEnabled_[camNum]) {
+        offsetX = 0;
+        offsetY = 0;
+        return false;
+    }
+
+    uint64_t timestampNs = timestampUs * 1000ULL;
+
+    bool ok = eisStabilizer_->calculate_eis_offset(
+        eisFocalX_[camNum], eisFocalY_[camNum],
+        timestampNs, eisHalfWindowMs_,
+        offsetX, offsetY);
+
+    if (ok) {
+        offsetX = static_cast<int32_t>(offsetX * eisAxisSignX_[camNum]);
+        offsetY = static_cast<int32_t>(offsetY * eisAxisSignY_[camNum]);
+    }
+
+    return ok;
+}
+
+void Widget::on_btn_eis_(int camNum)
+{
+    QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
+
+    if (!eisReader_) {
+        init_eis_();
+        if (!eisReader_) {
+            set_status_(QString("相机%1 EIS初始化失败").arg(camNum + 1), "#f85149");
+            return;
+        }
+    }
+
+    eisEnabled_[camNum] = !eisEnabled_[camNum];
+
+    if (eisEnabled_[camNum]) {
+        btn->setText(QString::fromUtf8("EIS\xe5\xbc\x80"));
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
+        set_status_(QString("相机%1 EIS已启用").arg(camNum + 1), "#3fb950");
+    } else {
+        btn->setText(QString::fromUtf8("EIS\xe5\x85\xb3"));
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; "
+            "color: #e6edf3; background-color: #6e7681; "
+            "border: 1px solid #8b949e; border-radius: 8px; }");
+        set_status_(QString("相机%1 EIS已禁用").arg(camNum + 1), "#ffffff");
+    }
+
+    fprintf(stderr, "[SentinelQT] cam %d EIS %s\n", camNum,
+            eisEnabled_[camNum] ? "enabled" : "disabled");
+}
+
+std::string Widget::web_eis_start_(int camNum)
+{
+    if (eisEnabled_[camNum]) return R"({"ok":true})";
+    if (!eisReader_) {
+        init_eis_();
+        if (!eisReader_) return R"({"ok":false,"error":"EIS init failed"})";
+    }
+    eisEnabled_[camNum] = true;
+    update_camera_button_states_(camNum);
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_eis_stop_(int camNum)
+{
+    if (!eisEnabled_[camNum]) return R"({"ok":true})";
+    eisEnabled_[camNum] = false;
+    update_camera_button_states_(camNum);
+    if (!eisEnabled_[0] && !eisEnabled_[1]) {
+        deinit_eis_();
+    }
+    return R"({"ok":true})";
+}
+
 // ---- System ----
 
 std::string Widget::web_system_start_()
@@ -2188,6 +2394,7 @@ std::string Widget::get_status_json_() const
         cam["previewActive"] = previewActive_[i];
         cam["paused"]        = cameraPaused_[i];
         cam["osdEnabled"]    = osdEnabled_[i];
+        cam["eisEnabled"]    = eisEnabled_[i];
         cam["streaming"]     = streamer_ ? streamer_->is_streaming(i) : false;
         cam["recording"]     = streamer_ ? streamer_->is_recording(i) : false;
         cam["width"]         = camWidth_[i];

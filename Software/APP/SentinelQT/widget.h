@@ -12,6 +12,8 @@
 
 #include "lidar_camera_fusion.h"
 
+class Icm45686Reader;
+class EisStabilizer;
 class SentinelVisioner;
 class SentinelStreamer;
 class SentinelLslidarer;
@@ -78,6 +80,7 @@ private slots:
 
     // ---- OSD ----
     void on_btn_osd_(int camNum);
+    void on_btn_eis_(int camNum);
 
 private:
     Ui::Widget *ui;
@@ -119,6 +122,7 @@ private:
     LidarCameraFusion*  fusion_;
     SentinelYoloInfer*  yoloInfer_ = nullptr;
     bool                osdEnabled_[2] = {false, false};
+    bool                eisEnabled_[2] = {false, false};
     FusionWorker*       fusionWorker_;
     QThread*            fusionThread_;
     QTimer*             fusionStatusTimer_;
@@ -133,7 +137,20 @@ private:
     QVector<TrackedTarget>    lastTrackedTargets_;
     uint32_t            fusionCamCount_;
 
+    // ---- EIS ----
+    Icm45686Reader*     eisReader_ = nullptr;
+    EisStabilizer*      eisStabilizer_ = nullptr;
+    float               eisFocalX_[2];
+    float               eisFocalY_[2];
+    float               eisAxisSignX_[2];
+    float               eisAxisSignY_[2];
+    int32_t             eisMaxOffsetPixel_;
+    uint32_t            eisHalfWindowMs_;
+
     void load_config_();
+    void init_eis_();
+    void deinit_eis_();
+    bool eis_offset_callback_(uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
     void stop_preview_(int camNum);
@@ -158,6 +175,8 @@ private:
     std::string web_resume_(int camNum);
     std::string web_osd_start_(int camNum);
     std::string web_osd_stop_(int camNum);
+    std::string web_eis_start_(int camNum);
+    std::string web_eis_stop_(int camNum);
     std::string web_system_start_();
     std::string web_system_stop_();
     std::string web_delete_video_(const std::string& path);

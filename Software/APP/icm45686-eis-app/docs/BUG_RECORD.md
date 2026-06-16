@@ -147,3 +147,33 @@ success_rate=100.00%
 failed_eis=0
 used_samples≈4
 ```
+
+---
+
+## 6. SentinelQT 集成: EIS 回调被 NPU buffer 条件跳过
+
+**现象**: EIS 初始化成功、IMU 正常采样（samples=4），但 `offset` 始终为 0。
+
+**原因**: 回调注入点放在 `capture_thread_func_` 的 `if (targetNpuBuf != nullptr)` 块内。NPU 推理未启动时 `npuRgbPool` 耗尽后此条件恒假，回调永不执行。
+
+**解决**: 将 EIS 偏移计算提升到 `if (targetNpuBuf != nullptr)` 外部，每帧独立执行。偏移值仍仅在有 NPU buffer 时传入 `rga_process_to_rgb_()`。
+
+---
+
+## 7. SentinelQT 集成: Web EIS 按钮路由未注册
+
+**现象**: 网页点击 EIS 按钮返回"网络错误"。
+
+**原因**: cpp-httplib 使用显式路由注册，`web_server.cpp` 中未注册 `/api/v1/cam/{0,1}/eis/start|stop` 四条 POST 路由。
+
+**解决**: 在 `web_server.cpp` 中注册四条 EIS POST 路由。
+
+---
+
+## 8. SentinelQT 集成: `setAxisSign()` 两路相机竞态
+
+**现象**: 两路相机同时开启 EIS 时，采集线程并发调用 `EisStabilizer::setAxisSign()` 修改 `signX_/signY_` 成员（无 mutex 保护）。
+
+**原因**: 方案初版在回调内每帧调用 `setAxisSign()` 适配 per-camera 符号，两路采集线程访问同一 `EisStabilizer` 实例。
+
+**解决**: init 时设 `signX=1.0, signY=1.0`，回调内对 `calculate_eis_offset()` 结果手动乘 per-camera 符号。避免回调内写操作。

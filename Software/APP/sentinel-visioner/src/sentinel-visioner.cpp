@@ -538,10 +538,20 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
 
                 auto start_time = std::chrono::high_resolution_clock::now();
 
+                // EIS 防抖偏移（每帧计算，不依赖 NPU buffer）
+                int currentHorizOffset = 0;
+                int currentVertOffset  = 0;
+
+                if (eis_offset_callback_) {
+                    int32_t eisX = 0, eisY = 0;
+                    if (eis_offset_callback_(timestampUs, camNum, eisX, eisY)) {
+                        currentHorizOffset = static_cast<int>(eisX);
+                        currentVertOffset  = static_cast<int>(eisY);
+                    }
+                }
+
                 // NPU 处理：有 buffer 就做，池空就跳过，不影响预览
                 if (targetNpuBuf != nullptr) {
-                    int currentHorizOffset = 0;
-                    int currentVertOffset  = 0;
                     targetNpuBuf->timestampUs = timestampUs;
 
                     bool npuOk = rga_process_to_rgb_(nv12DmaFd, ctx->width, ctx->height,
@@ -760,6 +770,11 @@ void SentinelVisioner::release_orig_copy_buffer(int camNum, DmaBuffer_t* buf) {
         // 交还给对应摄像头的专用内存池
         it->second->origCopyPool->release_buffer(buf);
     }
+}
+
+void SentinelVisioner::set_eis_offset_callback(
+    std::function<bool(uint64_t, int, int32_t&, int32_t&)> callback) {
+    eis_offset_callback_ = std::move(callback);
 }
 
 bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight,

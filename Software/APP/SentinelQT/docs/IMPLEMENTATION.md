@@ -208,7 +208,29 @@ RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止
 
 OSD 状态通过 WebSocket `status` JSON 推送 `osdEnabled` 字段到 Web 前端，确保 Qt 桌面按钮和 Web 按钮状态一致。Web 端 OSD API 路由（`/api/v1/cam/{0,1}/osd/start|stop`）需在 `web_server.cpp` 显式注册（cpp-httplib HTTP 路由不经过 Widget 的 fallback handler）。
 
-### 3.8 Web 远程控制集成
+### 3.8 EIS 电子防抖集成
+
+通过回调注入模式将 ICM45686 EIS 算法集成到 sentinel-visioner 采集管线，QT 和 Web 界面各相机独立控制。
+
+**架构**:
+```
+Widget 拥有:
+  Icm45686Reader (后台 std::thread, 100Hz 读 /dev/icm45686)
+  EisStabilizer (绑定 reader, 陀螺仪积分 → 像素偏移)
+  └─ visioner_->set_eis_offset_callback(lambda)
+       └─ capture_thread_func_ 每帧调用 → 输出像素偏移 → rga_process_to_rgb_()
+```
+
+**线程安全**: 两路相机采集线程并发调用回调，`setAxisSign()` 不在回调内调用。init 时设 signX/Y=1.0，回调内对结果手动乘 per-camera 符号。
+
+**控制**: 
+- QT: `btnEis0/btnEis1` 按钮，切换 `eisEnabled_[0/1]`，首次触发懒加载 `init_eis_()`
+- Web: `/api/v1/cam/{0,1}/eis/start|stop` POST 路由，与 QT 按钮双向同步
+- 两路 EIS 都关闭时自动 `deinit_eis_()` 释放 IMU 资源
+
+**status JSON**: 含 `eisEnabled` 字段，WebSocket 推送同步。
+
+### 3.9 Web 远程控制集成
 
 WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQueuedConnection` 与 Qt 主线程安全通信。
 
@@ -230,7 +252,7 @@ WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQ
 
 ## 4. 配置文件
 
-`config.ini` 使用 `QSettings::IniFormat`，路径为 `QCoreApplication::applicationDirPath() + "/config.ini"`，确保与可执行文件同目录。包含六节：
+`config.ini` 使用 `QSettings::IniFormat`，路径为 `QCoreApplication::applicationDirPath() + "/config.ini"`，确保与可执行文件同目录。包含七节（含 EIS）：
 
 - `[Camera0]` / `[Camera1]`: 设备路径、分辨率、RTSP 推流 URL、录像分辨率
 - `[WebServer]`: Web 服务器端口 (`port=8080`) 和启用开关 (`enabled=true`)

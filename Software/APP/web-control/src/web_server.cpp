@@ -158,6 +158,8 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/cam/0/resume)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/0/osd/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/0/osd/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/eis/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/eis/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/preview/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/preview/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/stream/start)", wrap_post);
@@ -168,6 +170,8 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/cam/1/resume)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/osd/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/osd/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/eis/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/eis/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/system/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/system/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/lidar/start)", wrap_post);

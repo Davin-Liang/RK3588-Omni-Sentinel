@@ -71,6 +71,11 @@ if(NOT TARGET web_control_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../web-control ${CMAKE_CURRENT_BINARY_DIR}/webcontrol_build)
 endif()
 
+# ICM45686 EIS 防抖
+if(NOT TARGET icm45686_eis_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
+endif()
+
 find_package(Threads REQUIRED)
 
 set(TS_FILES SentinelQT_zh_CN.ts)
@@ -98,6 +103,7 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -112,6 +118,8 @@ target_link_libraries(SentinelQT PRIVATE
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib
+    icm45686_eis_lib
+    icm45686_user_lib
 )
 
 if(Qt5LinguistTools_FOUND)

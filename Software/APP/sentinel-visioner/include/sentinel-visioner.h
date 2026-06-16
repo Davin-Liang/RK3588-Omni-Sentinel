@@ -15,6 +15,7 @@
 #include "im2d.h"
 #include "drmrga.h"
 #include <algorithm>
+#include <functional>
 
 // 内部结构体，用于保存每个 DMA Buffer 的信息
 struct DmaBufferInfo {
@@ -160,6 +161,9 @@ public:
      */
     void release_orig_copy_buffer(int camNum, DmaBuffer_t* buf);
 
+    void set_eis_offset_callback(std::function<bool(uint64_t timestampUs, int camNum,
+                                 int32_t& offsetX, int32_t& offsetY)> callback);
+
 private:
     std::unordered_map<int, std::unique_ptr<CameraContext>> _cameraContextMap;
 
@@ -179,4 +183,6 @@ private:
 
     bool mjpeg_decode_to_nv12_(const uint8_t* jpegData, size_t jpegSize,
                                DmaBuffer_t* dstBuf);
+
+    std::function<bool(uint64_t, int, int32_t&, int32_t&)> eis_offset_callback_;
 };
