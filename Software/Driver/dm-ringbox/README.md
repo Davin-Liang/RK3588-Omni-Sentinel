@@ -117,25 +117,28 @@ dm-ringbox/
 
 ### 4.1 环境要求
 
-| 项目 | 要求 |
-|-----|------|
-| 开发主机 | Ubuntu 18.04/20.04 x86_64 |
-| 目标平台 | RK3568/RK3588 (ARM64) |
-| 内核版本 | Linux 5.10+ |
-| 交叉编译器 | aarch64-none-linux-gnu-gcc 10.3+ |
+| 项目 | RK3568 | RK3588 |
+|-----|--------|--------|
+| 开发主机 | Ubuntu 18.04/20.04 x86_64 | Ubuntu 22.04 x86_64 |
+| 目标平台 | RK3568 (ARM64) | RK3588 (ARM64) |
+| 内核版本 | Linux 5.10 | Linux 5.10 |
+| 交叉编译器 | aarch64-none-linux-gnu-gcc 10.3 | aarch64-buildroot-linux-gnu-gcc 12.3.0（= 10.3 内核编译用） |
 
 ### 4.2 配置 SDK 路径
 
 编辑 `Makefile`，修改以下变量：
 
 ```makefile
-SDK_PATH ?= /home/topeet/Linux_SDK/rk3568_linux_5.10
+# RK3588
+SDK_PATH  ?= /home/elf/Linux_SDK/ELF2-linux-source
+CROSS_COMPILE := /home/elf/Linux_SDK/ELF2-linux-source/prebuilts/gcc/linux-x86/aarch64/\
+    gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-
 ```
 
 或在命令行指定：
 
 ```bash
-make SDK_PATH=/your/sdk/path
+make SDK_PATH=/your/sdk/path CROSS_COMPILE=/your/toolchain/prefix-
 ```
 
 ### 4.3 编译命令
@@ -261,6 +264,90 @@ dmsetup ls | grep ringbox
 rmmod dm_ringbox
 ```
 
+### 5.7 RK3588 完整实验流程
+
+以下为 RK3588 平台端到端操作流程，从加载驱动到卸载驱动。
+
+#### 前置条件
+
+- 板端已刷入带 DM 支持的内核（`CONFIG_BLK_DEV_DM=y`）
+- 所需文件已传至 `/userdata/Nvme-SSD/`:
+
+```
+/userdata/Nvme-SSD/
+├── dm-ringbox.ko                  # 驱动模块
+├── dmsetup                        # DM 管理工具 (ARM64)
+├── lib/
+│   ├── libdevmapper.so.1.02      # dmsetup 依赖库
+│   └── librpl_malloc.so           # rpl_malloc shim
+└── nvme_demo                      # 测试程序
+```
+
+#### 完整流程
+
+```bash
+# ============================================
+# 1. 加载驱动
+# ============================================
+insmod /userdata/Nvme-SSD/dm-ringbox.ko
+dmesg | tail -3
+# 预期输出: ringbox: Module loaded successfully
+
+# ============================================
+# 2. 分配环形缓冲区 (100MB = 204800 扇区 × 512B)
+# ============================================
+LD_PRELOAD=/userdata/Nvme-SSD/lib/librpl_malloc.so \
+LD_LIBRARY_PATH=/userdata/Nvme-SSD/lib \
+./dmsetup create agv_blackbox --table "0 204800 ringbox /dev/nvme0n1 0 204800"
+
+# ============================================
+# 3. 验证设备已创建
+# ============================================
+ls -la /dev/mapper/agv_blackbox
+# 预期输出: brw------- 1 root root 253, 0 ... /dev/mapper/agv_blackbox
+
+LD_PRELOAD=/userdata/Nvme-SSD/lib/librpl_malloc.so \
+LD_LIBRARY_PATH=/userdata/Nvme-SSD/lib \
+./dmsetup table agv_blackbox
+# 预期输出: 0 204800 ringbox 259:0 0 204800
+
+LD_PRELOAD=/userdata/Nvme-SSD/lib/librpl_malloc.so \
+LD_LIBRARY_PATH=/userdata/Nvme-SSD/lib \
+./dmsetup info agv_blackbox
+# 预期输出: State: ACTIVE
+
+# ============================================
+# 4. 进行实验 (写入 /dev/mapper/agv_blackbox)
+# ============================================
+./nvme_demo
+# 或直接 dd 测试:
+# dd if=/dev/zero of=/dev/mapper/agv_blackbox bs=1M count=10
+
+# ============================================
+# 5. 移除缓冲区
+# ============================================
+LD_PRELOAD=/userdata/Nvme-SSD/lib/librpl_malloc.so \
+LD_LIBRARY_PATH=/userdata/Nvme-SSD/lib \
+./dmsetup remove agv_blackbox
+
+# ============================================
+# 6. 卸载驱动
+# ============================================
+rmmod dm-ringbox
+dmesg | tail -3
+# 预期输出: ringbox: Module unloaded
+```
+
+#### dm_create 备用工具
+
+如果 dmsetup 动态库不可用，可使用静态编译的 `dm_create` 替代：
+
+```bash
+./dm_create create agv_blackbox /dev/nvme0n1 0 204800  # 创建
+./dm_create remove agv_blackbox                         # 移除
+```
+
+
 ---
 
 ## 6. API 文档
@@ -275,45 +362,41 @@ rmmod dm_ringbox
 | 2 | physical_start | sector_t | 环形缓冲区物理起始扇区 |
 | 3 | ring_capacity | sector_t | 环形缓冲区大小（扇区数，必须 > 0） |
 
-### 6.2 ioctl 接口
+### 6.2 message 接口（RK3588）
 
-驱动提供以下 ioctl 命令，用于用户空间程序查询状态和控制设备：
+> **注意**: 本驱动的 ELF2 内核版本使用 `dmsetup message` 替代 ioctl 进行控制。
 
-#### RINGBOX_IOC_GET_STATUS
+#### 查询状态
 
-**功能**: 获取环形缓冲区状态
-
-```c
-struct ringbox_status {
-    sector_t physical_start;        // 物理起始扇区
-    sector_t ring_capacity;         // 环形缓冲区总容量（扇区数）
-    sector_t current_write_pos;     // 当前写入位置（扇区）
-    uint64_t total_write_ops;       // 累计写操作次数
-    uint64_t total_read_ops;        // 累计读操作次数
-    uint64_t total_sectors_written; // 累计写入扇区数
-};
-
-int fd = open("/dev/mapper/agv_blackbox", O_RDONLY);
-struct ringbox_status status;
-ioctl(fd, RINGBOX_IOC_GET_STATUS, &status);
+```bash
+./dmsetup status agv_blackbox
 ```
 
-#### RINGBOX_IOC_RESET_WRITE
+#### 重置统计
 
-**功能**: 重置写入指针和统计信息
-
-```c
-ioctl(fd, RINGBOX_IOC_RESET_WRITE, NULL);
+```bash
+./dmsetup message agv_blackbox 0 reset
 ```
 
-#### RINGBOX_IOC_SET_START
+#### 设置物理起始地址
 
-**功能**: 设置新的物理起始地址
-
-```c
-sector_t new_start = 1048576;  // 新起始扇区
-ioctl(fd, RINGBOX_IOC_SET_START, &new_start);
+```bash
+./dmsetup message agv_blackbox 0 set_start 1048576
 ```
+
+#### 获取版本
+
+```bash
+./dmsetup message agv_blackbox 0 version
+```
+
+#### 获取容量
+
+```bash
+./dmsetup message agv_blackbox 0 capacity
+```
+
+> **ioctl 兼容说明**: 标准内核 5.10 支持 ioctl 接口（`RINGBOX_IOC_*`），ELF2/RK3588 定制内核因 KABI 改造移除了 `.ioctl` 回调，改用 `.message` 回调。`dm-ringbox.h` 中保留了 ioctl 命令宏定义以供参考。
 
 ### 6.3 状态查询
 
@@ -370,7 +453,10 @@ dmsetup status agv_blackbox
 | `Invalid argument count` | dmsetup 参数不正确 | 检查参数数量是否为 3 个 |
 | `Failed to allocate memory` | 内存分配失败 | 检查系统内存状态 |
 | `Failed to acquire target block device` | 设备不存在或权限不足 | 检查设备路径和权限 |
-| `Unknown ioctl command` | ioctl 命令不正确 | 检查命令号是否正确 |
+| `device-mapper: ioctl: unable to find target` | ringbox 目标未注册 | 检查 dm-ringbox.ko 是否加载、编译器是否与内核一致 |
+| `dm_mod: Unknown symbol dm_kobject_release` | 内核未开启 DM 支持 | 在 defconfig 中添加 `CONFIG_BLK_DEV_DM=y` 并重刷 boot.img |
+| `dmsetup: symbol lookup error: rpl_malloc` | libdevmapper.so 缺少 rpl_malloc | 使用 `LD_PRELOAD=librpl_malloc.so`（见 §5.7） |
+| `dmsetup: Exec format error` | 二进制架构不匹配 | 使用 ARM64 版本的 dmsetup（`file ./dmsetup` 确认） |
 
 ### 8.2 调试方法
 
@@ -407,11 +493,12 @@ echo "8" > /proc/sys/kernel/printk
 | 版本 | 日期 | 更新内容 |
 |-----|------|---------|
 | v1.0.0 | 2026-04-15 | 初始版本，实现基本环形缓冲区功能 |
+| v1.1.0 | 2026-06-19 | RK3588 移植：适配 ELF2 内核（.ioctl→.message）、新增 dm_create 工具、完整实验流程文档 |
 
 ---
 
 ## 作者与许可
 
-- **作者**: RK3568 Development Team
+- **作者**: RK3588 Development Team
 - **许可证**: GPL
 - **版本**: 1.0.0

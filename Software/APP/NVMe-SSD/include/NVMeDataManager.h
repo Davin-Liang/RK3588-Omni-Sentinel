@@ -2,6 +2,7 @@
 #define NVME_DATA_MANAGER_H
 
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <queue>
 #include <thread>
@@ -62,6 +63,16 @@ public:
     // 数据读取接口
     bool read_video_frame_from_disk(uint64_t target_timestamp, float time_interval,
                                     std::vector<uint8_t>& out_frame_data);
+
+    // 导出触发时刻前 N 秒的视频片段（仅回溯，不含未来数据）
+    // camera_id: -1=所有视频类型, N=仅匹配 data_type==N 的视频帧（方便扩展多摄像头）
+    bool export_trigger_video_clip(uint64_t trigger_timestamp_ns,
+                                   const std::string& output_path,
+                                   double time_window_sec = 5.0,
+                                   int fps = 15,
+                                   int frame_width = 1920,
+                                   int frame_height = 1080,
+                                   int camera_id = -1);
 
     // 获取统计信息
     size_t get_queue_size() const;

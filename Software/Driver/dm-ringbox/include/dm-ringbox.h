@@ -179,18 +179,17 @@ void ringbox_dtr(struct dm_target *ti);
 int ringbox_map(struct dm_target *ti, struct bio *bio);
 
 /**
- * @brief  ioctl 控制接口
- * @details 提供用户空间与驱动的交互接口。
+ * @brief  prepare_ioctl 回调 — 为 DM 核心返回底层块设备
+ * @details 使标准块设备 ioctl (如 BLKGETSIZE) 能直通到物理设备。
  *
- * @param  ti  Device Mapper 目标结构体指针
- * @param  cmd ioctl 命令字
- * @param  arg 用户空间传入的参数
- *
- * @return 0 成功
- * @return -ENOTTY 不支持的命令
- * @return -EFAULT 数据拷贝失败
+ * @param  ti   Device Mapper 目标结构体指针
+ * @param  bdev 输出：底层块设备指针
+ * @return 0 成功, -EPERM 设备未激活
  */
-int ringbox_ioctl(struct dm_target *ti, unsigned int cmd, unsigned long arg);
+int ringbox_prepare_ioctl(struct dm_target *ti, struct block_device **bdev);
+
+int ringbox_message(struct dm_target *ti, unsigned int argc, char **argv,
+                    char *result, unsigned int maxlen);
 
 /**
  * @brief  状态输出函数

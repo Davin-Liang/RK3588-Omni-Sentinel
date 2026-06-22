@@ -43,9 +43,10 @@ static struct target_type ringbox_target = {
     .ctr            = ringbox_ctr,
     .dtr            = ringbox_dtr,
     .map            = ringbox_map,
-    .ioctl          = ringbox_ioctl,
+    .prepare_ioctl  = ringbox_prepare_ioctl,
+    .message        = ringbox_message,
     .status         = ringbox_status,
-    .features       = DM_TARGET_SINGLETON,  /* 单例模式，确保设备唯一性 */
+    .features       = 0,  /* DM_TARGET_SINGLETON 暂时关闭排查 */
 };
 
 /*============================================================================
@@ -306,98 +307,101 @@ int ringbox_map(struct dm_target *ti, struct bio *bio)
  *============================================================================*/
 
 /**
- * @brief  ioctl 控制接口
- * @details 提供用户空间与驱动的交互接口，支持状态查询和控制操作。
+ * @brief  prepare_ioctl 回调 — 为 DM 核心返回底层 NVMe 设备
+ * @details 让标准块设备 ioctl (如 BLKGETSIZE) 能直通到底层物理设备。
  *
- * @param  ti  Device Mapper 目标结构体指针
- * @param  cmd ioctl 命令字
- * @param  arg 用户空间传入的参数
+ * @param  ti   Device Mapper 目标结构体指针
+ * @param  bdev 输出：底层块设备指针
  *
  * @return 0 成功
- * @return -ENOTTY 不支持的命令
- * @return -EFAULT 数据拷贝失败
  * @return -EPERM 设备未激活
  */
-int ringbox_ioctl(struct dm_target *ti, unsigned int cmd, unsigned long arg)
+int ringbox_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 {
     struct ringbox_c *ringbox_ctx = (struct ringbox_c *)ti->private;
-    struct ringbox_status status;
-    struct ringbox_version version;
-    struct ringbox_capacity capacity;
-    void __user *user_ptr = (void __user *)arg;
-    sector_t temp_sector;
 
-    /* 设备状态检查 */
+    if (ringbox_ctx == NULL || !ringbox_ctx->is_active)
+        return -EPERM;
+
+    *bdev = ringbox_ctx->target_dev->bdev;
+    return 0;
+}
+
+/**
+ * @brief  message 回调 — 替代 ioctl 的自定义命令接口
+ * @details 通过 "dmsetup message" 接收用户空间命令，替代旧版内核 .ioctl 钩子。
+ *
+ * 支持的命令:
+ *   get_status            — 查询环形缓冲区运行状态
+ *   reset                 — 重置写入指针和统计信息
+ *   set_start <sector>    — 设置物理起始扇区
+ *   version               — 获取驱动版本
+ *   capacity              — 获取设备容量信息
+ *
+ * @return 0 成功
+ * @return 负值 错误码 (ENOTTY: 未知命令, EINVAL: 参数错误, EPERM: 设备未激活)
+ */
+int ringbox_message(struct dm_target *ti, unsigned int argc, char **argv,
+                           char *result, unsigned int maxlen)
+{
+    struct ringbox_c *ringbox_ctx = (struct ringbox_c *)ti->private;
+    unsigned long long temp_sector;
+
     if (ringbox_ctx == NULL || !ringbox_ctx->is_active) {
+        snprintf(result, maxlen, "device not active");
         return -EPERM;
     }
 
-    switch (cmd) {
-    case RINGBOX_IOC_GET_STATUS:
-        /* 获取当前状态信息 */
-        status.physical_start = (uint64_t)ringbox_ctx->physical_start;
-        status.ring_capacity = (uint64_t)ringbox_ctx->ring_capacity;
-        status.current_write_pos = (uint64_t)atomic64_read(&ringbox_ctx->current_write_pos);
-        status.total_write_ops = (uint64_t)atomic64_read(&ringbox_ctx->total_write_ops);
-        status.total_read_ops = (uint64_t)atomic64_read(&ringbox_ctx->total_read_ops);
-        status.total_sectors_written = (uint64_t)atomic64_read(&ringbox_ctx->total_sectors);
-        status.is_active = ringbox_ctx->is_active ? 1 : 0;
-        status.reserved = 0;
+    if (argc < 1) {
+        snprintf(result, maxlen, "usage: <command> [args]");
+        return -EINVAL;
+    }
 
-        if (copy_to_user(user_ptr, &status, sizeof(status)) != 0) {
-            return -EFAULT;
-        }
-        break;
-
-    case RINGBOX_IOC_RESET_WRITE:
-        /* 重置写入指针和统计信息 */
+    if (strcmp(argv[0], "get_status") == 0) {
+        snprintf(result, maxlen,
+                 "start:%llu capacity:%llu write_pos:%llu "
+                 "write_ops:%llu read_ops:%llu sectors:%llu active:%d",
+                 (unsigned long long)ringbox_ctx->physical_start,
+                 (unsigned long long)ringbox_ctx->ring_capacity,
+                 (unsigned long long)atomic64_read(&ringbox_ctx->current_write_pos),
+                 (unsigned long long)atomic64_read(&ringbox_ctx->total_write_ops),
+                 (unsigned long long)atomic64_read(&ringbox_ctx->total_read_ops),
+                 (unsigned long long)atomic64_read(&ringbox_ctx->total_sectors),
+                 ringbox_ctx->is_active ? 1 : 0);
+    } else if (strcmp(argv[0], "reset") == 0) {
         atomic64_set(&ringbox_ctx->current_write_pos, 0);
         atomic64_set(&ringbox_ctx->total_write_ops, 0);
         atomic64_set(&ringbox_ctx->total_read_ops, 0);
         atomic64_set(&ringbox_ctx->total_sectors, 0);
-        pr_info("%s: Statistics reset by ioctl\n", RINGBOX_NAME);
-        break;
-
-    case RINGBOX_IOC_SET_START:
-        /* 设置新的物理起始地址（需要持有锁） */
-        if (copy_from_user(&temp_sector, user_ptr, sizeof(uint64_t)) != 0) {
-            return -EFAULT;
+        snprintf(result, maxlen, "statistics reset");
+        pr_info("%s: Statistics reset by message\n", RINGBOX_NAME);
+    } else if (strcmp(argv[0], "set_start") == 0) {
+        if (argc < 2) {
+            snprintf(result, maxlen, "usage: set_start <sector>");
+            return -EINVAL;
         }
-
+        if (kstrtoull(argv[1], 10, &temp_sector) != 0) {
+            snprintf(result, maxlen, "invalid sector value");
+            return -EINVAL;
+        }
         spin_lock(&ringbox_ctx->config_lock);
         ringbox_ctx->physical_start = (sector_t)temp_sector;
         spin_unlock(&ringbox_ctx->config_lock);
-
+        snprintf(result, maxlen, "physical_start updated to %llu",
+                 (unsigned long long)temp_sector);
         pr_info("%s: Physical start updated to %llu\n",
                 RINGBOX_NAME, (unsigned long long)temp_sector);
-        break;
-
-    case RINGBOX_IOC_GET_VERSION:
-        /* 获取驱动版本信息 */
-        version.major = RINGBOX_VERSION_MAJOR;
-        version.minor = RINGBOX_VERSION_MINOR;
-        version.patch = RINGBOX_VERSION_PATCH;
-        snprintf(version.version_str, sizeof(version.version_str), "%s", RINGBOX_VERSION_STRING);
-
-        if (copy_to_user(user_ptr, &version, sizeof(version)) != 0) {
-            return -EFAULT;
-        }
-        break;
-
-    case RINGBOX_IOC_GET_CAPACITY:
-        /* 获取设备容量信息 */
-        capacity.physical_start = (uint64_t)ringbox_ctx->physical_start;
-        capacity.ring_capacity = (uint64_t)ringbox_ctx->ring_capacity;
-        capacity.ring_size_bytes = (uint64_t)ringbox_ctx->ring_capacity * 512;  /* 扇区转字节 */
-        capacity.ring_size_mb = capacity.ring_size_bytes >> 20;  /* 字节转MB */
-
-        if (copy_to_user(user_ptr, &capacity, sizeof(capacity)) != 0) {
-            return -EFAULT;
-        }
-        break;
-
-    default:
-        pr_warn("%s: Unknown ioctl command: 0x%08x\n", RINGBOX_NAME, cmd);
+    } else if (strcmp(argv[0], "version") == 0) {
+        snprintf(result, maxlen, "v%s", RINGBOX_VERSION_STRING);
+    } else if (strcmp(argv[0], "capacity") == 0) {
+        unsigned long long bytes =
+            (unsigned long long)ringbox_ctx->ring_capacity * 512ULL;
+        snprintf(result, maxlen, "sectors:%llu bytes:%llu mb:%llu",
+                 (unsigned long long)ringbox_ctx->ring_capacity,
+                 bytes, bytes >> 20);
+    } else {
+        snprintf(result, maxlen, "unknown command: %s", argv[0]);
+        pr_warn("%s: Unknown message command: %s\n", RINGBOX_NAME, argv[0]);
         return -ENOTTY;
     }
 

@@ -29,14 +29,14 @@
 # SDK 路径配置
 # 根据实际开发环境修改以下路径
 # -----------------------------------------------------------------------------
-SDK_PATH ?= /home/topeet/Linux_SDK/rk3568_linux_5.10
+SDK_PATH ?= /home/elf/Linux_SDK/ELF2-linux-source
 KDIR := $(SDK_PATH)/kernel
 
 # -----------------------------------------------------------------------------
 # 交叉编译器配置
-# 使用 RK3568 SDK 自带的 ARM64 交叉编译器
+# 使用 Buildroot GCC 12.3.0 (与 APP 层组件保持一致)
 # -----------------------------------------------------------------------------
-CROSS_COMPILE := $(SDK_PATH)/prebuilts/gcc/linux-x86/aarch64/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-
+CROSS_COMPILE := /home/elf/aarch64-buildroot-linux-gnu_sdk-buildroot/bin/aarch64-buildroot-linux-gnu-
 
 # -----------------------------------------------------------------------------
 # 目标架构配置
@@ -60,7 +60,7 @@ BUILD_DIR := $(PROJECT_ROOT)/build/drivers/dm-ringbox
 # -----------------------------------------------------------------------------
 # 头文件路径
 # -----------------------------------------------------------------------------
-EXTRA_CFLAGS += -I$(CURDIR)/include
+ccflags-y := -I$(src)/include
 
 # -----------------------------------------------------------------------------
 # 编译目标
