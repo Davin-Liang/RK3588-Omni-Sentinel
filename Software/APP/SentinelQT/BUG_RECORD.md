@@ -257,3 +257,33 @@
 **原因**: EIS 回调 `eis_offset_callback_()` 放在 `capture_thread_func_` 的 `if (targetNpuBuf != nullptr)` 块内。当 NPU 推理未启动时，`npuRgbPool` 的 8 个 buffer 全部推入 `npuTaskQueue` 后 `get_buffer()` 返回 null，整个 NPU 处理块被跳过，EIS 回调永不执行。
 
 **解决**: 将 EIS 偏移计算提升到 `if (targetNpuBuf != nullptr)` 块外部，每帧独立于 NPU buffer 执行。偏移值仍仅在有 NPU buffer 时传入 `rga_process_to_rgb_()`。
+
+---
+
+## 27. 分辨率下拉框下拉箭头不显示
+
+**现象**: `resCombo`/`resCombo1` 分辨率选择下拉框不显示下拉箭头，点击后能弹出菜单但箭头图标不可见。
+
+**原因**: widget.ui 中 QComboBox 的 stylesheet 包含 `QComboBox::drop-down { border: none; width: 16px; }`。Qt 样式系统规则：一旦手动指定了 QComboBox 子控件的任意属性，就必须完整定义该子控件（`subcontrol-position`、`subcontrol-origin`、箭头图片等），否则 Qt 不会用默认渲染补全。`border: none` 清除了默认边框，但没有提供替代的箭头渲染，导致整个 drop-down 区域不可见。
+
+**解决**: 删除 `QComboBox::drop-down` 自定义样式，让 Qt 使用默认下拉箭头渲染。下拉列表（`QAbstractItemView`）的样式保留，不影响功能。
+
+---
+
+## 28. QLabel tooltip 在嵌入式触屏上无法触发
+
+**现象**: 融合图例帮助标签使用 `QLabel::setToolTip()` 设置悬停提示，在嵌入式触摸屏上点按无任何反应，提示不弹出。
+
+**原因**: QToolTip 依赖鼠标 hover 事件触发（`QHelpEvent` → `QToolTip::showText()`）。嵌入式 Linux 触屏设备没有鼠标指针，触屏产生的是 `QTouchEvent`/`QMouseEvent(synthesized)`，不会产生 hover 状态。QLabel 的 tooltip 机制在纯触屏环境下完全失效。
+
+**解决**: 改用 QPushButton + `clicked` 信号 + `QMessageBox::information()` 弹出说明。按钮在触屏上点击可靠触发，不依赖 hover。同时将按钮叠放在 TopDownView 右下角（子控件 + eventFilter 监听 Resize 事件动态定位），避免占用额外布局空间。
+
+---
+
+## 29. NVMe 集成时 RecordBufferPool 生命周期依赖
+
+**现象**: 析构 SentinelQT 时偶发 crash，堆栈指向 `try_get_record_frame()` 内部访问已释放的 DMA buffer。
+
+**原因**: `NvmeWorker` 持有 `SentinelStreamer*` 裸指针并调用 `try_get_record_frame()`，该函数访问 streamer 内部的 `RecordBufferPool`。析构顺序中 `streamer_->remove_camera()` 会销毁 `RecordBufferPool`。若 NvmeWorker 在 `remove_camera()` 之后才停止，worker 线程可能访问已释放的池内存。
+
+**解决**: 析构顺序严格保证 `deinit_nvme_()`（stop worker + join thread + delete）在 `streamer_->remove_camera()` 之前执行。NvmeWorker::stop() 设置 `running_ = false`，线程在下一轮循环检查标志后退出，`QThread::wait(3000)` 确保线程完全结束。

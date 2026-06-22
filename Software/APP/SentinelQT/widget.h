@@ -20,6 +20,8 @@ class SentinelLslidarer;
 class SentinelYoloInfer;
 class PreviewWorker;
 class FusionWorker;
+class NvmeWorker;
+class NVMeDataManager;
 class TopDownView;
 class VirtualKeyboard;
 class WebServer;
@@ -193,7 +195,17 @@ private:
     std::string web_fusion_config_(const std::string& body);
     std::string web_fusion_intrinsics_(int camNum, const std::string& body);
     std::string web_backtrack_query_(const std::string& body);
+    std::string web_delete_backtrack_(const std::string& body);
     std::string get_backtrack_files_json_() const;
+
+    // ---- NVMe ----
+    NVMeDataManager*    nvme_manager_ = nullptr;
+    NvmeWorker*         nvme_worker_ = nullptr;
+    QThread*            nvme_thread_ = nullptr;
+    QString             nvmeDevicePath_;
+    void init_nvme_();
+    void deinit_nvme_();
+    void do_backtrack_(uint64_t triggerTimestampUs, int cameraId, const QString& label);
 
     // ---- Backtrack helpers ----
     QTableWidget*       backtrackTable_;

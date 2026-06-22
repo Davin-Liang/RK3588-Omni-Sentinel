@@ -51,12 +51,12 @@ target_link_libraries(nvme_data_manager_lib PUBLIC
 )
 
 # 编译可执行测试程序 (Demo)
-add_executable(nvme_demo
+add_executable(nvme_demo EXCLUDE_FROM_ALL
     src/nvme_demo.cpp
 )
 
 # 编译可执行 Benchmark 程序
-add_executable(nvme_benchmark
+add_executable(nvme_benchmark EXCLUDE_FROM_ALL
     src/nvme_benchmark.cpp
 )
 
@@ -68,8 +68,11 @@ target_link_libraries(nvme_benchmark
     nvme_data_manager_lib
 )
 
-# 安装规则
-install(TARGETS nvme_demo nvme_benchmark DESTINATION ./)
+# 安装规则 (demo/benchmark 仅 standalone 构建时安装)
+install(TARGETS nvme_data_manager_lib DESTINATION lib)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    install(TARGETS nvme_demo nvme_benchmark DESTINATION ./)
+endif()
 install(DIRECTORY ${FFMPEG_ROOT}/lib/ DESTINATION lib
     FILES_MATCHING PATTERN "*.so*")
 

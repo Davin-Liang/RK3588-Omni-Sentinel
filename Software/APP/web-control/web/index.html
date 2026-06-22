@@ -159,11 +159,11 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview0">开启预览</button>
       <button class="btn btn-off" id="btnStream0">开始推流</button>
-      <button class="btn btn-blue" id="btnRecord0">开始录像</button>
-      <button class="btn btn-yellow" id="btnPause0">暂停</button>
-      <button class="btn btn-off" id="btnOsd0">OSD关</button>
-      <button class="btn btn-off" id="btnEis0">EIS关</button>
-      <button class="btn btn-off" id="btnLidarOsd0">LiDAR关</button>
+      <button class="btn btn-off" id="btnRecord0">开始录像</button>
+      <button class="btn btn-off" id="btnPause0">暂停</button>
+      <button class="btn btn-off" id="btnOsd0">框叠加</button>
+      <button class="btn btn-off" id="btnEis0">防抖关</button>
+      <button class="btn btn-off" id="btnLidarOsd0">点云投影关</button>
       <span style="font-size:12px;color:var(--text2)" id="camFps0"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot0"></div>
@@ -182,11 +182,11 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview1">开启预览</button>
       <button class="btn btn-off" id="btnStream1">开始推流</button>
-      <button class="btn btn-blue" id="btnRecord1">开始录像</button>
-      <button class="btn btn-yellow" id="btnPause1">暂停</button>
-      <button class="btn btn-off" id="btnOsd1">OSD关</button>
-      <button class="btn btn-off" id="btnEis1">EIS关</button>
-      <button class="btn btn-off" id="btnLidarOsd1">LiDAR关</button>
+      <button class="btn btn-off" id="btnRecord1">开始录像</button>
+      <button class="btn btn-off" id="btnPause1">暂停</button>
+      <button class="btn btn-off" id="btnOsd1">框叠加</button>
+      <button class="btn btn-off" id="btnEis1">防抖关</button>
+      <button class="btn btn-off" id="btnLidarOsd1">点云投影关</button>
       <span style="font-size:12px;color:var(--text2)" id="camFps1"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot1"></div>
@@ -258,8 +258,8 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
         </div>
         <div style="flex:1;overflow-y:auto;min-height:0;margin-top:4px">
           <table class="video-table">
-            <thead><tr><th>文件名</th><th>大小</th><th>类型</th></tr></thead>
-            <tbody id="backtrackBody"><tr><td colspan="3" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr></tbody>
+            <thead><tr><th>文件名</th><th>时长</th><th>大小</th><th>操作</th></tr></thead>
+            <tbody id="backtrackBody"><tr><td colspan="4" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -317,12 +317,12 @@ function updateUI(data){
 
     // Buttons
     const bs=document.getElementById('btnStream'+i);bs.textContent=cam[i].streaming?'停止推流':'开始推流';bs.className='btn '+(cam[i].streaming?'btn-on':'btn-off');
-    const br=document.getElementById('btnRecord'+i);br.textContent=cam[i].recording?'停止录像':'开始录像';br.className='btn '+(cam[i].recording?'btn-on':'btn-blue');
-    const bp=document.getElementById('btnPause'+i);bp.textContent=cam[i].paused?'恢复':'暂停';bp.className='btn '+(cam[i].paused?'btn-yellow':'btn-off');
-    const bo=document.getElementById('btnOsd'+i);bo.textContent=cam[i].osdEnabled?'OSD开':'OSD关';bo.className='btn '+(cam[i].osdEnabled?'btn-on':'btn-off');
-    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'EIS开':'EIS关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');
-    const bl=document.getElementById('btnLidarOsd'+i);bl.textContent=cam[i].lidarOsdEnabled?'LiDAR开':'LiDAR关';bl.className='btn '+(cam[i].lidarOsdEnabled?'btn-on':'btn-off');
-    const bv=document.getElementById('btnPreview'+i);bv.textContent=cam[i].previewActive?'关闭预览':'开启预览';bv.className='btn '+(cam[i].previewActive?'btn-yellow':'btn-off');
+    const br=document.getElementById('btnRecord'+i);br.textContent=cam[i].recording?'停止录像':'开始录像';br.className='btn '+(cam[i].recording?'btn-on':'btn-off');
+    const bp=document.getElementById('btnPause'+i);bp.textContent=cam[i].paused?'恢复':'暂停';bp.className='btn '+(cam[i].paused?'btn-on':'btn-off');
+    const bo=document.getElementById('btnOsd'+i);bo.textContent=cam[i].osdEnabled?'框去除':'框叠加';bo.className='btn '+(cam[i].osdEnabled?'btn-on':'btn-off');
+    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'防抖开':'防抖关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');
+    const bl=document.getElementById('btnLidarOsd'+i);bl.textContent=cam[i].lidarOsdEnabled?'点云投影开':'点云投影关';bl.className='btn '+(cam[i].lidarOsdEnabled?'btn-on':'btn-off');
+    const bv=document.getElementById('btnPreview'+i);bv.textContent=cam[i].previewActive?'关闭预览':'开启预览';bv.className='btn '+(cam[i].previewActive?'btn-on':'btn-off');
 
     // Status dot in control row
     const sd=document.getElementById('statusDot'+i);
@@ -414,6 +414,7 @@ function buildFusionParams(){
   trackerParams.forEach(([k,n,u,desc])=>{h+='<div class="param-row"><span class="param-name">'+n+'</span><input class="param-input" id="fp_'+k+'" type="number" step="any"><span class="param-unit">'+u+'</span><span class="param-help" onclick="toggleHelp(\'h_'+k+'\')">?</span></div><div class="param-desc" id="h_'+k+'" style="display:none">'+desc+'</div>'});
   [0,1].forEach(i=>{h+='<div class="param-title">相机'+(i+1)+' 内参</div>';['fx','fy','cx','cy'].forEach(f=>{h+='<div class="param-row"><span class="param-name">'+f.toUpperCase()+'</span><input class="param-input" id="fp_cam'+i+'_'+f+'" type="number" step="any"></div>'})});
   h+='<button class="btn btn-accent" onclick="saveFusionConfig()" style="width:100%;margin-top:8px;font-size:11px;padding:5px">保存参数</button>';
+  h+='<button class="btn btn-cream" onclick="alert(\'● 已确认 — 目标连续命中达到确认帧数，跟踪稳定可靠\\n\\n● 待确认 — 目标刚出现或命中帧数不足，处于试探性跟踪阶段\\n\\n● 滑行中 — 目标短暂丢失后靠速度预测维持，未观测到新数据\\n\\n● 告警 — 目标进入设定的告警距离范围，触发碰撞预警\')" style="width:100%;margin-top:4px;font-size:11px;padding:4px">? 图例说明</button>';
   c.innerHTML=h
 }
 let helpTimer=null;
@@ -453,15 +454,25 @@ async function loadBacktrackFiles() {
     const tb = document.getElementById('backtrackBody');
     tb.innerHTML = '';
     if (!d || !d.files || d.files.length === 0) {
-        tb.innerHTML = '<tr><td colspan="3" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr>';
+        tb.innerHTML = '<tr><td colspan="4" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr>';
         return;
     }
     d.files.forEach(v => {
         const tr = document.createElement('tr');
         const sizeKB = v.size ? (v.size / 1024).toFixed(1) + ' KB' : '--';
-        tr.innerHTML = '<td>' + v.name + '</td><td>' + sizeKB + '</td><td>' + (v.type || '--') + '</td>';
+        const dur = v.duration || '--:--';
+        const pp = encodeURIComponent(v.path || '');
+        tr.innerHTML = '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + v.name + '">' + v.name + '</td>'
+            + '<td>' + dur + '</td><td>' + sizeKB + '</td>'
+            + '<td><button class="btn-play" onclick="playVideo(\'' + pp + '\')">▶</button>'
+            + '<button class="btn-del" onclick="delBacktrackFile(\'' + encodeURIComponent(v.name) + '\')">删除</button></td>';
         tb.appendChild(tr);
     });
+}
+async function delBacktrackFile(name) {
+    if (!confirm('确认删除?')) return;
+    const r = await api('DELETE', '/backtrack/files', {name: decodeURIComponent(name)});
+    if (r.ok) { loadBacktrackFiles(); }
 }
 
 // ===== Misc =====

@@ -199,6 +199,7 @@ bool WebServer::start()
         handle_api(req, res, "DELETE");
     };
     impl_->httpServer_.Delete(R"(/api/v1/videos)", wrap_delete);
+    impl_->httpServer_.Delete(R"(/api/v1/backtrack/files)", wrap_delete);
 
     // 录像文件播放（流式输出，支持 Range 请求）
     impl_->httpServer_.Get(R"(/api/v1/playback)", [](const httplib::Request& req, httplib::Response& res) {

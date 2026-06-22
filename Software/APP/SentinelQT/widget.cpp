@@ -10,9 +10,12 @@
 #include "top_down_view.h"
 #include "virtual_keyboard.h"
 #include "imu_eis.hpp"
+#include "nvme_worker.h"
+#include "NVMeDataManager.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <chrono>
 #include <QThread>
 #include <QTimer>
 #include <QMessageBox>
@@ -85,14 +88,14 @@ void Widget::on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs)
         "[SentinelQT]   alert ts     : %llu us\n"
         "[SentinelQT]   back seconds : %.1f s\n"
         "[SentinelQT]   time range   : [%llu, %llu] us\n"
-        "[SentinelQT]   cameras      : CAM0 + CAM1\n"
-        "[SentinelQT]   status       : disk manager not ready, skip disk query\n"
         "[SentinelQT] ========================================\n",
         targetId,
         (unsigned long long)alertTsUs,
         backSecs,
         (unsigned long long)startTs,
         (unsigned long long)alertTsUs);
+
+    do_backtrack_(alertTsUs, -1, QString("alert_t%1").arg(targetId));
 }
 
 // ---- Styles ----
@@ -239,6 +242,8 @@ Widget::Widget(QWidget *parent)
     };
     ui->resCombo->setItemDelegate(new CenterDelegate(ui->resCombo));
     ui->resCombo1->setItemDelegate(new CenterDelegate(ui->resCombo1));
+    ui->resCombo->setFixedWidth(80);
+    ui->resCombo1->setFixedWidth(80);
 
     connect(ui->resCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int idx) {
@@ -323,6 +328,25 @@ Widget::Widget(QWidget *parent)
     viewLayout->setContentsMargins(0, 0, 0, 0);
     viewLayout->addWidget(topDownView_);
 
+    // 图例帮助按钮（叠放在 TopDownView 右下角）
+    QPushButton* legendHelpBtn = new QPushButton("?", topDownView_);
+    legendHelpBtn->setFixedSize(18, 18);
+    legendHelpBtn->setStyleSheet(
+        "QPushButton { font-size: 11px; font-weight: 700; color: #e6edf3;"
+        " background: #58a6ff; border-radius: 9px; border: none; }"
+        " QPushButton:pressed { background: #388bfd; }");
+    legendHelpBtn->setToolTip("点击查看图例说明");
+    connect(legendHelpBtn, &QPushButton::clicked, this, [this]() {
+        QMessageBox::information(this, "图例说明",
+            QString::fromUtf8(
+                "● 已确认 — 目标连续命中达到确认帧数，跟踪稳定可靠\n\n"
+                "● 待确认 — 目标刚出现或命中帧数不足，处于试探性跟踪阶段\n\n"
+                "● 外推中 — 目标短暂丢失后靠速度预测维持，未观测到新数据\n\n"
+                "● 告  警 — 目标进入设定的告警距离范围，触发碰撞预警"));
+    });
+    topDownView_->installEventFilter(this);
+    topDownView_->setProperty("legendHelpBtn", QVariant::fromValue<QWidget*>(legendHelpBtn));
+
     // VirtualKeyboard 替换占位
     virtualKeyboard_ = new VirtualKeyboard(ui->keyboardContainer);
     QVBoxLayout* kbLayout = new QVBoxLayout(ui->keyboardContainer);
@@ -386,6 +410,8 @@ Widget::Widget(QWidget *parent)
         }
     }
 
+    init_nvme_();
+
     set_status_("系统就绪", "#3fb950");
     update_button_states_();
 }
@@ -421,6 +447,8 @@ Widget::~Widget()
     }
     delete fusion_;
     delete lidar_;
+
+    deinit_nvme_();
 
     for (int i = 0; i < 2; ++i) {
         if (visioner_) {
@@ -460,6 +488,7 @@ void Widget::load_config_()
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
 
     backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
+    nvmeDevicePath_ = config_.value("Backtrack/nvmeDevice", "/dev/nvme0n1").toString();
 
     // EIS 防抖配置
     {
@@ -942,12 +971,12 @@ void Widget::update_camera_button_states_(int camNum)
 
     QPushButton* btnEis = cam_btn(ui->btnEis0, ui->btnEis1, camNum);
     if (eisEnabled_[camNum]) {
-        btnEis->setText(QString::fromUtf8("EIS\xe5\xbc\x80"));
+        btnEis->setText(QString::fromUtf8("防抖开"));
         btnEis->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
             "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
     } else {
-        btnEis->setText(QString::fromUtf8("EIS\xe5\x85\xb3"));
+        btnEis->setText(QString::fromUtf8("防抖关"));
         btnEis->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
             "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
@@ -1504,14 +1533,14 @@ void Widget::on_btn_osd_(int camNum)
             }
         }
         streamer_->set_stream_osd_mode(camNum, StreamOsdMode::WITH_OSD);
-        btn->setText("OSD开");
+        btn->setText("框去除");
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
             "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
         fprintf(stderr, "[SentinelQT] cam %d OSD enabled\n", camNum);
     } else {
         streamer_->set_stream_osd_mode(camNum, StreamOsdMode::WITHOUT_OSD);
-        btn->setText("OSD关");
+        btn->setText("框叠加");
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
             "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
@@ -1576,14 +1605,14 @@ void Widget::on_btn_lidar_osd_(int camNum)
         }
         setup_lidar_osd_provider_();
         streamer_->set_stream_lidar_osd_mode(camNum, StreamLidarOsdMode::WITH_LIDAR_OSD);
-        btn->setText("LiDAR开");
+        btn->setText("点云投影开");
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
             "background-color: #FF9800; border: 1px solid #F57C00; border-radius: 8px; }");
         fprintf(stderr, "[SentinelQT] cam %d LiDAR OSD enabled\n", camNum);
     } else {
         streamer_->set_stream_lidar_osd_mode(camNum, StreamLidarOsdMode::WITHOUT_LIDAR_OSD);
-        btn->setText("LiDAR关");
+        btn->setText("点云投影关");
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
             "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
@@ -1870,6 +1899,7 @@ std::string Widget::handle_web_command(const std::string& method,
     // ---- DELETE ----
     if (method == "DELETE") {
         if (path == "/api/v1/videos") return web_delete_video_(body);
+        if (path == "/api/v1/backtrack/files") return web_delete_backtrack_(body);
         return R"({"ok":false,"error":"unknown DELETE path"})";
     }
 
@@ -2062,7 +2092,7 @@ std::string Widget::web_osd_start_(int camNum)
     osdEnabled_[camNum] = true;
 
     QPushButton* btn = (camNum == 0) ? ui->btnOsd0 : ui->btnOsd1;
-    btn->setText("OSD开");
+    btn->setText("框去除");
     btn->setStyleSheet(
         "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
         "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
@@ -2078,7 +2108,7 @@ std::string Widget::web_osd_stop_(int camNum)
     osdEnabled_[camNum] = false;
 
     QPushButton* btn = (camNum == 0) ? ui->btnOsd0 : ui->btnOsd1;
-    btn->setText("OSD关");
+    btn->setText("框叠加");
     btn->setStyleSheet(
         "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
         "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
@@ -2160,7 +2190,7 @@ void Widget::deinit_eis_()
         eisEnabled_[i] = false;
         QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
         if (btn) {
-            btn->setText(QString::fromUtf8("EIS\xe5\x85\xb3"));
+            btn->setText(QString::fromUtf8("防抖关"));
             btn->setStyleSheet(
                 "QPushButton { font-size: 12px; font-weight: 600; "
                 "color: #e6edf3; background-color: #6e7681; "
@@ -2210,13 +2240,13 @@ void Widget::on_btn_eis_(int camNum)
     eisEnabled_[camNum] = !eisEnabled_[camNum];
 
     if (eisEnabled_[camNum]) {
-        btn->setText(QString::fromUtf8("EIS\xe5\xbc\x80"));
+        btn->setText(QString::fromUtf8("防抖开"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
             "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
         set_status_(QString("相机%1 EIS已启用").arg(camNum + 1), "#3fb950");
     } else {
-        btn->setText(QString::fromUtf8("EIS\xe5\x85\xb3"));
+        btn->setText(QString::fromUtf8("防抖关"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; "
             "color: #e6edf3; background-color: #6e7681; "
@@ -2265,7 +2295,7 @@ std::string Widget::web_lidar_osd_start_(int camNum)
     lidarOsdEnabled_[camNum] = true;
 
     QPushButton* btn = (camNum == 0) ? ui->btnLidarOsd0 : ui->btnLidarOsd1;
-    btn->setText("LiDAR开");
+    btn->setText("点云投影开");
     btn->setStyleSheet(
         "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
         "background-color: #FF9800; border: 1px solid #F57C00; border-radius: 8px; }");
@@ -2281,7 +2311,7 @@ std::string Widget::web_lidar_osd_stop_(int camNum)
     lidarOsdEnabled_[camNum] = false;
 
     QPushButton* btn = (camNum == 0) ? ui->btnLidarOsd0 : ui->btnLidarOsd1;
-    btn->setText("LiDAR关");
+    btn->setText("点云投影关");
     btn->setStyleSheet(
         "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
         "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
@@ -2336,6 +2366,23 @@ std::string Widget::web_delete_video_(const std::string& body)
         if (QFile::remove(QString::fromStdString(filePath))) {
             return R"({"ok":true})";
         }
+        return R"({"ok":false,"error":"delete failed"})";
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
+}
+
+std::string Widget::web_delete_backtrack_(const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+        std::string fileName = j.value("name", "");
+        if (fileName.empty())
+            return R"({"ok":false,"error":"missing name"})";
+        QDir dir(backtrackDir_);
+        QString filePath = dir.absoluteFilePath(QString::fromStdString(fileName));
+        if (QFile::remove(filePath))
+            return R"({"ok":true})";
         return R"({"ok":false,"error":"delete failed"})";
     } catch (...) {
         return R"({"ok":false,"error":"invalid JSON"})";
@@ -2826,16 +2873,19 @@ void Widget::build_backtrack_page_()
 
     // 文件列表
     backtrackTable_ = new QTableWidget(page);
-    backtrackTable_->setColumnCount(3);
-    backtrackTable_->setHorizontalHeaderLabels({"文件名", "大小", "类型"});
-    backtrackTable_->horizontalHeader()->setStretchLastSection(true);
+    backtrackTable_->setColumnCount(4);
+    backtrackTable_->setHorizontalHeaderLabels({"文件名", "时长", "大小", "操作"});
+    backtrackTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    backtrackTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    backtrackTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    backtrackTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     backtrackTable_->verticalHeader()->setVisible(false);
     backtrackTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     backtrackTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     backtrackTable_->setStyleSheet(
-        "QTableWidget { background-color: #F4EAC5; border: 1px solid #30363d; border-radius: 8px; }"
-        "QHeaderView::section { background-color: #F5F0D7; font-weight: 600; padding: 5px; border-bottom: 2px solid #30363d; }"
-        "QTableWidget::item { padding: 4px 6px; }");
+        "QTableWidget { background-color: #F4EAC5; border: 1px solid #30363d; border-radius: 8px; font-size: 14px; color: #2d3535; }"
+        "QHeaderView::section { background-color: #F5F0D7; color: #2d3535; font-size: 13px; font-weight: 600; padding: 6px; border: none; border-bottom: 2px solid #30363d; }"
+        "QTableWidget::item { padding: 6px; }");
     rootLayout->addWidget(backtrackTable_, 1);
 
     // 状态标签
@@ -2844,6 +2894,109 @@ void Widget::build_backtrack_page_()
     statusLabel->setAlignment(Qt::AlignCenter);
     statusLabel->setStyleSheet("font-size: 12px; color: #4a5555;");
     rootLayout->addWidget(statusLabel);
+}
+
+// ---- NVMe ----
+
+void Widget::init_nvme_()
+{
+    if (!config_.value("Backtrack/enabled", true).toBool())
+        return;
+
+    nvme_manager_ = new NVMeDataManager();
+    if (!nvme_manager_->initialize(nvmeDevicePath_.toUtf8().constData())) {
+        fprintf(stderr, "[SentinelQT] NVMe init failed\n");
+        delete nvme_manager_;
+        nvme_manager_ = nullptr;
+        set_status_("NVMe 不可用", "#f85149");
+        return;
+    }
+
+    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, 2);
+    nvme_thread_ = new QThread(this);
+    nvme_worker_->moveToThread(nvme_thread_);
+
+    connect(nvme_thread_, &QThread::started,
+            nvme_worker_, &NvmeWorker::start);
+    connect(nvme_worker_, &NvmeWorker::error,
+            this, [this](const QString& msg) {
+                set_status_("NVMe: " + msg, "#f85149");
+            });
+
+    nvme_thread_->start();
+    set_status_("NVMe 回溯已启动", "#2ea043");
+}
+
+void Widget::deinit_nvme_()
+{
+    if (nvme_worker_) {
+        nvme_worker_->stop();
+        if (nvme_thread_ && nvme_thread_->isRunning()) {
+            nvme_thread_->quit();
+            nvme_thread_->wait(3000);
+        }
+        delete nvme_worker_;
+        nvme_worker_ = nullptr;
+        delete nvme_thread_;
+        nvme_thread_ = nullptr;
+    }
+    if (nvme_manager_) {
+        nvme_manager_->shutdown();
+        delete nvme_manager_;
+        nvme_manager_ = nullptr;
+    }
+}
+
+void Widget::do_backtrack_(uint64_t triggerTsUs, int cameraId,
+                           const QString& label)
+{
+    if (!nvme_manager_) {
+        set_status_("NVMe 未初始化", "#f85149");
+        return;
+    }
+
+    double backSecs = backtrackSecsEdit_
+        ? backtrackSecsEdit_->text().toDouble()
+        : config_.value("Backtrack/maxBacktrackSeconds", 5.0).toDouble();
+
+    uint64_t triggerNs = triggerTsUs * 1000;
+
+    QDir dir(backtrackDir_);
+    if (!dir.exists()) dir.mkpath(".");
+
+    QString tsStr = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+
+    int startCam = (cameraId == -1) ? 0 : cameraId;
+    int endCam   = (cameraId == -1) ? 1 : cameraId;
+    int okCount  = 0;
+
+    for (int cam = startCam; cam <= endCam; ++cam) {
+        QString fileName = QString("backtrack_%1_%2_cam%3.mp4")
+            .arg(label, tsStr)
+            .arg(cam);
+        QString filePath = dir.absoluteFilePath(fileName);
+
+        bool ok = nvme_manager_->export_trigger_video_clip(
+            triggerNs, filePath.toStdString(), backSecs, 15,
+            camWidth_[cam], camHeight_[cam], cam,
+            true);
+
+        if (ok) {
+            fprintf(stderr, "[SentinelQT] backtrack clip saved: %s\n",
+                    filePath.toUtf8().constData());
+            ++okCount;
+        } else {
+            fprintf(stderr, "[SentinelQT] backtrack export failed for cam%d\n", cam);
+        }
+    }
+
+    if (okCount > 0) {
+        set_status_(QString("回溯完成: %1 个视频").arg(okCount), "#2ea043");
+    } else {
+        set_status_("回溯导出失败", "#f85149");
+    }
+
+    on_btn_refresh_backtrack_();
 }
 
 void Widget::on_btn_backtrack_page_()
@@ -2859,15 +3012,32 @@ void Widget::on_btn_back_from_backtrack_()
 
 void Widget::on_btn_backtrack_()
 {
+    // 检查是否在推流/录像，否则 RecordBufferPool 无数据
+    bool anyActive = false;
+    for (int i = 0; i < 2; ++i) {
+        if (streamer_->is_streaming(i) || streamer_->is_recording(i)) {
+            anyActive = true;
+            break;
+        }
+    }
+    if (!anyActive) {
+        QMessageBox::warning(this, "无法回溯",
+            "当前未在推流/录像，没有帧数据写入磁盘。\n请先开启推流或录像。");
+        return;
+    }
+
     double backSecs = backtrackSecsEdit_->text().toDouble();
     int cam = backtrackCamCombo_->currentData().toInt();
 
     fprintf(stderr,
-        "[SentinelQT] manual backtrack: cam=%d seconds=%.1f\n"
-        "[SentinelQT]   status: disk manager not ready, skip disk query\n",
+        "[SentinelQT] manual backtrack: cam=%d seconds=%.1f\n",
         cam, backSecs);
 
-    on_btn_refresh_backtrack_();
+    auto now = std::chrono::steady_clock::now();
+    uint64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()).count();
+
+    do_backtrack_(nowUs, cam, QString("manual_cam%1").arg(cam));
 }
 
 void Widget::on_btn_refresh_backtrack_()
@@ -2886,13 +3056,56 @@ void Widget::on_btn_refresh_backtrack_()
     for (const QFileInfo& fi : files) {
         int row = backtrackTable_->rowCount();
         backtrackTable_->insertRow(row);
-        backtrackTable_->setItem(row, 0, new QTableWidgetItem(fi.fileName()));
+
+        QTableWidgetItem* nameItem = new QTableWidgetItem(fi.fileName());
+        nameItem->setToolTip(fi.fileName());
+        backtrackTable_->setItem(row, 0, nameItem);
+
+        // 解析时长
+        QString durText = "--:--";
+        QString filePath = fi.absoluteFilePath();
+        AVFormatContext* ctx = avformat_alloc_context();
+        if (ctx && avformat_open_input(&ctx, filePath.toUtf8().constData(), nullptr, nullptr) == 0) {
+            if (avformat_find_stream_info(ctx, nullptr) >= 0) {
+                int64_t durUs = ctx->duration;
+                if (durUs <= 0) {
+                    int vs = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+                    if (vs >= 0 && ctx->streams[vs]->duration > 0)
+                        durUs = av_rescale_q(ctx->streams[vs]->duration,
+                                             ctx->streams[vs]->time_base, AV_TIME_BASE_Q);
+                }
+                durText = format_duration_(durUs);
+            }
+            avformat_close_input(&ctx);
+        }
+        if (ctx) avformat_free_context(ctx);
+
+        QTableWidgetItem* durItem = new QTableWidgetItem(durText);
+        durItem->setTextAlignment(Qt::AlignCenter);
+        backtrackTable_->setItem(row, 1, durItem);
+
         double sizeKB = fi.size() / 1024.0;
         QString sizeStr = sizeKB >= 1024.0
             ? QString("%1 MB").arg(sizeKB / 1024.0, 0, 'f', 1)
             : QString("%1 KB").arg(sizeKB, 0, 'f', 1);
-        backtrackTable_->setItem(row, 1, new QTableWidgetItem(sizeStr));
-        backtrackTable_->setItem(row, 2, new QTableWidgetItem(fi.suffix().toLower()));
+        backtrackTable_->setItem(row, 2, new QTableWidgetItem(sizeStr));
+
+        QPushButton* delBtn = new QPushButton("删除");
+        delBtn->setMinimumWidth(60);
+        delBtn->setStyleSheet(
+            "font-size: 13px; color: #2d3535; background-color: #F5F0D7;"
+            " border: 1px solid #f85149; border-radius: 4px; padding: 3px 14px;");
+        connect(delBtn, &QPushButton::clicked, this, [this, filePath]() {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this, "确认删除",
+                "确定要删除这个回溯文件吗？\n" + filePath,
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply == QMessageBox::Yes) {
+                QFile::remove(filePath);
+                on_btn_refresh_backtrack_();
+            }
+        });
+        backtrackTable_->setCellWidget(row, 3, delBtn);
     }
 }
 
@@ -2905,19 +3118,35 @@ std::string Widget::web_backtrack_query_(const std::string& body)
         int cam = j.value("cam", -1);
         double seconds = j.value("seconds", 5.0);
 
+        // 检查是否在推流/录像
+        bool anyActive = false;
+        for (int i = 0; i < 2; ++i) {
+            if (streamer_->is_streaming(i) || streamer_->is_recording(i)) {
+                anyActive = true;
+                break;
+            }
+        }
+        if (!anyActive)
+            return R"({"ok":false,"error":"not streaming or recording, no frame data"})";
+
         // 同步 Qt 界面控件
         backtrackSecsEdit_->setText(QString::number(seconds, 'f', 1));
         int comboIdx = backtrackCamCombo_->findData(cam);
         if (comboIdx >= 0) backtrackCamCombo_->setCurrentIndex(comboIdx);
 
         fprintf(stderr,
-            "[SentinelQT] web backtrack query: cam=%d seconds=%.1f\n"
-            "[SentinelQT]   status: disk manager not ready, skip disk query\n",
+            "[SentinelQT] web backtrack query: cam=%d seconds=%.1f\n",
             cam, seconds);
+
+        auto now = std::chrono::steady_clock::now();
+        uint64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()).count();
+
+        do_backtrack_(nowUs, cam, QString("web_cam%1").arg(cam));
 
         nlohmann::json resp;
         resp["ok"] = true;
-        resp["message"] = "backtrack request received, see terminal log";
+        resp["message"] = "backtrack completed, check file list";
         return resp.dump();
     } catch (...) {
         return R"({"ok":false,"error":"invalid JSON"})";
@@ -2933,8 +3162,37 @@ std::string Widget::get_backtrack_files_json_() const
         for (const QFileInfo& fi : list) {
             nlohmann::json v;
             v["name"] = fi.fileName().toStdString();
+            v["path"] = fi.absoluteFilePath().toStdString();
             v["size"] = fi.size();
-            v["type"] = fi.suffix().toStdString();
+
+            // 解析时长
+            QString durText = "--:--";
+            AVFormatContext* ctx = avformat_alloc_context();
+            if (ctx && avformat_open_input(&ctx, fi.absoluteFilePath().toUtf8().constData(), nullptr, nullptr) == 0) {
+                if (avformat_find_stream_info(ctx, nullptr) >= 0) {
+                    int64_t durUs = ctx->duration;
+                    if (durUs <= 0) {
+                        int vs = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+                        if (vs >= 0 && ctx->streams[vs]->duration > 0)
+                            durUs = av_rescale_q(ctx->streams[vs]->duration,
+                                                 ctx->streams[vs]->time_base, AV_TIME_BASE_Q);
+                    }
+                    if (durUs > 0) {
+                        int64_t totalSec = durUs / 1000000;
+                        int h = totalSec / 3600;
+                        int m = (totalSec % 3600) / 60;
+                        int s = totalSec % 60;
+                        if (h > 0)
+                            durText = QString("%1:%2:%3").arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
+                        else
+                            durText = QString("%1:%2").arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
+                    }
+                }
+                avformat_close_input(&ctx);
+            }
+            if (ctx) avformat_free_context(ctx);
+            v["duration"] = durText.toStdString();
+
             files.push_back(v);
         }
     }
@@ -2961,6 +3219,13 @@ bool Widget::eventFilter(QObject* obj, QEvent* event)
                     virtualKeyboard_->hide_keyboard();
                 }
             });
+        }
+    } else if (event->type() == QEvent::Resize && obj == topDownView_) {
+        QWidget* btn = topDownView_->property("legendHelpBtn").value<QWidget*>();
+        if (btn) {
+            int w = topDownView_->width();
+            int h = topDownView_->height();
+            btn->move(w - 26, h - 26);
         }
     }
     return QWidget::eventFilter(obj, event);

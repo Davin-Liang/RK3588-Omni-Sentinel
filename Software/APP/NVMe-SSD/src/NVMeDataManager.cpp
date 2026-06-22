@@ -29,9 +29,11 @@ NVMeDataManager::~NVMeDataManager() {
     shutdown();
 }
 
-bool NVMeDataManager::initialize() {
+bool NVMeDataManager::initialize(const char* device_path) {
+    nvme_device_path_ = device_path;
+
     // 打开NVMe设备（使用 O_DIRECT 绕过 page cache，降低 CPU 占用）
-    nvme_fd_ = open("/dev/nvme0n1", O_WRONLY | O_DIRECT);
+    nvme_fd_ = open(nvme_device_path_.c_str(), O_WRONLY | O_DIRECT);
     if (nvme_fd_ < 0) {
         std::cerr << "Failed to open NVMe device: " << strerror(errno) << std::endl;
         return false;
@@ -290,7 +292,7 @@ bool NVMeDataManager::write_imu_data_to_disk(const uint8_t* imu_data, size_t imu
 bool NVMeDataManager::read_video_frame_from_disk(uint64_t target_timestamp, float time_interval,
                                                   std::vector<uint8_t>& out_frame_data) {
     // 打开NVMe设备用于读取
-    int read_fd = open("/dev/nvme0n1", O_RDONLY);
+    int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
     if (read_fd < 0) {
         std::cerr << "Failed to open NVMe device for reading: " << strerror(errno) << std::endl;
         return false;
@@ -366,16 +368,19 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
                                                 int fps,
                                                 int frame_width,
                                                 int frame_height,
-                                                int camera_id) {
+                                                int camera_id,
+                                                bool input_is_nv12) {
     // 计算时间窗口（纳秒）：仅回溯 time_window_sec 秒
     uint64_t window_ns = static_cast<uint64_t>(time_window_sec * 1'000'000'000.0);
     uint64_t start_ns = (trigger_timestamp_ns > window_ns)
                       ? (trigger_timestamp_ns - window_ns) : 0;
     uint64_t end_ns = trigger_timestamp_ns;  // 不包含未来数据
-    const size_t expected_frame_size = static_cast<size_t>(frame_width) * frame_height * 3;
+    const size_t expected_frame_size = input_is_nv12
+        ? static_cast<size_t>(frame_width) * frame_height * 3 / 2
+        : static_cast<size_t>(frame_width) * frame_height * 3;
 
     // 打开 NVMe 设备用于读取
-    int read_fd = open("/dev/nvme0n1", O_RDONLY);
+    int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
     if (read_fd < 0) {
         std::cerr << "Failed to open NVMe device for reading: " << strerror(errno) << std::endl;
         return false;
@@ -519,23 +524,27 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
         return false;
     }
 
-    // Step C: 创建 swscale 上下文 (RGB888 → NV12)
-    SwsContext* swsCtx = sws_getContext(
-        frame_width, frame_height, AV_PIX_FMT_RGB24,
-        frame_width, frame_height, AV_PIX_FMT_NV12,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!swsCtx) {
-        std::cerr << "[NVMeExport] sws_getContext failed" << std::endl;
-        av_write_trailer(fmtCtx);
-        avio_closep(&fmtCtx->pb);
-        avformat_free_context(fmtCtx);
-        avcodec_free_context(&encCtx);
-        return false;
+    // Step C: 创建 swscale 上下文 (仅 RGB888→NV12 时需要)
+    SwsContext* swsCtx = nullptr;
+    if (!input_is_nv12) {
+        swsCtx = sws_getContext(
+            frame_width, frame_height, AV_PIX_FMT_RGB24,
+            frame_width, frame_height, AV_PIX_FMT_NV12,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!swsCtx) {
+            std::cerr << "[NVMeExport] sws_getContext failed" << std::endl;
+            av_write_trailer(fmtCtx);
+            avio_closep(&fmtCtx->pb);
+            avformat_free_context(fmtCtx);
+            avcodec_free_context(&encCtx);
+            return false;
+        }
     }
 
-    // Step D: 逐帧 RGB888 → NV12 → MPP 编码 → MP4 写盘
+    // Step D: 逐帧 → NV12 → MPP 编码 → MP4 写盘
     int64_t pts = 0;
     int64_t pts_step = 90000 / fps;
+    int y_size = frame_width * frame_height;
 
     for (const auto& fr : frames) {
         // D1: 创建 NV12 AVFrame
@@ -547,11 +556,16 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
         nv12->pts    = pts;
         av_frame_get_buffer(nv12, 0);
 
-        // D2: RGB888 → NV12
-        const uint8_t* srcData[1] = { fr.data.data() };
-        int srcStride[1] = { frame_width * 3 };
-        sws_scale(swsCtx, srcData, srcStride, 0, frame_height,
-                  nv12->data, nv12->linesize);
+        // D2: 填充 NV12 数据
+        if (input_is_nv12) {
+            memcpy(nv12->data[0], fr.data.data(), y_size);
+            memcpy(nv12->data[1], fr.data.data() + y_size, y_size / 2);
+        } else {
+            const uint8_t* srcData[1] = { fr.data.data() };
+            int srcStride[1] = { frame_width * 3 };
+            sws_scale(swsCtx, srcData, srcStride, 0, frame_height,
+                      nv12->data, nv12->linesize);
+        }
 
         pts += pts_step;
 
@@ -584,7 +598,7 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
     }
 
     // Step F: 清理
-    sws_freeContext(swsCtx);
+    if (swsCtx) sws_freeContext(swsCtx);
     av_write_trailer(fmtCtx);
     avio_closep(&fmtCtx->pb);
     avformat_free_context(fmtCtx);

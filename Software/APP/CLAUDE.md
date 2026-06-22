@@ -87,16 +87,23 @@ sentinel-streamer (推流与录像 + OSD 叠加组件)
   ├── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
   └── StreamOsdProvider 回调 (推理结果 → NV12 CPU 绘制，不依赖 yolo-infer 头文件)
 
+NVMe-SSD (NVMe 高速存储 + 视频回溯)
+  ├── 原始块设备 O_DIRECT 写入 (Header+payload+512B对齐, 环形缓冲)
+  ├── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil/libswscale, MPP 硬件编码导出 MP4)
+  ├── NVMeDataManager (生产者-消费者模式, 独立 writer 线程, 预分配内存池)
+  └── RecordBufferPool 下游消费 (NV12 帧直存, 绕过 swscale 零开销编码)
+
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
   ├── sentinel-yolo-infer (NPU 推理实例管理，懒加载创建/销毁)
-  ├── sentinel-streamer (推流/录像启停 + OSD provider 绑定)
+  ├── sentinel-streamer (推流/录像启停 + OSD provider 绑定 + RecordBufferPool 回溯源)
+  ├── NVMe-SSD (NvmeWorker QThread 持续写入帧, 回溯导出 MP4)
   ├── web-control (嵌入进程内 HTTP/WebSocket 服务器, REST API 远程控制)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
   ├── icm45686-eis-app (IMU 电子防抖, 回调注入 sentinel-visioner NPU 路径)
   ├── Qt5 Widgets (QStackedWidget 四页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] 8 节)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [NVMe] 等)
 ```
 
 ### web-control — Web 远程控制组件
@@ -254,7 +261,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
   - **告警输出**: 三层输出 — 俯视图红色脉冲圈 + 状态栏告警计数 + 终端 stderr `[FusionWarning]` 日志
   - **NPU 推理**: 融合线程通过 `DetectionProvider` 回调从 `SentinelYoloInfer` 获取真实 YOLO 检测结果（替换假检测），仅保留 person (classId=0) 且置信度 ≥ 0.75 的检测框
   - **数据回溯**: 第四页独立子页面，通过 RecordBufferPool 实现历史帧查询：
-    - **手动回溯**: 秒数输入框 + 相机选择器 + 回溯按钮，`on_btn_backtrack_()` 触发。当前为终端打印占位（待硬盘数据管理类就绪后从磁盘检索）
+    - **手动回溯**: 秒数输入框 + 相机选择器 + 回溯按钮，`on_btn_backtrack_()` 触发。NvmeWorker QThread 持续写入 NV12 帧 → NVMeDataManager → NVMe SSD。调用 `export_trigger_video_clip()` 扫描磁盘导出 MP4。"全部"模式两路各导出一个视频。Web 支持 POST 触发 + 播放 + 删除。存储格式 NV12 直存，导出时 memcpy 直送 MPP 零 swscale
     - **自动告警回溯**: 融合告警回调触发 `on_fusion_alert_backtrack_()`，根据告警时间戳和配置的回溯秒数终端打印回溯范围。双路相机同时回溯
     - **双向 Web↔Qt 同步**: dirty flag 机制 — 回溯参数/l融合参数/录分辨率通过 status JSON 推送同步，用户正在修改时暂停覆盖
 - **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）及日期时间。紧凑格式（无 `%` 符号）

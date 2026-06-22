@@ -237,7 +237,7 @@
           <item>
            <widget class="QPushButton" name="btnPause0">
             <property name="text"><string>暂停</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -245,8 +245,8 @@
           </item>
           <item>
            <widget class="QPushButton" name="btnOsd0">
-            <property name="text"><string>OSD关</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="text"><string>框叠加</string></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -254,8 +254,8 @@
           </item>
           <item>
            <widget class="QPushButton" name="btnEis0">
-            <property name="text"><string>EIS关</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="text"><string>防抖关</string></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -263,8 +263,8 @@
           </item>
           <item>
            <widget class="QPushButton" name="btnLidarOsd0">
-            <property name="text"><string>LiDAR关</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="text"><string>点云投影关</string></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -327,7 +327,7 @@
           <item>
            <widget class="QPushButton" name="btnPause1">
             <property name="text"><string>暂停</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -335,8 +335,8 @@
           </item>
           <item>
            <widget class="QPushButton" name="btnOsd1">
-            <property name="text"><string>OSD关</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="text"><string>框叠加</string></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -344,8 +344,8 @@
           </item>
           <item>
            <widget class="QPushButton" name="btnEis1">
-            <property name="text"><string>EIS关</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="text"><string>防抖关</string></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -353,8 +353,8 @@
           </item>
           <item>
            <widget class="QPushButton" name="btnLidarOsd1">
-            <property name="text"><string>LiDAR关</string></property>
-            <property name="minimumSize"><size><width>60</width><height>28</height></size></property>
+            <property name="text"><string>点云投影关</string></property>
+            <property name="minimumSize"><size><width>72</width><height>28</height></size></property>
             <property name="styleSheet">
              <string notr="true">QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; } QPushButton:hover { background-color: #8b949e; } QPushButton:pressed { background-color: #484f58; } QPushButton:disabled { color: #484f58; background-color: #21262d; border-color: #30363d; }</string>
             </property>
@@ -388,11 +388,8 @@
           </item>
           <item>
            <widget class="QComboBox" name="resCombo">
-            <property name="sizePolicy"><sizepolicy hsizetype="Fixed" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
-            <property name="minimumSize"><size><width>0</width><height>28</height></size></property>
-            <property name="maximumSize"><size><width>64</width><height>28</height></size></property>
             <property name="styleSheet">
-             <string notr="true">QComboBox { font-size: 13px; color: #2d3535; background-color: #F5F0D7; border: 1px solid #30363d; border-radius: 8px; padding: 2px 4px; } QComboBox:hover { border-color: #58a6ff; } QComboBox QAbstractItemView { background-color: #F4EAC5; color: #2d3535; selection-background-color: #58a6ff; border: 1px solid #30363d; } QComboBox::drop-down { border: none; width: 16px; }</string>
+             <string notr="true">QComboBox { font-size: 13px; color: #2d3535; background: #F5F0D7; border: 1px solid #30363d; border-radius: 6px; padding: 2px 4px; } QComboBox:hover { border-color: #58a6ff; } QComboBox QAbstractItemView { background: #F4EAC5; color: #2d3535; selection-background-color: #58a6ff; border: 1px solid #30363d; }</string>
             </property>
             <item><property name="text"><string>1080p</string></property></item>
             <item><property name="text"><string>720p</string></property></item>
@@ -408,11 +405,8 @@
           </item>
           <item>
            <widget class="QComboBox" name="resCombo1">
-            <property name="sizePolicy"><sizepolicy hsizetype="Fixed" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property>
-            <property name="minimumSize"><size><width>0</width><height>28</height></size></property>
-            <property name="maximumSize"><size><width>64</width><height>28</height></size></property>
             <property name="styleSheet">
-             <string notr="true">QComboBox { font-size: 13px; color: #2d3535; background-color: #F5F0D7; border: 1px solid #30363d; border-radius: 8px; padding: 2px 4px; } QComboBox:hover { border-color: #58a6ff; } QComboBox QAbstractItemView { background-color: #F4EAC5; color: #2d3535; selection-background-color: #58a6ff; border: 1px solid #30363d; } QComboBox::drop-down { border: none; width: 16px; }</string>
+             <string notr="true">QComboBox { font-size: 13px; color: #2d3535; background: #F5F0D7; border: 1px solid #30363d; border-radius: 6px; padding: 2px 4px; } QComboBox:hover { border-color: #58a6ff; } QComboBox QAbstractItemView { background: #F4EAC5; color: #2d3535; selection-background-color: #58a6ff; border: 1px solid #30363d; }</string>
             </property>
             <item><property name="text"><string>1080p</string></property></item>
             <item><property name="text"><string>720p</string></property></item>

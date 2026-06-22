@@ -49,7 +49,7 @@ public:
     NVMeDataManager& operator=(const NVMeDataManager&) = delete;
 
     // 初始化和清理
-    bool initialize();
+    bool initialize(const char* device_path = "/dev/nvme0n1");
     void shutdown();
 
     // 数据写入接口
@@ -72,7 +72,8 @@ public:
                                    int fps = 15,
                                    int frame_width = 1920,
                                    int frame_height = 1080,
-                                   int camera_id = -1);
+                                   int camera_id = -1,
+                                   bool input_is_nv12 = false);
 
     // 获取统计信息
     size_t get_queue_size() const;
@@ -125,6 +126,9 @@ private:
 
     // NVMe设备文件描述符
     int nvme_fd_;
+
+    // 设备路径
+    std::string nvme_device_path_;
 
     // 配置参数
     static constexpr size_t BUFFER_SIZE = 1024 * 1024;      // 1MB缓冲池
