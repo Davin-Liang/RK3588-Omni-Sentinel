@@ -81,6 +81,33 @@ target_link_libraries(icm45686_eis_demo PRIVATE
     m
 )
 
+# 离线画面抖动RMS评估工具
+# 该工具依赖 OpenCV，用于比较 raw.mp4 和 eis.mp4 的帧间位移RMS抖动。
+# 如果当前交叉编译环境中没有 OpenCV，则跳过该工具，不影响 IMU/EIS Demo 编译。
+find_package(OpenCV QUIET)
+
+if(OpenCV_FOUND)
+    message(STATUS "OpenCV found: ${OpenCV_VERSION}. Building icm45686_jitter_eval.")
+
+    add_executable(icm45686_jitter_eval
+        src/eis_jitter_eval.cpp
+    )
+
+    target_include_directories(icm45686_jitter_eval PRIVATE
+        ${ICM45686_INCLUDE_DIR}
+        ${OpenCV_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(icm45686_jitter_eval PRIVATE
+        ${OpenCV_LIBS}
+    )
+
+    install(TARGETS icm45686_jitter_eval DESTINATION ./)
+else()
+    message(WARNING "OpenCV not found. Skip icm45686_jitter_eval. "
+                    "Install OpenCV or build this tool on PC if you need frame jitter RMS evaluation.")
+endif()
+
 # 安装规则：安装到 install/ 目录根部，方便直接 scp 到板端
 install(TARGETS icm45686_app DESTINATION ./)
 install(TARGETS icm45686_eis_demo DESTINATION ./)
