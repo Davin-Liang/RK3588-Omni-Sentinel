@@ -45,6 +45,8 @@ struct StreamerContext {
     uint64_t baselineTsUs;  // 录制/推流开始时的系统时间，PTS 以此为基准
     StreamOsdMode osdMode;
     StreamOsdProvider osdProvider;
+    StreamLidarOsdMode lidarOsdMode;
+    StreamLidarOsdProvider lidarOsdProvider;
 
     // 录像参数
     RecordResolution recordResolution;
@@ -79,6 +81,7 @@ struct StreamerContext {
         , recordEnabled(false)
         , baselineTsUs(0)
         , osdMode(StreamOsdMode::WITHOUT_OSD)
+        , lidarOsdMode(StreamLidarOsdMode::WITHOUT_LIDAR_OSD)
         , recordResolution(RecordResolution::RES_1080P)
         , scale720pPool(nullptr)
         , streamEncCtx(nullptr)
@@ -230,6 +233,85 @@ static void draw_osd_boxes_(void* virtAddr, const std::vector<StreamOsdBBox>& bo
 }
 
 // ============================================================================
+// LiDAR OSD 绘制 — 投影点散点 + 距离标签
+// ============================================================================
+
+static void draw_lidar_points_(void* virtAddr, int streamWidth, int streamHeight,
+                                int srcWidth, int srcHeight,
+                                const std::vector<StreamLidarOsdBBox>& boxes)
+{
+    if (!virtAddr || boxes.empty() || srcWidth <= 0 || srcHeight <= 0) return;
+
+    initGlyphs_();
+
+    uint8_t* yPlane  = static_cast<uint8_t*>(virtAddr);
+    uint8_t* uvPlane = yPlane + streamWidth * streamHeight;
+    const int kStride = 1280;
+    float scale   = (std::min)(640.0f / srcWidth, 640.0f / srcHeight);
+    float scaledH = srcHeight * scale;
+    float padY    = (640.0f - scaledH) / 2.0f;
+
+    for (const auto& box : boxes) {
+        // ---- LiDAR 点散点 ----
+        for (uint32_t j = 0; j < box.pointCount; ++j) {
+            // pointsU/V 是 NPU 640×640 坐标系，需先逆 letterbox 回原生分辨率
+            float up = box.pointsU[j] / scale;
+            float vp = (box.pointsV[j] - padY) / scale;
+            int u_720 = static_cast<int>(up * streamWidth / srcWidth);
+            int v_720 = static_cast<int>(vp * streamHeight / srcHeight);
+            if (u_720 < 0 || u_720 >= kStride - 1 || v_720 < 0 || v_720 >= streamHeight - 1)
+                continue;
+
+            // 距离着色（Y + UV 平面，NV12 4:2:0）
+            uint8_t colorY, colorU, colorV;
+            if (box.distanceMeters < 5.0f) {
+                colorY = 160; colorU = 80;  colorV = 240;  // 红色
+            } else if (box.distanceMeters < 15.0f) {
+                colorY = 220; colorU = 30;  colorV = 230;  // 黄色
+            } else {
+                colorY = 180; colorU = 210; colorV = 50;   // 青色
+            }
+
+            // 2x2 像素方块（Y 平面）
+            for (int dy = 0; dy < 2; ++dy) {
+                yPlane[(v_720 + dy) * kStride + u_720]     = colorY;
+                yPlane[(v_720 + dy) * kStride + u_720 + 1] = colorY;
+            }
+            // NV12 UV 平面：一个 UV 对覆盖 2x2 Y 块
+            int uvOffset = (v_720 / 2) * kStride + (u_720 & ~1);
+            uvPlane[uvOffset]     = colorU;
+            uvPlane[uvOffset + 1] = colorV;
+        }
+
+        // ---- 距离标签（框左上角上方） ----
+        // NPU 640x640 → 原始分辨率
+        float xo = box.x1 / scale;
+        float yo = (box.y1 - padY) / scale;
+
+        int lx = static_cast<int>(xo * streamWidth / srcWidth);
+        int ly = static_cast<int>(yo * streamHeight / srcHeight);
+        ly = (std::max)(2, ly - 12);
+
+        char label[16];
+        snprintf(label, sizeof(label), "%.1fm",
+                 static_cast<double>(box.distanceMeters));
+        int labelW = 0;
+        for (const char* p = label; *p; ++p) {
+            labelW += g[static_cast<unsigned char>(*p)].w * 2 + 1;
+        }
+
+        // 标签背景
+        for (int y = ly; y < ly + 11 && y < streamHeight; ++y) {
+            for (int x = lx; x < lx + labelW + 4 && x < kStride; ++x) {
+                yPlane[y * kStride + x] = 60;
+            }
+        }
+        // 标签文字
+        draw_text_2x(yPlane, kStride, lx + 2, ly + 1, label, 255);
+    }
+}
+
+// ============================================================================
 // 推流线程主循环
 // ============================================================================
 
@@ -319,6 +401,12 @@ static void stream_thread_func_(StreamerContext* ctx)
                 std::vector<StreamOsdBBox> boxes;
                 if (ctx->osdProvider(ctx->camNum, boxes, 5)) {
                     draw_osd_boxes_(scaleBuf->virtAddr, boxes, srcW, srcH);
+                }
+            }
+            if (ctx->lidarOsdMode == StreamLidarOsdMode::WITH_LIDAR_OSD && ctx->lidarOsdProvider) {
+                std::vector<StreamLidarOsdBBox> lidarBoxes;
+                if (ctx->lidarOsdProvider(ctx->camNum, lidarBoxes, 5)) {
+                    draw_lidar_points_(scaleBuf->virtAddr, 1280, 720, srcW, srcH, lidarBoxes);
                 }
             }
             encode_and_mux(ctx->streamEncCtx,
@@ -605,6 +693,24 @@ void SentinelStreamer::set_osd_provider(StreamOsdProvider provider)
     for (int i = 0; i < 2; ++i) {
         if (contexts_[i]) {
             contexts_[i]->osdProvider = provider;
+        }
+    }
+}
+
+bool SentinelStreamer::set_stream_lidar_osd_mode(int camNum, StreamLidarOsdMode mode)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) {
+        return false;
+    }
+    contexts_[camNum]->lidarOsdMode = mode;
+    return true;
+}
+
+void SentinelStreamer::set_lidar_osd_provider(StreamLidarOsdProvider provider)
+{
+    for (int i = 0; i < 2; ++i) {
+        if (contexts_[i]) {
+            contexts_[i]->lidarOsdProvider = provider;
         }
     }
 }

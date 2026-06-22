@@ -452,6 +452,19 @@ void LidarTargetTracker::cluster_orphan_points_(
         float cy = clusters[ci].sumY / static_cast<float>(clusters[ci].count);
         if (std::sqrt(cx * cx + cy * cy) > 2.5f) continue;   // 忽略远处簇
 
+        // 跳过与已有 bbox 检测过近的孤儿簇（避免同一人产生两个目标）
+        bool tooClose = false;
+        for (uint32_t k = 0; k < detectionCount_; ++k) {
+            if (detections_[k].isOrphan) continue;
+            float dx = cx - detections_[k].x;
+            float dy = cy - detections_[k].y;
+            if (dx * dx + dy * dy < 1.5f * 1.5f) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (tooClose) continue;
+
         DetectionCandidate& det = detections_[detectionCount_];
         det.x           = cx;
         det.y           = cy;

@@ -10,6 +10,8 @@ RK3588-Omni-Sentinel 是一个基于瑞芯微 RK3588 的边缘端多传感器融
 
 本项目不是 ROS 工作空间。各组件独立编译，每个组件目录下有自己的 `build.sh` 和 `CMakeLists.txt`。全部使用 aarch64 交叉编译，目标平台为 RK3588 ARM64 Linux。
 
+**编译环境**：交叉编译必须在虚拟机（Linux）中进行，Windows 开发机无法直接编译。代码在 Windows 上编写，通过共享目录或 `scp` 传到虚拟机后再执行 `build.sh`。
+
 ### 通用编译流程
 
 每个组件目录下执行：

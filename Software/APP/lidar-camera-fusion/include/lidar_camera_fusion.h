@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -55,10 +56,43 @@ struct FusionResult {
 
     const uint32_t* bboxPointIndices;   ///< 展平的点索引数组，按 bbox 分段
     const uint32_t* bboxPointCounts;    ///< 数组，bboxPointCounts[i] = 第 i 个 bbox 的点数量
+    const float*    bboxPointU;         ///< 投影像素 U 坐标（原始图像空间），与 bboxPointIndices 同布局
+    const float*    bboxPointV;         ///< 投影像素 V 坐标（原始图像空间），与 bboxPointIndices 同布局
     uint32_t bboxCount;                 ///< 已累积的 bbox 总数
 };
 
 using DetectionProvider = std::function<bool(int camNum, std::vector<YoloBBox>& out, int timeoutMs)>;
+
+/**
+ * @struct PerCameraLidarOsd
+ * @brief  单路相机的 LiDAR OSD 快照数据（深拷贝，独立于融合内部缓冲区）。
+ */
+struct PerCameraLidarOsd {
+    int      camNum;
+    uint32_t imgWidth;
+    uint32_t imgHeight;
+    std::vector<float>    bboxPointU;
+    std::vector<float>    bboxPointV;
+    std::vector<uint32_t> bboxPointCounts;
+    uint32_t              bboxCount;
+    std::vector<uint32_t> bboxX1;
+    std::vector<uint32_t> bboxY1;
+    std::vector<uint32_t> bboxX2;
+    std::vector<uint32_t> bboxY2;
+    std::vector<float>    lidarPointX;
+    std::vector<float>    lidarPointY;
+    std::vector<uint32_t> bboxPointIndices;
+};
+
+/**
+ * @struct LidarOsdSnapshot
+ * @brief  多路相机 LiDAR OSD 快照，由融合线程写入、streamer 侧读取。
+ */
+struct LidarOsdSnapshot {
+    uint64_t          timestampNs;
+    PerCameraLidarOsd cameras[2];
+    uint32_t          camCount;
+};
 
 class SentinelLslidarer;
 class LidarTargetTracker;
@@ -132,6 +166,14 @@ public:
      * @param  provider  回调函数；返回 false 表示超时无数据
      */
     void set_detection_provider(DetectionProvider provider);
+
+    /**
+     * @brief  获取最新 LiDAR OSD 快照（非阻塞，线程安全）。
+     * @param  out       输出快照（深拷贝，调用者无需释放）
+     * @param  timeoutMs 保留参数，当前实现忽略
+     * @return true 有数据，false 尚无快照
+     */
+    bool try_get_lidar_osd_snapshot(LidarOsdSnapshot& out, int timeoutMs);
 
     /**
      * @brief  停止融合线程并等待退出。
@@ -256,6 +298,12 @@ private:
     uint32_t* bboxPointCountsBuf;
     uint32_t* bboxOffsets;
     uint32_t* writeCursor;
+    float*    bboxPointUBuf_;
+    float*    bboxPointVBuf_;
+    float*    tempU_;
+    float*    tempV_;
+    float*    lidarPointXBuf_;
+    float*    lidarPointYBuf_;
 
     FusionResult result_;
 
@@ -273,6 +321,10 @@ private:
     LidarPoint*        lidarPointsBuf_;
     DetectionProvider   detectionProvider_;
     std::vector<YoloBBox> fakeDetections_[kMaxCameras];  ///< 虚构测试数据，检测提供者未设置时使用
+
+    // ---- LiDAR OSD 快照 ----
+    std::mutex          osdSnapshotMutex_;
+    LidarOsdSnapshot    latestOsdSnapshot_;
 
     // ---- 目标跟踪 ----
     bool               trackingEnabled_{false};

@@ -266,6 +266,8 @@ Widget::Widget(QWidget *parent)
     connect(ui->btnOsd1,    &QPushButton::clicked, this, [this]() { on_btn_osd_(1); });
     connect(ui->btnEis0,    &QPushButton::clicked, this, [this]() { on_btn_eis_(0); });
     connect(ui->btnEis1,    &QPushButton::clicked, this, [this]() { on_btn_eis_(1); });
+    connect(ui->btnLidarOsd0, &QPushButton::clicked, this, [this]() { on_btn_lidar_osd_(0); });
+    connect(ui->btnLidarOsd1, &QPushButton::clicked, this, [this]() { on_btn_lidar_osd_(1); });
 
     // Global buttons
     connect(ui->btnVideos, &QPushButton::clicked, this, &Widget::on_btn_videos_);
@@ -1523,6 +1525,72 @@ void Widget::on_btn_osd_(int camNum)
     }
 }
 
+void Widget::setup_lidar_osd_provider_()
+{
+    if (!fusion_) return;
+    streamer_->set_lidar_osd_provider(
+        [this](int camNum, std::vector<StreamLidarOsdBBox>& out, int timeoutMs) {
+            LidarOsdSnapshot snap;
+            if (!fusion_->try_get_lidar_osd_snapshot(snap, timeoutMs))
+                return false;
+            for (uint32_t c = 0; c < snap.camCount; ++c) {
+                if (snap.cameras[c].camNum != camNum) continue;
+                auto& cam = snap.cameras[c];
+                uint32_t offset = 0;
+                for (uint32_t b = 0; b < cam.bboxCount; ++b) {
+                    StreamLidarOsdBBox box;
+                    box.x1 = cam.bboxX1[b];
+                    box.y1 = cam.bboxY1[b];
+                    box.x2 = cam.bboxX2[b];
+                    box.y2 = cam.bboxY2[b];
+                    box.pointCount = cam.bboxPointCounts[b];
+                    box.pointsU.assign(cam.bboxPointU.begin() + offset,
+                                       cam.bboxPointU.begin() + offset + box.pointCount);
+                    box.pointsV.assign(cam.bboxPointV.begin() + offset,
+                                       cam.bboxPointV.begin() + offset + box.pointCount);
+                    float sumDist = 0.0f;
+                    for (uint32_t j = 0; j < box.pointCount; ++j) {
+                        uint32_t pi = cam.bboxPointIndices[offset + j];
+                        sumDist += std::sqrt(cam.lidarPointX[pi] * cam.lidarPointX[pi] +
+                                              cam.lidarPointY[pi] * cam.lidarPointY[pi]);
+                    }
+                    box.distanceMeters = (box.pointCount > 0) ? sumDist / box.pointCount : 0.0f;
+                    offset += box.pointCount;
+                    out.push_back(std::move(box));
+                }
+            }
+            return !out.empty();
+        });
+}
+
+void Widget::on_btn_lidar_osd_(int camNum)
+{
+    lidarOsdEnabled_[camNum] = !lidarOsdEnabled_[camNum];
+    QPushButton* btn = (camNum == 0) ? ui->btnLidarOsd0 : ui->btnLidarOsd1;
+
+    if (lidarOsdEnabled_[camNum]) {
+        if (!fusionEnabled_ || !fusion_) {
+            fprintf(stderr, "[SentinelQT] LiDAR OSD requires fusion to be enabled\n");
+            lidarOsdEnabled_[camNum] = false;
+            return;
+        }
+        setup_lidar_osd_provider_();
+        streamer_->set_stream_lidar_osd_mode(camNum, StreamLidarOsdMode::WITH_LIDAR_OSD);
+        btn->setText("LiDAR开");
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #FF9800; border: 1px solid #F57C00; border-radius: 8px; }");
+        fprintf(stderr, "[SentinelQT] cam %d LiDAR OSD enabled\n", camNum);
+    } else {
+        streamer_->set_stream_lidar_osd_mode(camNum, StreamLidarOsdMode::WITHOUT_LIDAR_OSD);
+        btn->setText("LiDAR关");
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
+            "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
+        fprintf(stderr, "[SentinelQT] cam %d LiDAR OSD disabled\n", camNum);
+    }
+}
+
 void Widget::on_btn_fusion_toggle_()
 {
     if (!fusionEnabled_) {
@@ -1595,6 +1663,8 @@ void Widget::on_btn_fusion_toggle_()
 
         fusionStatusTimer_->start(1000);
         fusionEnabled_ = true;
+
+        setup_lidar_osd_provider_();
 
         ui->btnFusionToggle->setText("停止融合");
         ui->btnFusionToggle->setStyleSheet(FUSION_ON_STYLE);
@@ -1773,6 +1843,10 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/cam/0/eis/stop")       return web_eis_stop_(0);
         if (path == "/api/v1/cam/1/eis/start")      return web_eis_start_(1);
         if (path == "/api/v1/cam/1/eis/stop")       return web_eis_stop_(1);
+        if (path == "/api/v1/cam/0/lidar-osd/start") return web_lidar_osd_start_(0);
+        if (path == "/api/v1/cam/0/lidar-osd/stop")  return web_lidar_osd_stop_(0);
+        if (path == "/api/v1/cam/1/lidar-osd/start") return web_lidar_osd_start_(1);
+        if (path == "/api/v1/cam/1/lidar-osd/stop")  return web_lidar_osd_stop_(1);
         if (path == "/api/v1/system/start")         return web_system_start_();
         if (path == "/api/v1/system/stop")          return web_system_stop_();
         if (path == "/api/v1/lidar/start")          return web_lidar_start_();
@@ -2177,6 +2251,44 @@ std::string Widget::web_eis_stop_(int camNum)
     return R"({"ok":true})";
 }
 
+// ---- LiDAR OSD ----
+
+std::string Widget::web_lidar_osd_start_(int camNum)
+{
+    if (lidarOsdEnabled_[camNum]) return R"({"ok":true})";
+
+    if (!fusionEnabled_ || !fusion_) {
+        return R"({"ok":false,"error":"fusion not enabled"})";
+    }
+    setup_lidar_osd_provider_();
+    streamer_->set_stream_lidar_osd_mode(camNum, StreamLidarOsdMode::WITH_LIDAR_OSD);
+    lidarOsdEnabled_[camNum] = true;
+
+    QPushButton* btn = (camNum == 0) ? ui->btnLidarOsd0 : ui->btnLidarOsd1;
+    btn->setText("LiDAR开");
+    btn->setStyleSheet(
+        "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+        "background-color: #FF9800; border: 1px solid #F57C00; border-radius: 8px; }");
+    fprintf(stderr, "[SentinelQT] cam %d LiDAR OSD enabled via web\n", camNum);
+    return R"({"ok":true})";
+}
+
+std::string Widget::web_lidar_osd_stop_(int camNum)
+{
+    if (!lidarOsdEnabled_[camNum]) return R"({"ok":true})";
+
+    streamer_->set_stream_lidar_osd_mode(camNum, StreamLidarOsdMode::WITHOUT_LIDAR_OSD);
+    lidarOsdEnabled_[camNum] = false;
+
+    QPushButton* btn = (camNum == 0) ? ui->btnLidarOsd0 : ui->btnLidarOsd1;
+    btn->setText("LiDAR关");
+    btn->setStyleSheet(
+        "QPushButton { font-size: 12px; font-weight: 600; color: #e6edf3; "
+        "background-color: #6e7681; border: 1px solid #8b949e; border-radius: 8px; }");
+    fprintf(stderr, "[SentinelQT] cam %d LiDAR OSD disabled via web\n", camNum);
+    return R"({"ok":true})";
+}
+
 // ---- System ----
 
 std::string Widget::web_system_start_()
@@ -2323,6 +2435,8 @@ std::string Widget::web_fusion_start_()
     fusionStatusTimer_->start(1000);
     fusionEnabled_ = true;
 
+    setup_lidar_osd_provider_();
+
     ui->btnFusionToggle->setText("停止融合");
     ui->btnFusionToggle->setStyleSheet(FUSION_ON_STYLE);
     ui->fusionStatusLabel->setText("目标: 0 | 已确认: 0 | 告警: 0 | 融合: 运行中");
@@ -2395,6 +2509,7 @@ std::string Widget::get_status_json_() const
         cam["paused"]        = cameraPaused_[i];
         cam["osdEnabled"]    = osdEnabled_[i];
         cam["eisEnabled"]    = eisEnabled_[i];
+        cam["lidarOsdEnabled"] = lidarOsdEnabled_[i];
         cam["streaming"]     = streamer_ ? streamer_->is_streaming(i) : false;
         cam["recording"]     = streamer_ ? streamer_->is_recording(i) : false;
         cam["width"]         = camWidth_[i];

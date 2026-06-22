@@ -46,6 +46,34 @@ struct StreamOsdBBox {
 using StreamOsdProvider = std::function<bool(int camNum, std::vector<StreamOsdBBox>& out, int timeoutMs)>;
 
 /**
+ * @brief 推流 LiDAR OSD 模式
+ */
+enum class StreamLidarOsdMode {
+    WITHOUT_LIDAR_OSD = 0,  ///< 无 LiDAR 点叠加
+    WITH_LIDAR_OSD    = 1   ///< 叠加 LiDAR 点 + 距离标签
+};
+
+/**
+ * @brief LiDAR OSD 叠加数据（单框）
+ */
+struct StreamLidarOsdBBox {
+    uint32_t x1, y1, x2, y2;       ///< NPU 640x640 空间 bbox（距离标签定位用）
+    float    distanceMeters;        ///< 框内 LiDAR 点平均距离
+    std::vector<float> pointsU;     ///< 投影 U 坐标（原始图像空间）
+    std::vector<float> pointsV;     ///< 投影 V 坐标（原始图像空间）
+    uint32_t pointCount;            ///< = pointsU.size()
+};
+
+/**
+ * @brief LiDAR OSD 数据提供者回调
+ * @param camNum     摄像头编号
+ * @param out        输出 LiDAR OSD bbox 列表
+ * @param timeoutMs  超时毫秒数
+ * @return true 成功获取，false 超时
+ */
+using StreamLidarOsdProvider = std::function<bool(int camNum, std::vector<StreamLidarOsdBBox>& out, int timeoutMs)>;
+
+/**
  * @brief 状态回调事件类型
  */
 enum class StreamerEvent {
@@ -162,6 +190,20 @@ public:
      * @param provider 回调函数，streamer 推流线程每帧轮询获取检测框
      */
     void set_osd_provider(StreamOsdProvider provider);
+
+    /**
+     * @brief 设置推流 LiDAR OSD 模式（支持运行时切换）
+     * @param camNum 摄像头编号
+     * @param mode   WITHOUT_LIDAR_OSD / WITH_LIDAR_OSD
+     * @return true 成功 / false 失败
+     */
+    bool set_stream_lidar_osd_mode(int camNum, StreamLidarOsdMode mode);
+
+    /**
+     * @brief 设置 LiDAR OSD 数据提供者
+     * @param provider 回调函数，streamer 推流线程每帧轮询获取 LiDAR 点数据
+     */
+    void set_lidar_osd_provider(StreamLidarOsdProvider provider);
 
     // ================================================================
     // 录像

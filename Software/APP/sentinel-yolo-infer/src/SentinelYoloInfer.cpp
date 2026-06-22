@@ -219,12 +219,6 @@ void SentinelYoloInfer::infer_thread_loop_(std::shared_ptr<InferThreadContext> c
             }
             printf("[YOLO] cam %d frame %lu: %zu detections (%u person)\n",
                    camNum, (unsigned long)ctx->frameCount, boxes.size(), personCount);
-            for (const auto& b : boxes) {
-                printf("  class=%u conf=%.2f center=(%.0f,%.0f) box=(%u,%u,%u,%u)\n",
-                       b.classId, b.confidence,
-                       (b.x1 + b.x2) * 0.5f, (b.y1 + b.y2) * 0.5f,
-                       b.x1, b.y1, b.x2, b.y2);
-            }
         }
 
         if (!boxes.empty() || config_.pushEmptyResult) {

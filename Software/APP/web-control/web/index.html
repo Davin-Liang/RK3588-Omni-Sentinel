@@ -163,6 +163,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-yellow" id="btnPause0">暂停</button>
       <button class="btn btn-off" id="btnOsd0">OSD关</button>
       <button class="btn btn-off" id="btnEis0">EIS关</button>
+      <button class="btn btn-off" id="btnLidarOsd0">LiDAR关</button>
       <span style="font-size:12px;color:var(--text2)" id="camFps0"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot0"></div>
@@ -185,6 +186,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-yellow" id="btnPause1">暂停</button>
       <button class="btn btn-off" id="btnOsd1">OSD关</button>
       <button class="btn btn-off" id="btnEis1">EIS关</button>
+      <button class="btn btn-off" id="btnLidarOsd1">LiDAR关</button>
       <span style="font-size:12px;color:var(--text2)" id="camFps1"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot1"></div>
@@ -287,7 +289,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
-let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
+let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
 let trackingTargets=[],hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
@@ -306,7 +308,7 @@ function updateUI(data){
   if(data.hw&&data.hw.ok){const h=data.hw;document.getElementById('hwTemp').textContent=(h.temp>=0?h.temp:'--')+'°C';document.getElementById('hwCpu').textContent=h.cpu>=0?h.cpu:'--';if(h.rga&&h.rga.length)document.getElementById('hwRga').textContent=h.rga.map(v=>v>=0?v:'-').join('/');if(h.npu&&h.npu.length)document.getElementById('hwNpu').textContent=h.npu.map(v=>v>=0?v:'-').join('/')}
 
   for(let i=0;i<2;i++){const d=data['cam'+i];if(!d)continue;
-    Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
+    Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
 
     // Header dot
     document.getElementById('camDot'+i).className='cam-dot '+(cam[i].previewActive?'on':'off');
@@ -319,6 +321,7 @@ function updateUI(data){
     const bp=document.getElementById('btnPause'+i);bp.textContent=cam[i].paused?'恢复':'暂停';bp.className='btn '+(cam[i].paused?'btn-yellow':'btn-off');
     const bo=document.getElementById('btnOsd'+i);bo.textContent=cam[i].osdEnabled?'OSD开':'OSD关';bo.className='btn '+(cam[i].osdEnabled?'btn-on':'btn-off');
     const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'EIS开':'EIS关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');
+    const bl=document.getElementById('btnLidarOsd'+i);bl.textContent=cam[i].lidarOsdEnabled?'LiDAR开':'LiDAR关';bl.className='btn '+(cam[i].lidarOsdEnabled?'btn-on':'btn-off');
     const bv=document.getElementById('btnPreview'+i);bv.textContent=cam[i].previewActive?'关闭预览':'开启预览';bv.className='btn '+(cam[i].previewActive?'btn-yellow':'btn-off');
 
     // Status dot in control row
@@ -368,7 +371,7 @@ function updateTracking(data){if(data.targets){trackingTargets=data.targets;upda
 function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''}
 
 // ===== Buttons =====
-for(let i=0;i<2;i++){document.getElementById('btnPreview'+i).onclick=()=>togglePreview(i);document.getElementById('btnStream'+i).onclick=()=>toggleStream(i);document.getElementById('btnRecord'+i).onclick=()=>toggleRecord(i);document.getElementById('btnPause'+i).onclick=()=>togglePause(i);document.getElementById('btnOsd'+i).onclick=()=>toggleOsd(i);document.getElementById('btnEis'+i).onclick=()=>toggleEis(i)}
+for(let i=0;i<2;i++){document.getElementById('btnPreview'+i).onclick=()=>togglePreview(i);document.getElementById('btnStream'+i).onclick=()=>toggleStream(i);document.getElementById('btnRecord'+i).onclick=()=>toggleRecord(i);document.getElementById('btnPause'+i).onclick=()=>togglePause(i);document.getElementById('btnOsd'+i).onclick=()=>toggleOsd(i);document.getElementById('btnEis'+i).onclick=()=>toggleEis(i);document.getElementById('btnLidarOsd'+i).onclick=()=>toggleLidarOsd(i)}
 document.getElementById('btnSystem').onclick=async function(){const anyActive=cam[0].previewActive||cam[1].previewActive;await api('POST',anyActive?'/system/stop':'/system/start')};
 document.getElementById('btnReboot').onclick=async function(){if(confirm('确认重启应用?')){await api('POST','/system/stop');setTimeout(()=>api('POST','/system/start'),1000)}};
 async function togglePreview(i){await api('POST','/cam/'+i+'/preview/'+(cam[i].previewActive?'stop':'start'))}
@@ -377,6 +380,7 @@ async function toggleRecord(i){await api('POST','/cam/'+i+'/record/'+(cam[i].rec
 async function togglePause(i){await api('POST','/cam/'+i+'/'+(cam[i].paused?'resume':'pause'))}
 async function toggleOsd(i){await api('POST','/cam/'+i+'/osd/'+(cam[i].osdEnabled?'stop':'start'))}
 async function toggleEis(i){await api('POST','/cam/'+i+'/eis/'+(cam[i].eisEnabled?'stop':'start'))}
+async function toggleLidarOsd(i){await api('POST','/cam/'+i+'/lidar-osd/'+(cam[i].lidarOsdEnabled?'stop':'start'))}
 
 // ===== MJPEG =====
 function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('camVideo'+i),ph=document.getElementById('camPlaceholder'+i);const iframe=document.createElement('iframe');iframe.src='http://'+location.hostname+':8889/live/cam'+i+'/';iframe.allow='autoplay';iframe.style.width='100%';iframe.style.height='100%';iframe.style.border='none';pane.appendChild(iframe);hlsPlayer[i]=iframe;if(ph)ph.style.display='none'}function stopHls(i){if(hlsPlayer[i]){hlsPlayer[i].remove();hlsPlayer[i]=null}document.getElementById('camPlaceholder'+i).style.display=''}

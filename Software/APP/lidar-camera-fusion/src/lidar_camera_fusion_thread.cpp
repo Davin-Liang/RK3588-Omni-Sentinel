@@ -62,10 +62,10 @@ void LidarCameraFusion::fusion_thread_()
             } else {
                 generate_fake_detections_(c);
             }
-            // 过滤：只保留 person (classId=0) 且置信度 >= 0.75
+            // 过滤：只保留 person (classId=0) 且置信度 >= 0.60
             auto& dets = fakeDetections_[c];
             dets.erase(std::remove_if(dets.begin(), dets.end(),
-                [](const YoloBBox& b) { return b.classId != 0 || b.confidence < 0.75f; }),
+                [](const YoloBBox& b) { return b.classId != 0 || b.confidence < 0.60f; }),
                 dets.end());
         }
 
@@ -109,6 +109,65 @@ void LidarCameraFusion::fusion_thread_()
                     }
                 }
             }
+        }
+
+        // ---- 步骤 4.5：构建 LiDAR OSD 快照 ----
+        for (uint32_t i = 0; i < frame.pointsCount; ++i) {
+            lidarPointXBuf_[i] = lidarPointsBuf_[i].x;
+            lidarPointYBuf_[i] = lidarPointsBuf_[i].y;
+        }
+
+        LidarOsdSnapshot snap;
+        snap.timestampNs = frame.timestampNs;
+        snap.camCount = camCount_;
+
+        uint32_t globalBboxIdx = 0;
+        for (uint32_t c = 0; c < camCount_; ++c) {
+            auto& cam = snap.cameras[c];
+            cam.camNum = c;
+            cam.imgWidth  = camConfigs_[c].imgWidth;
+            cam.imgHeight = camConfigs_[c].imgHeight;
+
+            uint32_t camBboxCount = static_cast<uint32_t>(fakeDetections_[c].size());
+            cam.bboxCount = camBboxCount;
+            if (camBboxCount == 0) continue;
+
+            cam.bboxX1.resize(camBboxCount);
+            cam.bboxY1.resize(camBboxCount);
+            cam.bboxX2.resize(camBboxCount);
+            cam.bboxY2.resize(camBboxCount);
+            for (uint32_t b = 0; b < camBboxCount; ++b) {
+                cam.bboxX1[b] = fakeDetections_[c][b].x1;
+                cam.bboxY1[b] = fakeDetections_[c][b].y1;
+                cam.bboxX2[b] = fakeDetections_[c][b].x2;
+                cam.bboxY2[b] = fakeDetections_[c][b].y2;
+            }
+
+            cam.bboxPointCounts.assign(&bboxPointCountsBuf[globalBboxIdx],
+                                        &bboxPointCountsBuf[globalBboxIdx + camBboxCount]);
+
+            uint32_t pointStart = bboxOffsets[globalBboxIdx];
+            uint32_t pointEnd   = (globalBboxIdx + camBboxCount < result_.bboxCount)
+                                    ? bboxOffsets[globalBboxIdx + camBboxCount]
+                                    : totalCandidateCount;
+            uint32_t camPointCount = pointEnd - pointStart;
+
+            cam.bboxPointU.assign(&bboxPointUBuf_[pointStart],
+                                   &bboxPointUBuf_[pointStart + camPointCount]);
+            cam.bboxPointV.assign(&bboxPointVBuf_[pointStart],
+                                   &bboxPointVBuf_[pointStart + camPointCount]);
+            cam.bboxPointIndices.assign(&candidatePointBuf[pointStart],
+                                         &candidatePointBuf[pointStart + camPointCount]);
+
+            cam.lidarPointX.assign(lidarPointXBuf_, lidarPointXBuf_ + frame.pointsCount);
+            cam.lidarPointY.assign(lidarPointYBuf_, lidarPointYBuf_ + frame.pointsCount);
+
+            globalBboxIdx += camBboxCount;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(osdSnapshotMutex_);
+            latestOsdSnapshot_ = std::move(snap);
         }
 
         // ---- 步骤 5：目标跟踪 ----

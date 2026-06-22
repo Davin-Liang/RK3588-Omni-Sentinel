@@ -172,6 +172,10 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/cam/1/osd/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/eis/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/eis/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/lidar-osd/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/lidar-osd/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/lidar-osd/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/lidar-osd/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/system/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/system/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/lidar/start)", wrap_post);

@@ -81,6 +81,7 @@ private slots:
     // ---- OSD ----
     void on_btn_osd_(int camNum);
     void on_btn_eis_(int camNum);
+    void on_btn_lidar_osd_(int camNum);
 
 private:
     Ui::Widget *ui;
@@ -123,6 +124,7 @@ private:
     SentinelYoloInfer*  yoloInfer_ = nullptr;
     bool                osdEnabled_[2] = {false, false};
     bool                eisEnabled_[2] = {false, false};
+    bool                lidarOsdEnabled_[2] = {false, false};
     FusionWorker*       fusionWorker_;
     QThread*            fusionThread_;
     QTimer*             fusionStatusTimer_;
@@ -150,6 +152,7 @@ private:
     void load_config_();
     void init_eis_();
     void deinit_eis_();
+    void setup_lidar_osd_provider_();
     bool eis_offset_callback_(uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
@@ -177,6 +180,8 @@ private:
     std::string web_osd_stop_(int camNum);
     std::string web_eis_start_(int camNum);
     std::string web_eis_stop_(int camNum);
+    std::string web_lidar_osd_start_(int camNum);
+    std::string web_lidar_osd_stop_(int camNum);
     std::string web_system_start_();
     std::string web_system_stop_();
     std::string web_delete_video_(const std::string& path);
