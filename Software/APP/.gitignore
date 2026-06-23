@@ -1,0 +1,6 @@
+# FFmpeg 交叉编译产物（47MB+，不入仓库）
+3rdparty/ffmpeg/
+
+# 构建产物
+sentinel-streamer/build/
+sentinel-streamer/install/

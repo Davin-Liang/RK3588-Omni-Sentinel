@@ -1,0 +1,115 @@
+<h1>六、WebControl — Web 远程控制组件</h1><hr/>
+<h2>1. 组件概览</h2>
+<p>WebControl 是 RK3588-Omni-Sentinel 平台的 Web 远程控制组件，在 SentinelQT 进程中嵌入轻量级 HTTP/WebSocket 服务器（cpp-httplib，MIT 协议），通过 REST API + WebSocket 实时推送实现浏览器远程操控板端设备。配套单文件 SPA 前端（index.html），完全复刻 QT 界面的视觉风格（配色、字体、圆角、语义按钮色）。推流画面通过 MJPEG 轮询（150ms）实时显示。</p>
+<callout emoji="💡" background-color="light-blue" border-color="blue"><b>核心价值</b>：用户无需走到设备前操作触屏，在局域网任意浏览器中打开 http://&lt;板端IP&gt;:8080 即可查看双路相机画面、控制推流/录像/融合、管理录像文件，所有操作与 QT 界面实时双向同步。</callout><hr/>
+<h2>2. 架构设计</h2>
+<pre lang="text" caption="架构总览">浏览器 (index.html SPA)
+  │
+  ├── HTTP REST (8080) ──── WebServer (cpp-httplib, 独立 std::thread)
+  │                              │ QMetaObject::invokeMethod
+  │                              │ (BlockingQueuedConnection)
+  │                              ▼
+  ├── WebSocket (8080) ────  Widget (Qt5 主线程)
+  │                              │ 直接调用
+  │                              ▼
+  └── MJPEG snapshot.jpg ─── sentinel-visioner / sentinel-streamer /
+                               sentinel-lslidarer / lidar-camera-fusion
+                               (现有 C++ 组件，零修改)</pre>
+<p><b>线程模型</b>：WebServer 独立 std::thread 运行 cpp-httplib::listen() 阻塞循环；广播线程每 50ms 消费消息队列广播 WebSocket；cpp-httplib 内部线程池（2 线程）并行处理 HTTP 请求。</p>
+<p><b>同步机制</b>：REST 命令通过 QMetaObject::invokeMethod + BlockingQueuedConnection 阻塞 WebServer 线程直到主线程执行完毕；WebSocket 推送使用 std::queue + std::mutex 消息队列（主线程非阻塞投递，广播线程消费）；MJPEG 快照从 on_frame_ready_() 更新的 QImage 缓存（std::mutex 保护）读取并编码。</p>
+<callout emoji="⚠️" background-color="light-red" border-color="red"><b>析构顺序</b>：WebServer 必须在 Widget 其他成员之前 stop() + delete，否则 BlockingQueuedConnection 可能在事件循环停止后死锁。</callout><hr/>
+<h2>3. 核心数据流</h2>
+<p><b>REST 命令流（浏览器→QT）</b>：浏览器 fetch POST → cpp-httplib 路由匹配 → cmdHandler_ → QMetaObject::invokeMethod(widget, lambda, BlockingQueuedConnection) → 主线程 handle_web_command() → 返回 JSON 响应。</p>
+<p><b>状态推送流（QT→浏览器）</b>：QTimer 1Hz → update_hw_usage_() → webServer_->push_status() → 推入 sendQueue_ (mutex) → 广播线程 50ms drain → ws.send() → WebSocket → 浏览器 updateUI()。</p>
+<p><b>跟踪推送流</b>：FusionWorker 100ms poll → copy_tracked_targets() → emit trackingUpdated → on_tracking_updated_() → webServer_->push_tracking() → WebSocket → Canvas 俯视图 drawRadar()。</p>
+<p><b>视频显示流</b>：点击"开始推流" → POST stream/start → toggleStream() 延迟 1s → startMjpegVideo() → 每 150ms 轮询 GET snapshot.jpg → 从预览帧缓存读取 QImage → JPEG 编码 → img 标签显示。</p><hr/>
+<h2>4. 关键代码示例</h2>
+<pre lang="cpp" caption="最小集成示例">// Widget 构造函数中
+webServer_ = new WebServer(8080);
+webServer_->set_command_handler([this](auto&amp; method, auto&amp; path, auto&amp; body) {
+    std::string result;
+    QMetaObject::invokeMethod(this, [&amp;]() {
+        result = handle_web_command(method, path, body);
+    }, Qt::BlockingQueuedConnection);
+    return result;
+});
+webServer_->start();
+
+// 定时推送状态 (1Hz)
+webServer_->push_status(get_status_json_());
+
+// 析构函数中优先停止
+webServer_->stop();
+delete webServer_;</pre>
+<pre lang="javascript" caption="浏览器端 API 调用">// 按钮点击 -> REST API
+async function toggleStream(camNum) {
+  if (cam[camNum].streaming) {
+    await apiPost(`/cam/${camNum}/stream/stop`);
+    stopMjpegVideo(camNum);
+  } else {
+    await apiPost(`/cam/${camNum}/stream/start`);
+    setTimeout(() => startMjpegVideo(camNum), 1000);
+  }
+}</pre><hr/>
+<h2>5. 设计决策剖析</h2>
+<table><thead><tr><th background-color="light-gray">决策</th><th background-color="light-gray">选择</th><th background-color="light-gray">对比方案</th><th background-color="light-gray">理由</th></tr></thead><tbody>
+<tr><td>后端技术栈</td><td>C++ cpp-httplib 嵌入 SentinelQT</td><td>Python Flask 独立进程</td><td>零额外运行时依赖，直接调用 C++ API 无需 IPC；嵌入式 ARM64 设备避免增加 Python/Node.js 运行时</td></tr>
+<tr><td>线程通信</td><td>BlockingQueuedConnection</td><td>异步队列 + 回调</td><td>HTTP 请求必须同步返回操作结果；嵌入式低并发场景下简单可靠</td></tr>
+<tr><td>视频传输</td><td>MJPEG 轮询 (150ms)</td><td>WebRTC (mediamtx WHEP)</td><td>不依赖 mediamtx WebRTC 配置；利用现有预览帧缓存；局域网延迟可接受</td></tr>
+<tr><td>JSON 库</td><td>nlohmann/json</td><td>手写 JSON Builder</td><td>单头文件久经考验；项目有嵌套状态对象、跟踪目标数组等多种 schema，手写容易出错</td></tr>
+<tr><td>前端部署</td><td>文件系统加载</td><td>编译时嵌入 C++ 字符串</td><td>编辑 HTML 后重启即可生效；开发迭代快；避免大段 HTML 嵌入 .cpp 文件</td></tr>
+</tbody></table>
+<p><b>面试话术</b>："我们选择了 C++ 嵌入式方案而非 Python 独立进程。主要考虑三点：一是嵌入式 ARM64 设备资源有限，增加 Python 运行时约 50MB 内存开销；二是所有相机、流媒体、融合 API 都是 C++ 接口，同进程内直接调用零 IPC 延迟；三是 BlockingQueuedConnection 机制让 HTTP 请求能够同步返回操作结果，在 1-2 用户的嵌入式场景下完全够用。"</p><hr/>
+<h2>6. 性能基准数据</h2>
+<table><thead><tr><th background-color="light-gray">指标</th><th background-color="light-gray">数值</th></tr></thead><tbody>
+<tr><td>HTTP 请求延迟</td><td>小于 2ms（同进程 BlockingQueuedConnection）</td></tr>
+<tr><td>WebSocket 推送频率</td><td>状态 1Hz / 跟踪 5Hz / 事件即时</td></tr>
+<tr><td>MJPEG 帧率</td><td>约 6-7 fps（150ms 轮询间隔）</td></tr>
+<tr><td>内存增量</td><td>约 3MB（cpp-httplib + nlohmann/json + 前端页面）</td></tr>
+<tr><td>Web 前端大小</td><td>约 18KB（index.html 单文件，内联 CSS/JS）</td></tr>
+<tr><td>线程数</td><td>+3（WebServer 主线程 + 广播线程 + cpp-httplib 线程池x2）</td></tr>
+</tbody></table><hr/>
+<h2>7. Bug 故事与面试话术</h2>
+<p><b>Bug 1：HTTP 请求无响应 + 偶发 segfault</b></p>
+<callout emoji="⚠️" background-color="light-red" border-color="red"><b>现象</b>：网页按钮点击后 QT 界面无反应，终端偶尔出现 segfault。</callout>
+<p><b>原因</b>：web_server.cpp 中 wrap_post 等 lambda 使用 [&amp;] 捕获了局部变量 handle_api 的引用。start() 返回后 handle_api 被销毁，后续 HTTP 请求调用的是悬空引用，导致 use-after-free 未定义行为。</p>
+<p><b>解决</b>：将 [&amp;] 改为 [handle_api]（按值捕获，拷贝一份 std::function），lambda 拥有独立副本不随 start() 返回失效。</p>
+<p><b>面试话术</b>："这个 bug 的根因是一个经典的 C++ Lambda 生命周期问题。cpp-httplib 的路由注册把 lambda 存到了内部路由表，但 lambda 用 [&amp;] 捕获了 start() 函数里的局部 std::function。函数返回后，路由表里的 lambda 持有的引用指向已释放的栈内存。我用 GDB 看到 segfault 发生在 std::function::operator() 内部，倒推发现是捕获方式的问题。修复很简单——把 [&amp;] 改成 [handle_api]，按值捕获让 lambda 拥有一份独立的副本。"</p>
+<p><b>Bug 2：CPU 利用率在 QT 界面消失</b></p>
+<callout emoji="⚠️" background-color="light-red" border-color="red"><b>现象</b>：添加 Web 状态推送后，QT 标题栏 CPU 利用率不再更新。</callout>
+<p><b>原因</b>：get_hw_json_() 通过 const_cast 修改了 update_hw_usage_() 共用的 prevCpuTotal_/prevCpuIdle_ 缓存变量。CPU 计算依赖两次采样间的差值，get_hw_json_() 每次调用都重置缓存，导致 update_hw_usage_() 的采样间隔变得极短（两个函数几乎同时采样），差值趋近于 0。</p>
+<p><b>解决</b>：get_hw_json_() 改用独立的 static 变量，不与 update_hw_usage_() 共享缓存。</p>
+<p><b>面试话术</b>："这是一个典型的共享状态竞争问题，虽然不是多线程竞争（两个函数都在主线程），但是数据耦合导致的计算错误。教训是：即便是同一线程的只读操作，也要小心 const 函数通过 const_cast 偷偷修改成员变量。我们的修复方案是用 static 局部变量隔离两份缓存，各自独立计算 CPU 利用率。"</p>
+<p><b>Bug 3：Web 暂停导致 PreviewWorker 超时告警</b></p>
+<callout emoji="⚠️" background-color="light-red" border-color="red"><b>现象</b>：网页点击暂停后终端不断打印 "[PreviewWorker] no frame for 30 cycles"，QT 暂停不会。</callout>
+<p><b>原因</b>：web_pause_() 只停止了推流和录像，遗漏了 stop_preview_()。QT 的 on_btn_pause_() 会先停止预览再暂停相机。PreviewWorker 继续调用 try_get_preview()，但相机已暂停无新帧，30 次超时后打印警告。</p>
+<p><b>解决</b>：web_pause_() 增加 stop_preview_() 调用，与 QT 暂停逻辑对齐。最终统一为：停止推流→停止录像→停止预览→暂停相机。</p>
+<p><b>面试话术</b>："这个 bug 暴露了 Web 和 QT 两套控制逻辑不一致的风险。我写 web_pause_() 时参考了 on_btn_pause_() 的主体逻辑，但漏掉了预览停止步骤。修复后我把两者的流程统一为：停止推流→停止录像→停止预览→暂停相机。后续新增控制接口时应该优先考虑复用现有逻辑而非重写。"</p><hr/>
+<h2>8. API 接口参考</h2>
+<table><thead><tr><th background-color="light-gray">类别</th><th background-color="light-gray">端点</th><th background-color="light-gray">方法</th><th background-color="light-gray">说明</th></tr></thead><tbody>
+<tr><td>状态</td><td>/api/v1/status</td><td>GET</td><td>完整系统状态（相机、硬件、融合）</td></tr>
+<tr><td>状态</td><td>/api/v1/status/hw</td><td>GET</td><td>硬件状态（CPU/温度/RGA/NPU）</td></tr>
+<tr><td>相机</td><td>/api/v1/cam/{0,1}/stream/start</td><td>POST</td><td>启动 RTSP 推流</td></tr>
+<tr><td>相机</td><td>/api/v1/cam/{0,1}/stream/stop</td><td>POST</td><td>停止推流</td></tr>
+<tr><td>相机</td><td>/api/v1/cam/{0,1}/record/start</td><td>POST</td><td>启动 MP4 录像</td></tr>
+<tr><td>相机</td><td>/api/v1/cam/{0,1}/record/stop</td><td>POST</td><td>停止录像</td></tr>
+<tr><td>相机</td><td>/api/v1/cam/{0,1}/pause</td><td>POST</td><td>暂停相机（先停推流/录像/预览）</td></tr>
+<tr><td>相机</td><td>/api/v1/cam/{0,1}/resume</td><td>POST</td><td>恢复相机</td></tr>
+<tr><td>系统</td><td>/api/v1/system/start</td><td>POST</td><td>一键启动所有相机</td></tr>
+<tr><td>系统</td><td>/api/v1/system/stop</td><td>POST</td><td>一键停止所有相机</td></tr>
+<tr><td>雷达</td><td>/api/v1/lidar/start</td><td>POST</td><td>启动激光雷达</td></tr>
+<tr><td>融合</td><td>/api/v1/fusion/start</td><td>POST</td><td>启动融合跟踪（含雷达初始化）</td></tr>
+<tr><td>融合</td><td>/api/v1/fusion/config</td><td>GET/POST</td><td>读取/更新跟踪器参数</td></tr>
+<tr><td>录像</td><td>/api/v1/videos</td><td>GET</td><td>录像文件列表</td></tr>
+<tr><td>录像</td><td>/api/v1/videos</td><td>DELETE</td><td>删除录像文件</td></tr>
+<tr><td>实时</td><td>/ws</td><td>WebSocket</td><td>实时状态/跟踪/事件推送</td></tr>
+</tbody></table><hr/>
+<h2>9. 编译部署与系统集成</h2>
+<p><b>编译</b>：web-control 作为 SentinelQT 的 CMake 子目录编译，产物为静态库 libweb_control_lib.a。交叉编译器与 SentinelQT 相同（aarch64-buildroot-linux-gnu）。前端 index.html 由 CMake install 规则自动复制到 install/web/ 目录。</p>
+<pre lang="bash" caption="编译命令">cd SentinelQT &amp;&amp; ./build.sh
+ls install/SentinelQT          # 可执行文件
+ls install/web/index.html     # Web 前端</pre>
+<p><b>部署</b>：将 SentinelQT/install/ 整体拷贝到板端任意目录。运行时 WebServer 自动从 ./web/index.html 加载前端（支持多路径搜索）。</p>
+<callout emoji="⚠️" background-color="light-red" border-color="red"><b>注意</b>：浏览器和板端需在同一局域网。配置文件 config.ini 中 [WebServer] 节可设置端口和启用开关。板端需预先启动 mediamtx（RTSP 服务器）。MJPEG 视频显示依赖预览帧缓存，相机需已初始化。</callout>
+<p><b>依赖关系</b>：</p>
+<ul><li>Qt5::Widgets（QImage/QBuffer）</li><li>Threads::Threads（std::thread）</li><li>cpp-httplib（单头文件，MIT）</li><li>nlohmann/json（单头文件，MIT）</li><li>SentinelQT Widget（进程内集成，BlockingQueuedConnection 通信）</li></ul>

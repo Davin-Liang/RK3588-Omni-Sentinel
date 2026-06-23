@@ -44,15 +44,23 @@ add_library(sentinel_visioner_lib STATIC
 target_include_directories(sentinel_visioner_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${LIBRGA_INCLUDES}
+    ${FFMPEG_ROOT}/include
 )
 
 find_package(Threads REQUIRED)
+
+# FFmpeg (用于 MJPG 软件解码)
+set(FFMPEG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/ffmpeg)
+set(AVCODEC_LIB  ${FFMPEG_ROOT}/lib/libavcodec.so)
+set(AVUTIL_LIB   ${FFMPEG_ROOT}/lib/libavutil.so)
 
 # 链接对应的库
 target_link_libraries(sentinel_visioner_lib PUBLIC
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib
+    ${AVCODEC_LIB}
+    ${AVUTIL_LIB}
 )
 
 # 编译可执行测试程序 (Demo)
@@ -66,6 +74,26 @@ target_link_libraries(sentinel_visioner_demo1
     # ${OpenCV_LIBS}
 )
 
+# USB 摄像头测试
+add_executable(sentinel_visioner_demo2
+    src/demo2.cpp
+)
+
+target_link_libraries(sentinel_visioner_demo2
+    sentinel_visioner_lib
+)
+
+# 双路混合相机测试
+add_executable(sentinel_visioner_demo3
+    src/demo3.cpp
+)
+
+target_link_libraries(sentinel_visioner_demo3
+    sentinel_visioner_lib
+)
+
 # 安装规则
 install(TARGETS sentinel_visioner_demo1 DESTINATION ./)
+install(TARGETS sentinel_visioner_demo2 DESTINATION ./)
+install(TARGETS sentinel_visioner_demo3 DESTINATION ./)
 # install(DIRECTORY ${OPENCV_LIB_SRC_DIR}/ DESTINATION lib)
