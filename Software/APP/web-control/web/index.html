@@ -12,6 +12,15 @@
   --red2:#f85149;--blue:#1f6feb;--yellow:#d29922;--gray:#6e7681;
   --gray2:#8b949e;--text:#2d3535;--text2:#4a5555;--textL:#e6edf3;
   --border:#30363d;--radius:10px;--radius-sm:6px;--gap:14px;
+  --bg2:#4A7F74;
+}
+[data-theme="red"]{
+  --bg:#990033;--bg2:#7A0028;--card:#DDCDB7;--card2:#E8DDC9;
+  --accent:#E8A87C;--text:#3A2020;--text2:#5A4040;
+}
+[data-theme="blue"]{
+  --bg:#28517F;--bg2:#1E3E60;--card:#C7E1FA;--card2:#D8EAFC;
+  --accent:#7AB8E0;--text:#1A2A3A;--text2:#2A4055;
 }
 *{margin:0;padding:0;box-sizing:border-box}
 body{
@@ -54,7 +63,7 @@ body{
 .cam-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 
 /* Buttons */
-.btn{font-size:13px;font-weight:600;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;white-space:nowrap;transition:filter 0.15s}
+.btn{font-size:13px;font-weight:600;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;white-space:nowrap;transition:filter 0.15s;min-width:80px;text-align:center}
 .btn:hover{filter:brightness(1.15)}
 .btn:active{filter:brightness(0.9)}
 .btn-on{background:var(--red);color:var(--textL)}
@@ -144,6 +153,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
     <span>NPU <span class="val" id="hwNpu">-/-/-</span></span>
   </div>
   <div id="clock"></div>
+  <button class="btn btn-accent" id="themeBtn" title="切换配色">🎨</button>
 </div>
 
 <!-- Camera Row -->
@@ -286,6 +296,20 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 </div>
 
 <script>
+// ===== Theme =====
+(function(){
+  const themes=['default','red','blue'];
+  const saved=localStorage.getItem('theme')||'default';
+  if(saved!=='default') document.documentElement.setAttribute('data-theme',saved);
+  document.getElementById('themeBtn').addEventListener('click',function(){
+    const cur=document.documentElement.getAttribute('data-theme')||'default';
+    const i=themes.indexOf(cur),next=themes[(i+1)%themes.length];
+    if(next==='default') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme',next);
+    localStorage.setItem('theme',next);
+  });
+})();
+
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;

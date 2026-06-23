@@ -11,7 +11,9 @@
 #include "im2d.h"
 #include "drmrga.h"
 
-bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd)
+bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd,
+                             int eisOffsetX, int eisOffsetY, bool eisActive,
+                             int eisMargin)
 {
     if (srcFd <= 0 || dstFd <= 0) {
         fprintf(stderr, "[RgaScaler] invalid dmaFd\n");
@@ -39,17 +41,44 @@ bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd)
     rga_buffer_t srcBuf = wrapbuffer_handle(srcHandle, srcWidth, srcHeight, fmt, srcWidth, srcHeight);
     rga_buffer_t dstBuf = wrapbuffer_handle(dstHandle, 1280, 720, fmt, 1280, 720);
 
-    im_rect srect = {0, 0, srcWidth, srcHeight};
-    im_rect drect = {0, 0, 1280, 720};
-
-    rga_buffer_t pat;   memset(&pat,   0, sizeof(rga_buffer_t));
-    im_rect      prect; memset(&prect, 0, sizeof(im_rect));
-
     IM_STATUS ret;
-    if (srcWidth == 1280 && srcHeight == 720) {
-        ret = imcopy(srcBuf, dstBuf);
+    if (!eisActive) {
+        if (srcWidth == 1280 && srcHeight == 720) {
+            ret = imcopy(srcBuf, dstBuf);
+        } else {
+            im_rect srect = {0, 0, srcWidth, srcHeight};
+            im_rect drect = {0, 0, 1280, 720};
+
+            rga_buffer_t pat;   memset(&pat,   0, sizeof(rga_buffer_t));
+            im_rect      prect; memset(&prect, 0, sizeof(im_rect));
+
+            ret = improcess(srcBuf, dstBuf, pat, srect, drect, prect, 0);
+        }
     } else {
-        ret = improcess(srcBuf, dstBuf, pat, srect, drect, prect, 0);
+        const int marginX = eisMargin;
+        const int marginY = eisMargin * srcHeight / srcWidth;
+
+        int cropX = marginX + eisOffsetX;
+        int cropY = marginY + eisOffsetY;
+        int cropW = srcWidth  - 2 * marginX;
+        int cropH = srcHeight - 2 * marginY;
+
+        cropX &= ~1; cropY &= ~1;
+        cropW &= ~1; cropH &= ~1;
+
+        if (cropX < 0) cropX = 0;
+        if (cropY < 0) cropY = 0;
+        if (cropX + cropW > srcWidth)  cropX = srcWidth  - cropW;
+        if (cropY + cropH > srcHeight) cropY = srcHeight - cropH;
+        cropX &= ~1; cropY &= ~1;
+
+        im_rect srect = {cropX, cropY, cropW, cropH};
+        im_rect drect = {0, 0, 1280, 720};
+
+        rga_buffer_t pat;   memset(&pat,   0, sizeof(rga_buffer_t));
+        im_rect      prect; memset(&prect, 0, sizeof(im_rect));
+
+        ret = improcess(srcBuf, dstBuf, pat, srect, drect, prect, IM_SYNC);
     }
 
     releasebuffer_handle(srcHandle);
@@ -57,7 +86,8 @@ bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd)
 
     if (ret <= 0) {
         fprintf(stderr, "[RgaScaler] RGA %s failed (ret=%d)\n",
-                (srcWidth == 1280 && srcHeight == 720) ? "imcopy" : "improcess", (int)ret);
+                (!eisActive && srcWidth == 1280 && srcHeight == 720)
+                    ? "imcopy" : "improcess", (int)ret);
         return false;
     }
 

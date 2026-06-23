@@ -2167,6 +2167,18 @@ void Widget::init_eis_()
             return eis_offset_callback_(timestampUs, camNum, offsetX, offsetY);
         });
 
+    // 配置 EIS 参数（从 config.ini [EIS] 节读取）
+    {
+        int streamerMargin = config_.value("EIS/streamerMargin", 32).toInt();
+        float smoothAlpha = config_.value("EIS/smoothAlpha", 0.7f).toFloat();
+        for (int c = 0; c < 2; ++c) {
+            streamer_->set_eis_params(c, streamerMargin);
+        }
+        visioner_->set_eis_smooth_alpha(smoothAlpha);
+        fprintf(stderr, "[SentinelQT] EIS params: margin=%d smoothAlpha=%.2f\n",
+                streamerMargin, static_cast<double>(smoothAlpha));
+    }
+
     fprintf(stderr, "[SentinelQT] EIS initialized: %s @ %.0f Hz\n",
             devPath.c_str(), (double)sampleHz);
 }

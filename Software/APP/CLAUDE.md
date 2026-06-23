@@ -113,7 +113,7 @@ SentinelQT (QT5 嵌入式触控界面)
 - **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 27+ REST 路由（含回溯）和 WebSocket 端点
 - **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
 - **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
-- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局，CSS 完全复刻 QT 配色方案。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）
+- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）。**三主题切换**：默认墨绿、深红+象牙白、皇家蓝+碧落，🎨 按钮切换，localStorage 持久化
 - **数据回溯面板**: 右下角系统控制+回溯并排双卡片，含秒数输入/相机选择/文件列表，通过 REST API 与 Qt 双向 dirty flag 同步
 - **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
 - **暂停保护**: 暂停时自动停止推流/录像/预览；推流/录像启动时若相机已暂停则自动恢复，避免死锁
@@ -128,9 +128,12 @@ SentinelQT (QT5 嵌入式触控界面)
 
 - **Icm45686Reader**: 后台 `std::thread` 以可配置频率（默认 100Hz）轮询 `/dev/icm45686` ioctl，推入线程安全 `ImuRingBuffer`（默认 512 样本 `std::deque` + `std::mutex`）
 - **EisStabilizer**: 梯形陀螺仪积分 → 像素偏移。核心 API `calculate_eis_offset(focalX, focalY, targetTimestampNs, halfWindowMs, offsetX, offsetY)`，目标时间窗口查询 IMU 样本，小角度近似 `offset ≈ focal × angle`，裁剪到 `maxOffsetPixel`
-- **回调注入**: SentinelVisioner 加入 `set_eis_offset_callback(std::function)`，采集线程每帧调用回调获取偏移，传入 `rga_process_to_rgb_()` 的 `horizontalOffset/verticalOffset` 参数。仅作用于 NPU 640×640 RGB888 推理路径
+- **回调注入**: SentinelVisioner 加入 `set_eis_offset_callback(std::function)`，采集线程每帧调用回调获取偏移，传入 `rga_process_to_rgb_()` 的 `horizontalOffset/verticalOffset` 参数。**仅作用于 NPU 640×640 RGB888 推理路径（不作用于预览和推流原始帧）**
+- **偏移钳位**: `rga_process_to_rgb_()` 新增 drect 边界钳位，防止 letterbox 边距为零时 EIS 偏移导致 drect 越界 RGA 崩溃（#13）。`maxOffX = (dstW - scaled_w) / 2`
+- **低通滤波**: 采集线程内 EMA 平滑：`smoothed = alpha * current + (1-alpha) * prev`，消除 IMU 噪声微颤。通过 `set_eis_smooth_alpha()` 配置（默认 0.7），`config.ini` `[EIS]` 节 `smoothAlpha` 键可调
+- **Streamer EIS**: sentinel-streamer 的 `rga_scale_nv12_to_720p()` 支持 EIS crop+scale，在 1080p→720p 缩放步骤中一次 RGA 操作完成防抖。EIS 偏移通过 DmaBuffer_t 字段（`eisOffsetX/Y`、`eisActive`）随帧传递，裁切边距通过 `set_eis_params()` 配置（默认 32px，`config.ini` `[EIS]` 节 `streamerMargin`）。EIS 关闭时走原路径无开销
 - **两路隔离**: 两路相机共用 IMU 硬件和 Reader，但各自独立 `eisEnabled_[camNum]` 开关、`focalX/Y`、`axisSignX/Y`。线程安全：`setAxisSign()` 不在回调内调用，符号在回调结果上手动乘
-- **配置**: `config.ini` 中 `[EIS]` 节：`device`、`sampleHz`、`gyroRange/accelRange`、`halfWindowMs`、`maxOffsetPixel`、per-camera `focalX/Y` 和 `axisSignX/Y`
+- **配置**: `config.ini` 中 `[EIS]` 节：`device`、`sampleHz`、`gyroRange/accelRange`、`halfWindowMs`、`maxOffsetPixel`、`smoothAlpha`、`streamerMargin`、per-camera `focalX/Y` 和 `axisSignX/Y`
 - **API**: REST `POST /api/v1/cam/{0,1}/eis/start|stop`，WebSocket status 含 `eisEnabled` 字段
 - **依赖**: POSIX + pthread + libm + `<functional>`（回调），不依赖 ICM45686 头文件（sentinel-visioner 侧解耦）
 
@@ -216,6 +219,8 @@ SentinelQT (QT5 嵌入式触控界面)
 - **OSD 叠加**: 通过 `StreamOsdProvider` 回调注入检测框，推流线程每帧非阻塞轮询（5ms 超时），仅叠加推流画面不影响录像。Y 平面 2px 白色边框 + 标签（3×5 点阵字体 2x 放大），640×640 NPU → 720p 坐标自动变换（含 letterbox 逆变换）。`set_osd_provider()` 绑定 provider，`set_stream_osd_mode()` 运行时切换
 - **RecordBufferPool 环形缓冲**: 基于 DmaBufferPool + RGA DMA 拷贝的 NV12 帧环形缓冲区，在编码前暂存历史帧供数据回溯。每路独立，槽位数可配
 - **rga_nv12_copy**: RGA IM2D `imcopy` 硬件 DMA 零拷贝，避免 CPU memcpy 开销
+- **EIS 防抖推流/录像**: `rga_scale_nv12_to_720p()` 支持 EIS 参数（`eisOffsetX/Y`、`eisActive`、`eisMargin`），EIS 激活时在 1080p→720p 缩放中一次 RGA 完成 crop+scale 防抖。偏移量通过 DmaBuffer_t 字段随帧传递，无需重复计算
+- **录像 PTS 独立基准**: `recordBaseTsUs` 与推流 `baselineTsUs` 解耦，每次录像从首帧时间戳自动初始化，确保 PTS 从 0 开始
 - **回溯公共 API**: `init_record_buffer(camNum, slotCount, width, height)` 初始化缓冲池，`try_get_record_frame(camNum, &data, &size, &ts)` 非阻塞 FIFO 消费帧，`release_record_frame(camNum, data)` 归还缓冲
 
 唯一公共头文件: `include/sentinel_streamer.h`，API 类: `SentinelStreamer`
@@ -223,7 +228,7 @@ SentinelQT (QT5 嵌入式触控界面)
 ### dma-buffer-pool — DMA 内存池
 
 - O(1) 空闲链表（Free List）分配/归还模型
-- `DmaBuffer_t` 包含 dmaFd、virtAddr、timestampUs、链表 next 指针
+- `DmaBuffer_t` 包含 dmaFd、virtAddr、timestampUs、eisOffsetX/Y、eisActive、链表 next 指针
 - "花名册"（`allBuffers_` vector）确保析构时零泄漏回收
 - 通过 `3rdparty/allocator/dma_alloc.h` 调用底层 `dma_buf_alloc()`（DMA heap ioctl + mmap）
 

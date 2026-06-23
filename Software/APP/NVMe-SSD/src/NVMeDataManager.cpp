@@ -542,8 +542,7 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
     }
 
     // Step D: 逐帧 → NV12 → MPP 编码 → MP4 写盘
-    int64_t pts = 0;
-    int64_t pts_step = 90000 / fps;
+    uint64_t baseNs = frames.empty() ? 0 : frames[0].timestamp_ns;
     int y_size = frame_width * frame_height;
 
     for (const auto& fr : frames) {
@@ -553,7 +552,7 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
         nv12->format = AV_PIX_FMT_NV12;
         nv12->width  = frame_width;
         nv12->height = frame_height;
-        nv12->pts    = pts;
+        nv12->pts    = static_cast<int64_t>((fr.timestamp_ns - baseNs) * 90000 / 1000'000'000);
         av_frame_get_buffer(nv12, 0);
 
         // D2: 填充 NV12 数据
@@ -566,8 +565,6 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
             sws_scale(swsCtx, srcData, srcStride, 0, frame_height,
                       nv12->data, nv12->linesize);
         }
-
-        pts += pts_step;
 
         // D3: 送编码器
         avcodec_send_frame(encCtx, nv12);

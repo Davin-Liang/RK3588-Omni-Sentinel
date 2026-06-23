@@ -172,3 +172,23 @@ buf.length = 1;
 **原因**: FFmpeg MJPEG 解码器输出 `yuvj422p`（YUJV 4:2:2 平面格式），U/V 平面高度与 Y 平面相同（非 4:2:0 的一半）。原有 YUV420P→NV12 打包代码按半高度采样 UV，丢失一半色度数据。
 
 **解决**: 检测实际像素格式，422 时 `uvRowStep = 2`（垂直跳行子采样），420 时 `uvRowStep = 1`（直通）。
+
+---
+
+## 13. EIS 偏移导致 RGA improcess 失败（drect 越界）
+
+**现象**: 开启 EIS 防抖后晃动设备，终端打印 `[RGA Error] improcess failed`，NPU 推理图转换失败，YOLO 检测中断。
+
+**原因**: 1920×1080 → 640×640 letterbox 时，水平缩放比例恰好为 1/3，`scaled_w = 640` 刚好撑满目标宽度，水平 letterbox 边距为零。EIS 偏移直接叠加到 drect 起点上，任何非零水平偏移都导致 `drect.x < 0` 或 `drect.x + drect.w > dstW`。RGA 硬件拒绝越界矩形，返回 `-4`（out of bounds）。
+
+**解决**: 在 `rga_process_to_rgb_()` 中新增 EIS 偏移钳位，限制 `horizontalOffset` 和 `verticalOffset` 不超过 letterbox 边距范围（`maxOffX = (dstW - scaled_w) / 2`）。水平边距为零时，水平 EIS 偏移被钳位到 0，避免 RGA 崩溃。
+
+---
+
+## 14. EIS 低通滤波消除 IMU 微颤
+
+**现象**: EIS 开启后 NPU 画面有高频微颤（IMU 传感器噪声导致相邻帧偏移跳动 1-2 像素）。
+
+**原因**: `calculate_eis_offset()` 每帧直接返回 IMU 积分的瞬时偏移值，无任何时间域平滑。
+
+**解决**: 采集线程中新增指数移动平均（EMA）低通滤波：`smoothed = alpha * current + (1-alpha) * prev`，平滑系数 `alpha` 通过 `set_eis_smooth_alpha()` 配置（默认 0.7），`config.ini` 中 `[EIS]` 节 `smoothAlpha` 键可调。

@@ -255,6 +255,17 @@ public:
 
     void release_record_frame(int camNum, uint8_t* data);
 
+    // ================================================================
+    // EIS 防抖参数
+    // ================================================================
+
+    /**
+     * @brief 设置 EIS 防抖裁切边距（支持运行时热更新）
+     * @param camNum  摄像头编号
+     * @param margin  裁切边距（像素，默认 32，越大越稳但画面越放大）
+     */
+    void set_eis_params(int camNum, int margin);
+
 private:
     StreamerContext* contexts_[2];  ///< 最多支持 2 路摄像头，不透明实现
 };

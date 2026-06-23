@@ -217,8 +217,7 @@ void SentinelYoloInfer::infer_thread_loop_(std::shared_ptr<InferThreadContext> c
             for (const auto& b : boxes) {
                 if (b.classId == 0) ++personCount;
             }
-            printf("[YOLO] cam %d frame %lu: %zu detections (%u person)\n",
-                   camNum, (unsigned long)ctx->frameCount, boxes.size(), personCount);
+            // YOLO 检测日志已关闭
         }
 
         if (!boxes.empty() || config_.pushEmptyResult) {

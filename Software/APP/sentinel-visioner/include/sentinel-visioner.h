@@ -64,10 +64,17 @@ struct CameraContext {
     ThreadSafeQueue<DmaBuffer_t*> previewTaskQueue;   ///< 供预览消费者消费的 RGB888 图像队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue;  ///< 供推流/录像等后处理消费的原图队列
 
+    // EIS 低通滤波状态（每路独立）
+    float eisSmoothAlpha;
+    int32_t prevEisOffsetX;
+    int32_t prevEisOffsetY;
+    bool eisPrevValid;
+
     CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false),
         isPaused(false), camType(CameraType::ISP_CAM),
         v4l2BufType(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE),
-        actualPixelFormat(V4L2_PIX_FMT_NV12), srcBytesPerLine(0) {}
+        actualPixelFormat(V4L2_PIX_FMT_NV12), srcBytesPerLine(0),
+        eisSmoothAlpha(0.7f), prevEisOffsetX(0), prevEisOffsetY(0), eisPrevValid(false) {}
 };
 
 class SentinelVisioner {
@@ -164,6 +171,11 @@ public:
     void set_eis_offset_callback(std::function<bool(uint64_t timestampUs, int camNum,
                                  int32_t& offsetX, int32_t& offsetY)> callback);
 
+    /**
+     * @brief: 设置 EIS 偏移平滑系数（0~1，默认 0.7，越小越平滑）
+     */
+    void set_eis_smooth_alpha(float alpha);
+
 private:
     std::unordered_map<int, std::unique_ptr<CameraContext>> _cameraContextMap;
 
@@ -177,8 +189,7 @@ private:
     bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, int srcStride,
                                    DmaBuffer_t* dstBuf);
 
-    bool rga_copy_buffer_(int srcFd, int width, int height, int srcStride, DmaBuffer_t* dstBuf,
-                          int eisOffsetX = 0, int eisOffsetY = 0);
+    bool rga_copy_buffer_(int srcFd, int width, int height, int srcStride, DmaBuffer_t* dstBuf);
 
     bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight, int srcStride, DmaBuffer_t* dstBuf);
 

@@ -22,10 +22,14 @@ struct DmaBuffer_t {
     int width;               ///< 图像宽度
     int height;              ///< 图像高度
     uint64_t timestampUs;    ///< 时间戳
+    int32_t eisOffsetX;      ///< EIS 防抖水平偏移（像素）
+    int32_t eisOffsetY;      ///< EIS 防抖垂直偏移（像素）
+    bool eisActive;          ///< EIS 是否激活（区分"关EIS"和"开EIS但无抖动"）
     DmaBuffer_t* next;       ///< 指向下一个空闲节点的指针
 
-    DmaBuffer_t() : dmaFd(-1), virtAddr(nullptr), ifUse(false), 
-                    bufferSize(0), width(0), height(0), next(nullptr) {}
+    DmaBuffer_t() : dmaFd(-1), virtAddr(nullptr), ifUse(false),
+                    bufferSize(0), width(0), height(0), timestampUs(0),
+                    eisOffsetX(0), eisOffsetY(0), eisActive(false), next(nullptr) {}
 };
 
 /**
