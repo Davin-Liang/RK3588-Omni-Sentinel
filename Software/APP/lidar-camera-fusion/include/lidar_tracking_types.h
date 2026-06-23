@@ -51,15 +51,15 @@ struct TrackerConfig {
     uint32_t minClusterPoints           = 3;
 
     // ---- Alpha-Beta 滤波 ----
-    float    alpha                      = 0.7f;
-    float    beta                       = 0.3f;
+    float    alpha                      = 0.45f;
+    float    beta                       = 0.2f;
     float    minDtSec                   = 0.001f;
     float    maxDtSec                   = 1.0f;
     float    defaultDtSec               = 0.1f;
     uint32_t minHitsForVelocity         = 2;
 
     // ---- 关联 ----
-    float    maxAssociationDistMeters   = 2.0f;
+    float    maxAssociationDistMeters   = 1.5f;
     bool     requireClassIdMatch        = true;
 
     // ---- 生命周期 ----

@@ -61,9 +61,24 @@ if(NOT TARGET lidar_camera_fusion_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion ${CMAKE_CURRENT_BINARY_DIR}/fusion_build)
 endif()
 
+# YOLO NPU 推理
+if(NOT TARGET sentinel_yolo_infer_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer ${CMAKE_CURRENT_BINARY_DIR}/yolo_infer_build)
+endif()
+
 # Web 远程控制
 if(NOT TARGET web_control_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../web-control ${CMAKE_CURRENT_BINARY_DIR}/webcontrol_build)
+endif()
+
+# ICM45686 EIS 防抖
+if(NOT TARGET icm45686_eis_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
+endif()
+
+# NVMe SSD 回溯存储
+if(NOT TARGET nvme_data_manager_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../NVMe-SSD ${CMAKE_CURRENT_BINARY_DIR}/nvme_build)
 endif()
 
 find_package(Threads REQUIRED)
@@ -83,6 +98,8 @@ add_executable(SentinelQT
     top_down_view.h
     virtual_keyboard.cpp
     virtual_keyboard.h
+    nvme_worker.cpp
+    nvme_worker.h
     ${TS_FILES}
 )
 
@@ -92,6 +109,9 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../NVMe-SSD/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -101,10 +121,14 @@ target_link_libraries(SentinelQT PRIVATE
     sentinel_visioner_lib
     sentinel_lslidarer_lib
     lidar_camera_fusion_lib
+    sentinel_yolo_infer_lib
     web_control_lib
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib
+    icm45686_eis_lib
+    icm45686_user_lib
+    nvme_data_manager_lib
 )
 
 if(Qt5LinguistTools_FOUND)

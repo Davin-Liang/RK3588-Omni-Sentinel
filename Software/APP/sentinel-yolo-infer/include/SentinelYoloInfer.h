@@ -18,6 +18,8 @@
  * 坐标默认位于 SentinelVisioner::wait_get_npu(camNum) 输出的 NPU 小图坐标系，
  * 即通常为 640x640 RGB888 letterbox 图像坐标系。
  */
+#ifndef YOLO_BBOX_DEFINED
+#define YOLO_BBOX_DEFINED
 struct YoloBBox {
     uint32_t x1;          ///< 左上角像素坐标（包含）
     uint32_t y1;          ///< 左上角像素坐标（包含）
@@ -27,6 +29,7 @@ struct YoloBBox {
     float confidence;     ///< 置信度 [0.0, 1.0]
     uint64_t timestampNs; ///< 该检测框对应的图像帧时间戳（CLOCK_MONOTONIC, ns）
 };
+#endif
 
 using YoloBBoxList = std::vector<YoloBBox>;
 

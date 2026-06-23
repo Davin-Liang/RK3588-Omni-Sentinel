@@ -17,7 +17,9 @@
 // ---------------------------------------------------------------------------
 // RGA 缩放函数 (定义在 rga_scaler.cpp)
 // ---------------------------------------------------------------------------
-extern bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd);
+extern bool rga_scale_nv12_to_720p(int srcFd, int srcWidth, int srcHeight, int dstFd,
+                                       int eisOffsetX = 0, int eisOffsetY = 0,
+                                       bool eisActive = false, int eisMargin = 32);
 
 // ============================================================================
 // 全局状态回调
@@ -41,9 +43,14 @@ struct StreamerContext {
     // 状态
     std::atomic<bool> threadRunning{false};
     bool streamEnabled;
-    bool recordEnabled;
-    uint64_t baselineTsUs;  // 录制/推流开始时的系统时间，PTS 以此为基准
+    std::atomic<bool> recordEnabled{false};
+    uint64_t baselineTsUs;     // 推流的 PTS 基准
+    uint64_t recordBaseTsUs;   // 录像的 PTS 基准（独立，从首帧时间戳初始化）
+    bool recordBaseSet;        // 录像基准是否已初始化
     StreamOsdMode osdMode;
+    StreamOsdProvider osdProvider;
+    StreamLidarOsdMode lidarOsdMode;
+    StreamLidarOsdProvider lidarOsdProvider;
 
     // 录像参数
     RecordResolution recordResolution;
@@ -70,6 +77,9 @@ struct StreamerContext {
     // 录像帧环形缓冲池
     RecordBufferPool* recordPool;
 
+    // EIS 防抖参数
+    int eisMargin;           ///< 裁切边距（像素），默认 32
+
     StreamerContext()
         : camNum(-1)
         , visioner(nullptr)
@@ -77,7 +87,10 @@ struct StreamerContext {
         , streamEnabled(false)
         , recordEnabled(false)
         , baselineTsUs(0)
+        , recordBaseTsUs(0)
+        , recordBaseSet(false)
         , osdMode(StreamOsdMode::WITHOUT_OSD)
+        , lidarOsdMode(StreamLidarOsdMode::WITHOUT_LIDAR_OSD)
         , recordResolution(RecordResolution::RES_1080P)
         , scale720pPool(nullptr)
         , streamEncCtx(nullptr)
@@ -85,10 +98,231 @@ struct StreamerContext {
         , ffmpegPipe(nullptr)
         , mp4Ctx(nullptr)
         , recordPool(nullptr)
+        , eisMargin(32)
     {
         streamUrl[0] = '\0';
     }
 };
+
+// ============================================================================
+// OSD 绘制 — NV12 矩形边框 + 文字标签（CPU 直接写 DMA buffer）
+// ============================================================================
+
+// 3x5 迷你点阵字体（数字 0-9 + "person" 字符 + '.'）
+namespace {
+struct Glyph { uint8_t w; uint8_t rows[5]; };  // 最大 5 行
+
+bool glyphsInit = false;
+Glyph g[128];
+
+void initGlyphs_() {
+    if (glyphsInit) return;
+    // clang-format off
+    g['0'] = {3, {0x7,0x5,0x5,0x5,0x7}};
+    g['1'] = {3, {0x2,0x6,0x2,0x2,0x7}};
+    g['2'] = {3, {0x7,0x1,0x7,0x4,0x7}};
+    g['3'] = {3, {0x7,0x1,0x3,0x1,0x7}};
+    g['4'] = {3, {0x5,0x5,0x7,0x1,0x1}};
+    g['5'] = {3, {0x7,0x4,0x7,0x1,0x7}};
+    g['6'] = {3, {0x7,0x4,0x7,0x5,0x7}};
+    g['7'] = {3, {0x7,0x1,0x2,0x2,0x2}};
+    g['8'] = {3, {0x7,0x5,0x7,0x5,0x7}};
+    g['9'] = {3, {0x7,0x5,0x7,0x1,0x7}};
+    g['.'] = {1, {0x0,0x0,0x0,0x0,0x1}};
+    g['p'] = {3, {0x7,0x5,0x7,0x4,0x4}};
+    g['e'] = {3, {0x7,0x4,0x7,0x4,0x7}};
+    g['r'] = {3, {0x5,0x6,0x4,0x4,0x4}};
+    g['s'] = {3, {0x7,0x4,0x7,0x1,0x7}};
+    g['o'] = {3, {0x7,0x5,0x5,0x5,0x7}};
+    g['n'] = {3, {0x7,0x5,0x5,0x5,0x5}};
+    g[' '] = {2, {0x0,0x0,0x0,0x0,0x0}};
+    // clang-format on
+    glyphsInit = true;
+}
+
+// 在 Y 平面绘制 2x 放大的 3x5 字体字符（最终 6x10 px），返回绘制宽度
+int draw_char_2x(uint8_t* yPlane, int stride, int cx, int cy, char ch, uint8_t val) {
+    const Glyph& gl = g[static_cast<unsigned char>(ch)];
+    if (gl.w == 0) return 0;
+    for (int row = 0; row < 5; ++row) {
+        for (int col = 0; col < gl.w; ++col) {
+            if (gl.rows[row] & (1 << (gl.w - 1 - col))) {
+                int py = cy + row * 2;
+                int px = cx + col * 2;
+                yPlane[py * stride + px] = val;
+                yPlane[py * stride + px + 1] = val;
+                yPlane[(py + 1) * stride + px] = val;
+                yPlane[(py + 1) * stride + px + 1] = val;
+            }
+        }
+    }
+    return gl.w * 2 + 1;  // char width + 1px gap
+}
+
+// 绘制文字串，返回总宽度
+int draw_text_2x(uint8_t* yPlane, int stride, int cx, int cy,
+                  const char* text, uint8_t val) {
+    initGlyphs_();
+    int x = cx;
+    for (const char* p = text; *p; ++p) {
+        x += draw_char_2x(yPlane, stride, x, cy, *p, val);
+    }
+    return x - cx;
+}
+} // anonymous namespace
+
+static void draw_osd_boxes_(void* virtAddr, const std::vector<StreamOsdBBox>& boxes,
+                            int srcWidth, int srcHeight, int eisOffsetX, int eisOffsetY)
+{
+    if (!virtAddr || boxes.empty() || srcWidth <= 0 || srcHeight <= 0) return;
+
+    initGlyphs_();
+
+    uint8_t* yPlane = static_cast<uint8_t*>(virtAddr);
+    const int kStride = 1280;
+    const int kMaxY = 719;
+
+    // 计算 letterbox 参数（与 rga_process_to_rgb_ 一致）
+    float scale   = (std::min)(640.0f / srcWidth, 640.0f / srcHeight);
+    float scaledH = srcHeight * scale;
+    float padY    = (640.0f - scaledH) / 2.0f;
+
+    for (const auto& b : boxes) {
+        if (b.classId != 0) continue;   // 只叠加 person
+
+        // 640x640 NPU letterbox → 原始分辨率
+        float xo = b.x1 / scale;
+        float yo = (b.y1 - padY) / scale;
+        float wo = (b.x2 - b.x1) / scale;
+        float ho = (b.y2 - b.y1) / scale;
+
+        // 原始分辨率 → 1280x720
+        int bx1 = static_cast<int>(xo * 1280.0f / srcWidth);
+        int by1 = static_cast<int>(yo * 720.0f / srcHeight);
+        int bx2 = static_cast<int>((xo + wo) * 1280.0f / srcWidth);
+        int by2 = static_cast<int>((yo + ho) * 720.0f / srcHeight);
+
+        // EIS OSD 补偿暂撤，验证裸框对齐
+
+        // 裁剪
+        bx1 = (std::max)(0, bx1); by1 = (std::max)(0, by1);
+        bx2 = (std::min)(kStride - 1, bx2); by2 = (std::min)(kMaxY, by2);
+        if (bx1 >= bx2 || by1 >= by2) continue;
+
+        // 画白色边框（Y 平面 2px，不碰 UV）
+        for (int x = bx1; x <= bx2; ++x) {
+            yPlane[by1 * kStride + x] = 255;
+            if (by1 + 1 < 720) yPlane[(by1 + 1) * kStride + x] = 255;
+            yPlane[by2 * kStride + x] = 255;
+            if (by2 - 1 >= 0) yPlane[(by2 - 1) * kStride + x] = 255;
+        }
+        for (int y = by1; y <= by2; ++y) {
+            yPlane[y * kStride + bx1] = 255;
+            if (bx1 + 1 < kStride) yPlane[y * kStride + bx1 + 1] = 255;
+            yPlane[y * kStride + bx2] = 255;
+            if (bx2 - 1 >= 0) yPlane[y * kStride + bx2 - 1] = 255;
+        }
+
+        // 画标签（框顶上方，深色底 + 白色字）
+        char label[32];
+        snprintf(label, sizeof(label), "person %.2f",
+                 static_cast<double>(b.confidence));
+        int labelW = 0;
+        for (const char* p = label; *p; ++p) {
+            labelW += g[static_cast<unsigned char>(*p)].w * 2 + 1;
+        }
+        int lx = bx1 + 3;
+        int ly = (std::max)(2, by1 - 12);  // 标签 10px 高 + 2px 边距
+        // 标签背景
+        for (int y = ly; y < ly + 11 && y < 720; ++y) {
+            for (int x = lx; x < lx + labelW + 4 && x < kStride; ++x) {
+                yPlane[y * kStride + x] = 60;  // 深灰背景
+            }
+        }
+        // 标签文字（白色）
+        draw_text_2x(yPlane, kStride, lx + 2, ly + 1, label, 255);
+    }
+}
+
+// ============================================================================
+// LiDAR OSD 绘制 — 投影点散点 + 距离标签
+// ============================================================================
+
+static void draw_lidar_points_(void* virtAddr, int streamWidth, int streamHeight,
+                                int srcWidth, int srcHeight,
+                                const std::vector<StreamLidarOsdBBox>& boxes,
+                                int eisOffsetX, int eisOffsetY)
+{
+    if (!virtAddr || boxes.empty() || srcWidth <= 0 || srcHeight <= 0) return;
+
+    initGlyphs_();
+
+    uint8_t* yPlane  = static_cast<uint8_t*>(virtAddr);
+    uint8_t* uvPlane = yPlane + streamWidth * streamHeight;
+    const int kStride = 1280;
+    float scale   = (std::min)(640.0f / srcWidth, 640.0f / srcHeight);
+    float scaledH = srcHeight * scale;
+    float padY    = (640.0f - scaledH) / 2.0f;
+
+    for (const auto& box : boxes) {
+        // ---- LiDAR 点散点 ----
+        for (uint32_t j = 0; j < box.pointCount; ++j) {
+            // pointsU/V 是 NPU 640×640 坐标系，需先逆 letterbox 回原生分辨率
+            float up = box.pointsU[j] / scale;
+            float vp = (box.pointsV[j] - padY) / scale;
+            int u_720 = static_cast<int>(up * streamWidth / srcWidth);
+            int v_720 = static_cast<int>(vp * streamHeight / srcHeight);
+            if (u_720 < 0 || u_720 >= kStride - 1 || v_720 < 0 || v_720 >= streamHeight - 1)
+                continue;
+
+            // 距离着色（Y + UV 平面，NV12 4:2:0）
+            uint8_t colorY, colorU, colorV;
+            if (box.distanceMeters < 5.0f) {
+                colorY = 160; colorU = 80;  colorV = 240;  // 红色
+            } else if (box.distanceMeters < 15.0f) {
+                colorY = 220; colorU = 30;  colorV = 230;  // 黄色
+            } else {
+                colorY = 180; colorU = 210; colorV = 50;   // 青色
+            }
+
+            // 2x2 像素方块（Y 平面）
+            for (int dy = 0; dy < 2; ++dy) {
+                yPlane[(v_720 + dy) * kStride + u_720]     = colorY;
+                yPlane[(v_720 + dy) * kStride + u_720 + 1] = colorY;
+            }
+            // NV12 UV 平面：一个 UV 对覆盖 2x2 Y 块
+            int uvOffset = (v_720 / 2) * kStride + (u_720 & ~1);
+            uvPlane[uvOffset]     = colorU;
+            uvPlane[uvOffset + 1] = colorV;
+        }
+
+        // ---- 距离标签（框左上角上方） ----
+        // NPU 640x640 → 原始分辨率
+        float xo = box.x1 / scale;
+        float yo = (box.y1 - padY) / scale;
+
+        int lx = static_cast<int>(xo * streamWidth / srcWidth);
+        int ly = static_cast<int>(yo * streamHeight / srcHeight);
+        ly = (std::max)(2, ly - 12);
+
+        char label[16];
+        snprintf(label, sizeof(label), "%.1fm",
+                 static_cast<double>(box.distanceMeters));
+        int labelW = 0;
+        for (const char* p = label; *p; ++p) {
+            labelW += g[static_cast<unsigned char>(*p)].w * 2 + 1;
+        }
+
+        // 标签背景
+        for (int y = ly; y < ly + 11 && y < streamHeight; ++y) {
+            for (int x = lx; x < lx + labelW + 4 && x < kStride; ++x) {
+                yPlane[y * kStride + x] = 60;
+            }
+        }
+        // 标签文字
+        draw_text_2x(yPlane, kStride, lx + 2, ly + 1, label, 255);
+    }
+}
 
 // ============================================================================
 // 推流线程主循环
@@ -131,14 +365,18 @@ static void stream_thread_func_(StreamerContext* ctx)
         // ----------------------------------------------------------------
         DmaBuffer_t* scaleBuf = nullptr;
         bool needScale = ctx->streamEnabled ||
-                         (ctx->recordEnabled &&
+                         (ctx->recordEnabled.load(std::memory_order_acquire) &&
                           ctx->recordResolution == RecordResolution::RES_720P);
 
         if (needScale) {
             scaleBuf = ctx->scale720pPool->get_buffer();
             if (scaleBuf) {
                 scaleBuf->timestampUs = tsUs;
-                if (!rga_scale_nv12_to_720p(origBuf->dmaFd, origBuf->width, origBuf->height, scaleBuf->dmaFd)) {
+                if (!rga_scale_nv12_to_720p(origBuf->dmaFd, origBuf->width, origBuf->height,
+                                            scaleBuf->dmaFd,
+                                            static_cast<int>(origBuf->eisOffsetX),
+                                            static_cast<int>(origBuf->eisOffsetY),
+                                            origBuf->eisActive, ctx->eisMargin)) {
                     ctx->scale720pPool->release_buffer(scaleBuf);
                     scaleBuf = nullptr;
                 }
@@ -146,21 +384,33 @@ static void stream_thread_func_(StreamerContext* ctx)
         }
 
         // ----------------------------------------------------------------
-        // 步骤 3: 原始帧直接编码 → MP4 录像
+        // 步骤 3: 录像 PTS 基准（首帧初始化，确保录像从 0 开始）
+        // ----------------------------------------------------------------
+        int64_t recPts = pts;
+        if (ctx->recordEnabled.load(std::memory_order_acquire)) {
+            if (!ctx->recordBaseSet) {
+                ctx->recordBaseTsUs = tsUs;
+                ctx->recordBaseSet = true;
+            }
+            recPts = static_cast<int64_t>(tsUs - ctx->recordBaseTsUs) * 90000 / 1000000;
+        }
+
+        // ----------------------------------------------------------------
+        // 步骤 4: 原始帧直接编码 → MP4 录像
         //   - 1080p 录像: 使用 origBuf
         //   - 720p 录像且源已是 720p (如 USB 相机): 直接编码 origBuf，绕过 RGA 缩放
         // ----------------------------------------------------------------
         bool srcAlready720p = (origBuf->width == 1280 && origBuf->height == 720);
-        if (ctx->recordEnabled && ctx->recordEncCtx) {
+        if (ctx->recordEnabled.load(std::memory_order_acquire) && ctx->recordEncCtx) {
             if (ctx->recordResolution == RecordResolution::RES_1080P) {
                 encode_and_mux(ctx->recordEncCtx,
                                origBuf->virtAddr, origBuf->width, origBuf->height,
-                               pts,
+                               recPts,
                                nullptr, ctx->mp4Ctx);
             } else if (ctx->recordResolution == RecordResolution::RES_720P && srcAlready720p) {
                 encode_and_mux(ctx->recordEncCtx,
                                origBuf->virtAddr, origBuf->width, origBuf->height,
-                               pts,
+                               recPts,
                                nullptr, ctx->mp4Ctx);
             }
         }
@@ -168,12 +418,26 @@ static void stream_thread_func_(StreamerContext* ctx)
         // ----------------------------------------------------------------
         // 步骤 4: 归还原始 DMA 缓冲
         // ----------------------------------------------------------------
+        int srcW = origBuf->width;
+        int srcH = origBuf->height;
         ctx->visioner->release_orig_copy_buffer(ctx->camNum, origBuf);
 
         // ----------------------------------------------------------------
         // 步骤 5a: 720p RTSP 推流 (streamEncCtx → RTSP)
         // ----------------------------------------------------------------
         if (scaleBuf && ctx->streamEnabled && ctx->streamEncCtx) {
+            if (ctx->osdMode == StreamOsdMode::WITH_OSD && ctx->osdProvider) {
+                std::vector<StreamOsdBBox> boxes;
+                if (ctx->osdProvider(ctx->camNum, boxes, 5)) {
+                    draw_osd_boxes_(scaleBuf->virtAddr, boxes, srcW, srcH, 0, 0);
+                }
+            }
+            if (ctx->lidarOsdMode == StreamLidarOsdMode::WITH_LIDAR_OSD && ctx->lidarOsdProvider) {
+                std::vector<StreamLidarOsdBBox> lidarBoxes;
+                if (ctx->lidarOsdProvider(ctx->camNum, lidarBoxes, 5)) {
+                    draw_lidar_points_(scaleBuf->virtAddr, 1280, 720, srcW, srcH, lidarBoxes, 0, 0);
+                }
+            }
             encode_and_mux(ctx->streamEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
                            pts,
@@ -183,14 +447,14 @@ static void stream_thread_func_(StreamerContext* ctx)
         // ----------------------------------------------------------------
         // 步骤 5b: 720p MP4 录像 (1080p 源 → RGA 缩放 → MP4)
         // ----------------------------------------------------------------
-        if (scaleBuf && ctx->recordEnabled &&
+        if (scaleBuf && ctx->recordEnabled.load(std::memory_order_acquire) &&
             ctx->recordResolution == RecordResolution::RES_720P &&
             !srcAlready720p &&
             ctx->recordEncCtx)
         {
             encode_and_mux(ctx->recordEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
-                           pts,
+                           recPts,
                            nullptr, ctx->mp4Ctx);
         }
 
@@ -217,9 +481,9 @@ static void stream_thread_func_(StreamerContext* ctx)
         ++frameCount;
         if (frameCount % 30 == 0) {
             if (lastLogTs > 0 && tsUs > lastLogTs) {
-                double fps = 30.0 * 1000000.0 / static_cast<double>(tsUs - lastLogTs);
-                fprintf(stderr, "[SentinelStreamer] cam=%d FPS: %.1f\n",
-                        ctx->camNum, fps);
+                // double fps = 30.0 * 1000000.0 / static_cast<double>(tsUs - lastLogTs);
+                // fprintf(stderr, "[SentinelStreamer] cam=%d FPS: %.1f\n",
+                //         ctx->camNum, fps);
             }
             lastLogTs = tsUs;
         }
@@ -421,7 +685,8 @@ bool SentinelStreamer::stop_stream(int camNum)
 
     // 只在确定线程已停时安全清理（编码器 + 可能延迟关闭的 mp4Ctx）
     if (threadStopped) {
-        fprintf(stderr, "[SentinelStreamer] DEBUG: closing both encoders...\n");
+        fprintf(stderr, "[SentinelStreamer] DEBUG: flushing & closing both encoders...\n");
+        mpp_encoder_flush(ctx->recordEncCtx, ctx->mp4Ctx);
         if (ctx->mp4Ctx) {
             mp4_output_close(&ctx->mp4Ctx);
         }
@@ -449,22 +714,51 @@ bool SentinelStreamer::set_stream_osd_mode(int camNum, StreamOsdMode mode)
     if (camNum < 0 || camNum > 1 || !contexts_[camNum]) {
         return false;
     }
+    contexts_[camNum]->osdMode = mode;
+    return true;
+}
 
-    StreamerContext* ctx = contexts_[camNum];
+void SentinelStreamer::set_osd_provider(StreamOsdProvider provider)
+{
+    for (int i = 0; i < 2; ++i) {
+        if (contexts_[i]) {
+            contexts_[i]->osdProvider = provider;
+        }
+    }
+}
 
-    if (ctx->streamEnabled) {
-        fprintf(stderr, "[SentinelStreamer] cannot change OSD mode while streaming\n");
+bool SentinelStreamer::set_stream_lidar_osd_mode(int camNum, StreamLidarOsdMode mode)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) {
         return false;
     }
-
-    ctx->osdMode = mode;
-
-    if (mode == StreamOsdMode::WITH_OSD) {
-        // 预留：有 OSD 的 720p 推流暂未实现
-        fprintf(stderr, "[SentinelStreamer] OSD mode set to WITH_OSD (stub, not implemented)\n");
-    }
-
+    contexts_[camNum]->lidarOsdMode = mode;
     return true;
+}
+
+void SentinelStreamer::set_lidar_osd_provider(StreamLidarOsdProvider provider)
+{
+    for (int i = 0; i < 2; ++i) {
+        if (contexts_[i]) {
+            contexts_[i]->lidarOsdProvider = provider;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EIS 防抖参数
+// ---------------------------------------------------------------------------
+
+void SentinelStreamer::set_eis_params(int camNum, int margin)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) return;
+
+    if (margin < 0) margin = 0;
+    if (margin > 128) margin = 128;
+
+    contexts_[camNum]->eisMargin = margin;
+
+    fprintf(stderr, "[SentinelStreamer] cam=%d EIS margin=%d\n", camNum, margin);
 }
 
 // ---------------------------------------------------------------------------
@@ -521,9 +815,9 @@ bool SentinelStreamer::start_record(int camNum, const char* filePath,
         return false;
     }
 
-    ctx->recordEnabled = true;
+    ctx->recordEnabled.store(true, std::memory_order_release);
+    ctx->recordBaseSet = false;  // 由 stream 线程用首帧时间戳初始化
 
-    // 每次开始录像时更新基准时间戳，确保新文件 PTS 从 0 开始
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     ctx->baselineTsUs = (uint64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
@@ -551,10 +845,9 @@ bool SentinelStreamer::stop_record(int camNum)
         return false;
     }
 
-    ctx->recordEnabled = false;
+    ctx->recordEnabled.store(false, std::memory_order_release);
+    ctx->recordBaseSet = false;
 
-    // 只有线程已停的情况下才安全关闭 mp4Ctx 和销毁编码器
-    // 否则推迟到 stop_stream 处理（等线程真的停了再关）
     if (!ctx->streamEnabled) {
         ctx->threadRunning.store(false, std::memory_order_release);
         if (ctx->workerThread.joinable()) {
@@ -563,6 +856,11 @@ bool SentinelStreamer::stop_record(int camNum)
         fprintf(stderr, "[SentinelStreamer] DEBUG: closing MP4...\n");
         mp4_output_close(&ctx->mp4Ctx);
         mpp_encoder_close(&ctx->streamEncCtx);
+        mpp_encoder_close(&ctx->recordEncCtx);
+    } else {
+        // 推流还在跑：只关录像的 MP4 和编码器，线程继续跑推流
+        fprintf(stderr, "[SentinelStreamer] DEBUG: closing record MP4...\n");
+        mp4_output_close(&ctx->mp4Ctx);
         mpp_encoder_close(&ctx->recordEncCtx);
     }
 

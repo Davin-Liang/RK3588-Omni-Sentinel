@@ -223,3 +223,67 @@
 **原因**: 未意识到项目已部署 MediaMTX（COTS 流媒体服务器，自带 RTSP/HLS/WebRTC 多协议输出）。另起 ffmpeg HLS 输出属于重复造轮子。
 
 **解决**: 回退 ffmpeg_stream_open 修改，保持单一 RTSP 推送职责。Web 前端改用 iframe 嵌入 MediaMTX 内置 WebRTC 播放器（`http://<ip>:8889/live/cam{i}/`），删除 hls.js CDN 依赖和 HLS 代理代码。
+
+---
+
+## 23. Web 融合第二次启动 segfault
+
+**现象**: 通过 Web API 停止融合后再启动，`fusion_->start()` 后立即 segmentation fault。
+
+**原因**: `web_fusion_start_()` 缺少 `SentinelYoloInfer` 创建逻辑。第一次停止时 `on_btn_fusion_toggle_()` 的禁用路径已将 `yoloInfer_` delete 并置 nullptr，但 `fusion_->stop()` 未清除内部的 `DetectionProvider`（std::function 仍持有已释放的 yoloInfer_ 指针）。第二次 Web 启动时 `fusion_->start()` 发起融合线程，线程调用过期 callback → 访问野指针 → segfault。
+
+**解决**: 在 `web_fusion_start_()` 中添加与 `on_btn_fusion_toggle_()` 启用路径一致的 yoloInfer_ 懒创建 + provider 绑定逻辑。同时将融合 disable 路径的 yoloInfer_ 销毁改为检查 `osdEnabled_` 状态。
+
+## 24. Web OSD 按钮点击返回"网络错误"
+
+**现象**: 网页点击 OSD 按钮显示"网络错误"，桌面端 Qt OSD 按钮正常工作。
+
+**原因**: cpp-httplib 对 HTTP POST 请求采用显式路由注册机制（`impl_->httpServer_.Post(path, handler)`），仅在 `web_server.cpp` 注册的路由才能被匹配。Widget 中的 `handle_web_command()` 路由表对 WebSocket 有效，但 HTTP 请求未注册 `/api/v1/cam/{0,1}/osd/start|stop` 四条路由，返回 404。
+
+## 25. EIS 按钮网页点击返回"网络错误"
+
+**现象**: 网页点击 EIS 按钮显示"网络错误"，桌面端 Qt EIS 按钮正常工作。
+
+**原因**: 与 #24 OSD 按钮同因。cpp-httplib 对 HTTP POST 请求采用显式路由注册，未在 `web_server.cpp` 中注册 `/api/v1/cam/{0,1}/eis/start|stop` 四条 POST 路由。
+
+**解决**: 在 `web_server.cpp` 中注册四条 EIS POST 路由。
+
+---
+
+## 26. EIS 偏移始终为 0
+
+**现象**: EIS 初始化成功、IMU 数据正常读取（samples=4），但 `offset` 始终打印 (+0,+0)，晃动相机无变化。
+
+**原因**: EIS 回调 `eis_offset_callback_()` 放在 `capture_thread_func_` 的 `if (targetNpuBuf != nullptr)` 块内。当 NPU 推理未启动时，`npuRgbPool` 的 8 个 buffer 全部推入 `npuTaskQueue` 后 `get_buffer()` 返回 null，整个 NPU 处理块被跳过，EIS 回调永不执行。
+
+**解决**: 将 EIS 偏移计算提升到 `if (targetNpuBuf != nullptr)` 块外部，每帧独立于 NPU buffer 执行。偏移值仍仅在有 NPU buffer 时传入 `rga_process_to_rgb_()`。
+
+---
+
+## 27. 分辨率下拉框下拉箭头不显示
+
+**现象**: `resCombo`/`resCombo1` 分辨率选择下拉框不显示下拉箭头，点击后能弹出菜单但箭头图标不可见。
+
+**原因**: widget.ui 中 QComboBox 的 stylesheet 包含 `QComboBox::drop-down { border: none; width: 16px; }`。Qt 样式系统规则：一旦手动指定了 QComboBox 子控件的任意属性，就必须完整定义该子控件（`subcontrol-position`、`subcontrol-origin`、箭头图片等），否则 Qt 不会用默认渲染补全。`border: none` 清除了默认边框，但没有提供替代的箭头渲染，导致整个 drop-down 区域不可见。
+
+**解决**: 删除 `QComboBox::drop-down` 自定义样式，让 Qt 使用默认下拉箭头渲染。下拉列表（`QAbstractItemView`）的样式保留，不影响功能。
+
+---
+
+## 28. QLabel tooltip 在嵌入式触屏上无法触发
+
+**现象**: 融合图例帮助标签使用 `QLabel::setToolTip()` 设置悬停提示，在嵌入式触摸屏上点按无任何反应，提示不弹出。
+
+**原因**: QToolTip 依赖鼠标 hover 事件触发（`QHelpEvent` → `QToolTip::showText()`）。嵌入式 Linux 触屏设备没有鼠标指针，触屏产生的是 `QTouchEvent`/`QMouseEvent(synthesized)`，不会产生 hover 状态。QLabel 的 tooltip 机制在纯触屏环境下完全失效。
+
+**解决**: 改用 QPushButton + `clicked` 信号 + `QMessageBox::information()` 弹出说明。按钮在触屏上点击可靠触发，不依赖 hover。同时将按钮叠放在 TopDownView 右下角（子控件 + eventFilter 监听 Resize 事件动态定位），避免占用额外布局空间。
+
+---
+
+## 29. NVMe 集成时 RecordBufferPool 生命周期依赖
+
+**现象**: 析构 SentinelQT 时偶发 crash，堆栈指向 `try_get_record_frame()` 内部访问已释放的 DMA buffer。
+
+**原因**: `NvmeWorker` 持有 `SentinelStreamer*` 裸指针并调用 `try_get_record_frame()`，该函数访问 streamer 内部的 `RecordBufferPool`。析构顺序中 `streamer_->remove_camera()` 会销毁 `RecordBufferPool`。若 NvmeWorker 在 `remove_camera()` 之后才停止，worker 线程可能访问已释放的池内存。
+
+**解决**: 析构顺序严格保证 `deinit_nvme_()`（stop worker + join thread + delete）在 `streamer_->remove_camera()` 之前执行。NvmeWorker::stop() 设置 `running_ = false`，线程在下一轮循环检查标志后退出，`QThread::wait(3000)` 确保线程完全结束。

@@ -440,3 +440,41 @@ make install
 4. 加入陀螺仪零偏在线估计；
 5. 增加动态防抖 benchmark；
 6. 若项目要求更标准的 Linux 传感器框架，可升级为 IIO + 中断 + kfifo + epoll。
+
+---
+
+## 10. SentinelQT 集成
+
+### 10.1 集成架构
+
+采用回调注入模式使 SentinelVisioner 不直接依赖 ICM45686 头文件：
+
+```
+Widget (QT 主线程)
+  ├── Icm45686Reader (后台 std::thread, 100Hz 读 /dev/icm45686)
+  ├── EisStabilizer (绑定 reader, 陀螺仪积分 → 像素偏移)
+  └── visioner_->set_eis_offset_callback(lambda)
+         │
+         └── capture_thread_func_ (采集线程, ~15fps)
+               └── eis_offset_callback_(timestampUs, camNum, &offsetX, &offsetY)
+                    ├── timestampUs * 1000 → ns
+                    ├── calculate_eis_offset(focalX, focalY, tsNs, halfWindowMs, ox, oy)
+                    └── 乘 per-camera 轴符号 (±1) 适配安装方向
+```
+
+### 10.2 线程安全
+
+- 两路相机采集线程并发调用回调，**不在回调内调 `setAxisSign()`**（无 mutex 保护）
+- init 时设 `signX=1.0, signY=1.0`，回调内对结果手动乘 per-camera 符号
+- `ImuRingBuffer::mutex_` 保护 IMU 样本读写
+
+### 10.3 配置
+
+`config.ini` 中 `[EIS]` 节：device、sampleHz、gyroRange/accelRange、halfWindowMs、maxOffsetPixel、per-camera focal/sign。
+
+### 10.4 验证数据（板端实测）
+
+| 状态 | gyro 读数 | offset |
+|---|---|---|
+| 静止 | 0.002 rad/s | (+0,+0) |
+| 晃动 | 0.15-0.44 rad/s | (-13,+23) |

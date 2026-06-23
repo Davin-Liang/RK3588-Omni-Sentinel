@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
+#include <vector>
 
 // 前置声明，避免循环依赖
 struct DmaBuffer_t;
@@ -24,6 +26,52 @@ enum class StreamOsdMode {
     WITHOUT_OSD = 0,  ///< 无 OSD 叠加 720p（已实现）
     WITH_OSD    = 1   ///< 有 OSD 叠加 720p（预留，暂不实现）
 };
+
+/**
+ * @brief OSD 叠加用的检测框（精简版，仅含绘制所需字段）
+ */
+struct StreamOsdBBox {
+    uint32_t x1, y1, x2, y2;
+    uint32_t classId;
+    float    confidence;
+};
+
+/**
+ * @brief OSD 检测结果提供者回调
+ * @param camNum     摄像头编号
+ * @param out        输出检测框列表
+ * @param timeoutMs  超时毫秒数
+ * @return true 成功获取，false 超时
+ */
+using StreamOsdProvider = std::function<bool(int camNum, std::vector<StreamOsdBBox>& out, int timeoutMs)>;
+
+/**
+ * @brief 推流 LiDAR OSD 模式
+ */
+enum class StreamLidarOsdMode {
+    WITHOUT_LIDAR_OSD = 0,  ///< 无 LiDAR 点叠加
+    WITH_LIDAR_OSD    = 1   ///< 叠加 LiDAR 点 + 距离标签
+};
+
+/**
+ * @brief LiDAR OSD 叠加数据（单框）
+ */
+struct StreamLidarOsdBBox {
+    uint32_t x1, y1, x2, y2;       ///< NPU 640x640 空间 bbox（距离标签定位用）
+    float    distanceMeters;        ///< 框内 LiDAR 点平均距离
+    std::vector<float> pointsU;     ///< 投影 U 坐标（原始图像空间）
+    std::vector<float> pointsV;     ///< 投影 V 坐标（原始图像空间）
+    uint32_t pointCount;            ///< = pointsU.size()
+};
+
+/**
+ * @brief LiDAR OSD 数据提供者回调
+ * @param camNum     摄像头编号
+ * @param out        输出 LiDAR OSD bbox 列表
+ * @param timeoutMs  超时毫秒数
+ * @return true 成功获取，false 超时
+ */
+using StreamLidarOsdProvider = std::function<bool(int camNum, std::vector<StreamLidarOsdBBox>& out, int timeoutMs)>;
 
 /**
  * @brief 状态回调事件类型
@@ -129,13 +177,33 @@ public:
     // ================================================================
 
     /**
-     * @brief 设置推流 OSD 模式（必须在 start_stream 之前调用）
+     * @brief 设置推流 OSD 模式（支持运行时切换）
      * @param camNum 摄像头编号
-     * @param mode   WITHOUT_OSD: 无 OSD 720p 推流（已实现）
-     *               WITH_OSD:    有 OSD 720p 推流（预留，当前无实际操作）
+     * @param mode   WITHOUT_OSD: 无 OSD 720p 推流
+     *               WITH_OSD:    有 OSD 720p 推流
      * @return true 成功 / false 失败
      */
     bool set_stream_osd_mode(int camNum, StreamOsdMode mode);
+
+    /**
+     * @brief 设置 OSD 检测结果提供者
+     * @param provider 回调函数，streamer 推流线程每帧轮询获取检测框
+     */
+    void set_osd_provider(StreamOsdProvider provider);
+
+    /**
+     * @brief 设置推流 LiDAR OSD 模式（支持运行时切换）
+     * @param camNum 摄像头编号
+     * @param mode   WITHOUT_LIDAR_OSD / WITH_LIDAR_OSD
+     * @return true 成功 / false 失败
+     */
+    bool set_stream_lidar_osd_mode(int camNum, StreamLidarOsdMode mode);
+
+    /**
+     * @brief 设置 LiDAR OSD 数据提供者
+     * @param provider 回调函数，streamer 推流线程每帧轮询获取 LiDAR 点数据
+     */
+    void set_lidar_osd_provider(StreamLidarOsdProvider provider);
 
     // ================================================================
     // 录像
@@ -186,6 +254,17 @@ public:
                               uint64_t* outTimestampUs);
 
     void release_record_frame(int camNum, uint8_t* data);
+
+    // ================================================================
+    // EIS 防抖参数
+    // ================================================================
+
+    /**
+     * @brief 设置 EIS 防抖裁切边距（支持运行时热更新）
+     * @param camNum  摄像头编号
+     * @param margin  裁切边距（像素，默认 32，越大越稳但画面越放大）
+     */
+    void set_eis_params(int camNum, int margin);
 
 private:
     StreamerContext* contexts_[2];  ///< 最多支持 2 路摄像头，不透明实现

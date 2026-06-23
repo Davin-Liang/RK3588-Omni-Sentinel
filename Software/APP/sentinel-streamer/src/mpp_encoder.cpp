@@ -74,6 +74,28 @@ bool mpp_encoder_open(AVCodecContext** outCtx, int width, int height, int bitRat
     return true;
 }
 
+void mpp_encoder_flush(AVCodecContext* encCtx, AVFormatContext* mp4Ctx)
+{
+    if (!encCtx) return;
+
+    // 先收完编码器已缓冲的包（sent_frame 已产生的）
+    AVPacket* pkt = av_packet_alloc();
+    int64_t lastDts = INT64_MIN;
+    int ret;
+    while (true) {
+        ret = avcodec_receive_packet(encCtx, pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+        if (ret < 0) break;
+        if (mp4Ctx && pkt->size > 0) {
+            pkt->stream_index = 0;
+            av_write_frame(mp4Ctx, pkt);
+        }
+        av_packet_unref(pkt);
+    }
+
+    av_packet_free(&pkt);
+}
+
 void mpp_encoder_close(AVCodecContext** ctx)
 {
     if (*ctx) {

@@ -416,7 +416,15 @@ rga_process_to_rgb_(srcFd, 1920, 1080, dstBuf, horizOffset, vertOffset)
   └─ releasebuffer_handle(src/dst)
 ```
 
-**EIS 防抖**: `horizOffset` / `vertOffset` 叠加在 Letterbox 居中偏移之上。当 camera 发生抖动时，外部 IMU 计算补偿量传入，`drect` 中心随之移动，超出画布边缘由 `imfill` 的灰底承接，不会出现黑边或脏数据。
+**EIS 防抖**: `horizOffset` / `vertOffset` 叠加在 Letterbox 居中偏移之上。EIS 偏移通过 `set_eis_offset_callback()` 注入回调，采集线程每帧调用回调获取像素补偿量。回调独立于 NPU buffer 执行，确保无 NPU 消费端时仍能计算偏移。当 camera 发生抖动时，外部 IMU 计算补偿量传入，`drect` 中心随之移动，超出画布边缘由 `imfill` 的灰底承接，不会出现黑边或脏数据。
+
+**回调接口** (`set_eis_offset_callback`):
+```cpp
+void set_eis_offset_callback(
+    std::function<bool(uint64_t timestampUs, int camNum,
+                       int32_t& offsetX, int32_t& offsetY)> callback);
+```
+传入 V4L2 帧时间戳（微秒），输出像素偏移量。传 nullptr 可禁用 EIS。
 
 **Letterbox 灰边**: 使用 `0xFF727272` 填充（对应 RGB 的 114,114,114），与常见深度学习预处理灰度一致，避免纯黑边影响模型推理。
 

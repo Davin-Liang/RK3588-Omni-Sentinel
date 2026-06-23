@@ -538,10 +538,34 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
 
                 auto start_time = std::chrono::high_resolution_clock::now();
 
+                // EIS 防抖偏移（每帧计算，不依赖 NPU buffer）
+                int currentHorizOffset = 0;
+                int currentVertOffset  = 0;
+                bool eisActive = false;
+
+                if (eis_offset_callback_) {
+                    int32_t eisX = 0, eisY = 0;
+                    eisActive = eis_offset_callback_(timestampUs, camNum, eisX, eisY);
+                    if (eisActive) {
+                        currentHorizOffset = static_cast<int>(eisX);
+                        currentVertOffset  = static_cast<int>(eisY);
+                    }
+                }
+
+                // EIS 低通滤波：平滑帧间偏移，消除 IMU 噪声引起的微颤
+                if (eisActive && ctx->eisPrevValid) {
+                    float a = ctx->eisSmoothAlpha;
+                    int sx = static_cast<int>(a * currentHorizOffset + (1.0f - a) * ctx->prevEisOffsetX);
+                    int sy = static_cast<int>(a * currentVertOffset  + (1.0f - a) * ctx->prevEisOffsetY);
+                    currentHorizOffset = sx;
+                    currentVertOffset  = sy;
+                }
+                ctx->prevEisOffsetX = static_cast<int32_t>(currentHorizOffset);
+                ctx->prevEisOffsetY = static_cast<int32_t>(currentVertOffset);
+                ctx->eisPrevValid = eisActive;
+
                 // NPU 处理：有 buffer 就做，池空就跳过，不影响预览
                 if (targetNpuBuf != nullptr) {
-                    int currentHorizOffset = 0;
-                    int currentVertOffset  = 0;
                     targetNpuBuf->timestampUs = timestampUs;
 
                     bool npuOk = rga_process_to_rgb_(nv12DmaFd, ctx->width, ctx->height,
@@ -574,19 +598,22 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
 
                 // 连预览 buffer 都拿不到，说明预览池已枯竭（下游消费太慢）
                 if (targetPreviewBuf == nullptr) {
-                    std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
+                    // std::cerr << "[Thread] Warning: preview pool empty! Dropping frame." << std::endl;
                 }
 
-                auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                if (raw_frame_count % 30 == 0)
-                    std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
+                // auto end_time = std::chrono::high_resolution_clock::now();
+                // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+                // if (raw_frame_count % 30 == 0)
+                //     std::cout << "[time] RGA (NPU + Preview): " << duration.count() << " ms." << std::endl;
 
                 // 推流/录像用的 origCopy 缓冲区
                 {
                     DmaBuffer_t* targetOrigBuf = ctx->origCopyPool->get_buffer();
                     if (targetOrigBuf != nullptr) {
                         targetOrigBuf->timestampUs = timestampUs;
+                        targetOrigBuf->eisOffsetX = static_cast<int32_t>(currentHorizOffset);
+                        targetOrigBuf->eisOffsetY = static_cast<int32_t>(currentVertOffset);
+                        targetOrigBuf->eisActive = eisActive;
                         bool copyOk = rga_copy_buffer_(nv12DmaFd, ctx->width, ctx->height,
                                                         nv12Stride, targetOrigBuf);
                         if (copyOk) {
@@ -762,6 +789,19 @@ void SentinelVisioner::release_orig_copy_buffer(int camNum, DmaBuffer_t* buf) {
     }
 }
 
+void SentinelVisioner::set_eis_offset_callback(
+    std::function<bool(uint64_t, int, int32_t&, int32_t&)> callback) {
+    eis_offset_callback_ = std::move(callback);
+}
+
+void SentinelVisioner::set_eis_smooth_alpha(float alpha) {
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    for (auto& kv : _cameraContextMap) {
+        kv.second->eisSmoothAlpha = alpha;
+    }
+}
+
 bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight,
                                            int srcStride,
                                            DmaBuffer_t* dstBuf, int horizontalOffset, int verticalOffset) {
@@ -801,6 +841,14 @@ bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeigh
     int scaled_w = srcWidth * scale;
     int scaled_h = srcHeight * scale;
 
+    // EIS 偏移钳位：防止 drect 超出目标 buffer 边界
+    int maxOffX = (dstBuf->width  - scaled_w) / 2;
+    int maxOffY = (dstBuf->height - scaled_h) / 2;
+    if (horizontalOffset < -maxOffX) horizontalOffset = -maxOffX;
+    if (horizontalOffset >  maxOffX) horizontalOffset =  maxOffX;
+    if (verticalOffset   < -maxOffY) verticalOffset   = -maxOffY;
+    if (verticalOffset   >  maxOffY) verticalOffset   =  maxOffY;
+
     // 【核心防抖逻辑】：在默认居中的基础上，叠加有符号的外部补偿量
     int offset_x = (dstBuf->width - scaled_w) / 2 + horizontalOffset;
     int offset_y = (dstBuf->height - scaled_h) / 2 + verticalOffset;
@@ -809,11 +857,9 @@ bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeigh
     im_rect drect = {offset_x, offset_y, scaled_w, scaled_h};
 
     // 4. 背景填充 (Padding)
-    // 只要宽高没填满画布，或者发生了平移，就说明需要填充灰边防脏数据
     if (scaled_w != dstBuf->width || scaled_h != dstBuf->height || horizontalOffset != 0 || verticalOffset != 0) {
         im_rect dst_whole_rect = {0, 0, dstBuf->width, dstBuf->height};
-        // 0xFF727272 对应 RGB 的灰色 (114, 114, 114)
-        ret_rga = imfill(rga_buf_dst, dst_whole_rect, 0xFF727272); 
+        ret_rga = imfill(rga_buf_dst, dst_whole_rect, 0xFF727272);
     }
 
     // 5. RGA 终极处理：格式转换 + 缩放 + 偏移写入
@@ -884,7 +930,6 @@ bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height,
                                          int srcStride, DmaBuffer_t* dstBuf) {
     if (srcFd <= 0 || !dstBuf || dstBuf->dmaFd <= 0) return false;
 
-    // MIPI 摄像头通常输入为 NV12 (YCrCb_420_SP)
     int fmt = RK_FORMAT_YCrCb_420_SP;
 
     im_handle_param_t in_param = { srcStride, height, fmt };
@@ -901,7 +946,6 @@ bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height,
     rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, srcStride, height, fmt, srcStride, height);
     rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, fmt, dstBuf->width, dstBuf->height);
 
-    // 调用 RGA 硬件拷贝
     IM_STATUS ret_rga = imcopy(rga_buf_src, rga_buf_dst);
 
     releasebuffer_handle(rga_handle_src);
@@ -909,7 +953,6 @@ bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height,
 
     return ret_rga == IM_STATUS_SUCCESS;
 }
-
 bool SentinelVisioner::rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
                                           int srcStride, DmaBuffer_t* dstBuf) {
     if (srcFd <= 0 || !dstBuf || dstBuf->dmaFd <= 0) {

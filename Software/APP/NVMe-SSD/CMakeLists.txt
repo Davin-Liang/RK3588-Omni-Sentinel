@@ -19,7 +19,11 @@ endif()
 # RPATH 设置 (解决运行找不到共享库的问题)
 set(CMAKE_SKIP_INSTALL_RPATH FALSE)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
+
+# ---- FFmpeg（MPP 硬件编码 + MP4 复用，替代 OpenCV） ----
+set(FFMPEG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/ffmpeg)
+
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;${FFMPEG_ROOT}/lib")
 
 # 编译 NVMeDataManager 静态库
 add_library(nvme_data_manager_lib STATIC
@@ -29,7 +33,10 @@ add_library(nvme_data_manager_lib STATIC
 # 设置头文件包含路径
 target_include_directories(nvme_data_manager_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${FFMPEG_ROOT}/include
 )
+
+link_directories(${FFMPEG_ROOT}/lib)
 
 # 查找线程库
 find_package(Threads REQUIRED)
@@ -37,15 +44,19 @@ find_package(Threads REQUIRED)
 # 链接对应的库
 target_link_libraries(nvme_data_manager_lib PUBLIC
     Threads::Threads
+    ${FFMPEG_ROOT}/lib/libavcodec.so
+    ${FFMPEG_ROOT}/lib/libavformat.so
+    ${FFMPEG_ROOT}/lib/libavutil.so
+    ${FFMPEG_ROOT}/lib/libswscale.so
 )
 
 # 编译可执行测试程序 (Demo)
-add_executable(nvme_demo
+add_executable(nvme_demo EXCLUDE_FROM_ALL
     src/nvme_demo.cpp
 )
 
 # 编译可执行 Benchmark 程序
-add_executable(nvme_benchmark
+add_executable(nvme_benchmark EXCLUDE_FROM_ALL
     src/nvme_benchmark.cpp
 )
 
@@ -57,8 +68,13 @@ target_link_libraries(nvme_benchmark
     nvme_data_manager_lib
 )
 
-# 安装规则
-install(TARGETS nvme_demo nvme_benchmark DESTINATION ./)
+# 安装规则 (demo/benchmark 仅 standalone 构建时安装)
+install(TARGETS nvme_data_manager_lib DESTINATION lib)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    install(TARGETS nvme_demo nvme_benchmark DESTINATION ./)
+endif()
+install(DIRECTORY ${FFMPEG_ROOT}/lib/ DESTINATION lib
+    FILES_MATCHING PATTERN "*.so*")
 
 # 输出信息
 message(STATUS "NVMe SSD Demo project configured successfully")

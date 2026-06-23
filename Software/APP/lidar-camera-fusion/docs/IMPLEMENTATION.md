@@ -4,6 +4,8 @@
 
 `LidarCameraFusion` 负责将 N10Plus 单线激光雷达点云与 YOLO 2D 检测框进行空间对齐（融合），并对融合后的目标进行多帧跟踪。融合阶段外参变换+内参投影将 LiDAR 点映射到相机图像平面，按 bbox 分类归属点。跟踪阶段对归属点做扫描顺序 CDC 聚类，通过 Alpha-Beta 滤波器估计位置/速度，贪心最近邻关联维持航迹 ID。
 
+YOLO 检测结果通过 `DetectionProvider` 回调（`std::function`）从外部注入，融合模块不直接依赖 NPU 推理组件。未设置回调时回退到内部假检测（测试用）。
+
 ---
 
 ## 2. 数据流
@@ -84,7 +86,7 @@ distanceBonus = 1.0 - clamp(distMeters / 50.0, 0.0, 1.0)
 ```
 点数为主，距离仅作弱 tie-breaker。附加规则：最高分簇点数 < 最大簇的 60% → 优先选最大簇。
 
-**距离过滤（虚构框阶段临时）**：`dist > 2.5f` 的簇直接跳过，防止远处工位干扰。YOLO 就绪后移除。
+**类别和置信度过滤**：融合线程仅保留 `classId=0` (person) 且 `confidence >= 0.75` 的检测框，非 person 和低置信度框在 `fusion_thread_()` 入口处过滤。
 
 ### 4.2 Alpha-Beta 滤波器
 
@@ -154,3 +156,5 @@ Deleted ←───────────────────────
 ## 6. 线程安全
 
 双缓冲策略：`workingTracks_`（`update()` 无锁写入）→ mutex 拷贝→ `snapshotTracks_`（`copy_snapshot()` 加锁读取）。锁持有时间仅 memcpy 操作，竞争极小。
+
+`DetectionProvider` 回调在融合线程中调用（`fusion_thread_()`），由调用方（SentinelQT）保证 `SentinelYoloInfer::try_get_fusion_result()` 的线程安全性（内部 `ThreadSafeQueue` 已加锁）。

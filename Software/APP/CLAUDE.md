@@ -10,6 +10,8 @@ RK3588-Omni-Sentinel 是一个基于瑞芯微 RK3588 的边缘端多传感器融
 
 本项目不是 ROS 工作空间。各组件独立编译，每个组件目录下有自己的 `build.sh` 和 `CMakeLists.txt`。全部使用 aarch64 交叉编译，目标平台为 RK3588 ARM64 Linux。
 
+**编译环境**：交叉编译必须在虚拟机（Linux）中进行，Windows 开发机无法直接编译。代码在 Windows 上编写，通过共享目录或 `scp` 传到虚拟机后再执行 `build.sh`。
+
 ### 通用编译流程
 
 每个组件目录下执行：
@@ -58,10 +60,17 @@ sentinel-visioner (相机视觉管线 + RGA 硬件加速)
   ├── 3rdparty/librga (直接依赖)
   ├── 3rdparty/ffmpeg (libavcodec/libavutil，MJPG 软件解码)
   ├── 3rdparty/opencv (OpenCV 3.4.5, 预编译 aarch64)
-  └── 3rdparty/rknpu2 (RKNN NPU 运行时，CMake 已就绪但未完全接入)
+  └── 3rdparty/rknpu2 (RKNN NPU 运行时)
+
+sentinel-yolo-infer (RKNN YOLOv8 NPU 推理)
+  ├── sentinel-visioner (通过 wait_get_npu/try_get_npu 获取 640x640 RGB888 小图)
+  ├── 3rdparty/rknpu2 (librknnrt.so, DMA-BUF fd 零拷贝导入 RKNN)
+  ├── lidar-camera-fusion (复用 YoloBBox 类型定义)
+  └── Threads::Threads + libdl (pthread + dlopen)
 
 lidar-camera-fusion (视觉-雷达数据融合，纯算法组件)
-  └── sentinel-lslidarer/include (仅依赖 LidarPoint/LidarFrame 类型定义)
+  ├── sentinel-lslidarer/include (仅依赖 LidarPoint/LidarFrame 类型定义)
+  └── DetectionProvider 回调解耦 (不直接依赖 sentinel-yolo-infer)
 
 web-control (Web 远程控制组件)
   ├── cpp-httplib (单头文件 HTTP/WebSocket 库, MIT)
@@ -71,20 +80,30 @@ web-control (Web 远程控制组件)
 sentinel-lslidarer (激光雷达驱动，完全独立)
   └── Threads::Threads (唯一外部依赖)
 
-sentinel-streamer (推流与录像组件)
+sentinel-streamer (推流与录像 + OSD 叠加组件)
   ├── sentinel-visioner (依赖头文件 + 运行时调用 wait/get/release 接口)
   ├── dma-buffer-pool (720p 中间缩放缓冲池 + RecordBufferPool 录像帧环形缓冲)
   ├── 3rdparty/librga (1080p→720p NV12 硬件缩放 + rga_nv12_copy DMA 零拷贝)
-  └── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
+  ├── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil + ffmpeg CLI 子进程推流)
+  └── StreamOsdProvider 回调 (推理结果 → NV12 CPU 绘制，不依赖 yolo-infer 头文件)
+
+NVMe-SSD (NVMe 高速存储 + 视频回溯)
+  ├── 原始块设备 O_DIRECT 写入 (Header+payload+512B对齐, 环形缓冲)
+  ├── 3rdparty/ffmpeg (libavcodec/libavformat/libavutil/libswscale, MPP 硬件编码导出 MP4)
+  ├── NVMeDataManager (生产者-消费者模式, 独立 writer 线程, 预分配内存池)
+  └── RecordBufferPool 下游消费 (NV12 帧直存, 绕过 swscale 零开销编码)
 
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
-  ├── sentinel-streamer (推流/录像启停控制)
+  ├── sentinel-yolo-infer (NPU 推理实例管理，懒加载创建/销毁)
+  ├── sentinel-streamer (推流/录像启停 + OSD provider 绑定 + RecordBufferPool 回溯源)
+  ├── NVMe-SSD (NvmeWorker QThread 持续写入帧, 回溯导出 MP4)
   ├── web-control (嵌入进程内 HTTP/WebSocket 服务器, REST API 远程控制)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
-  ├── Qt5 Widgets (QStackedWidget 三页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] 节)
+  ├── icm45686-eis-app (IMU 电子防抖, 回调注入 sentinel-visioner NPU 路径)
+  ├── Qt5 Widgets (QStackedWidget 四页布局)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [NVMe] 等)
 ```
 
 ### web-control — Web 远程控制组件
@@ -94,7 +113,7 @@ SentinelQT (QT5 嵌入式触控界面)
 - **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 27+ REST 路由（含回溯）和 WebSocket 端点
 - **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
 - **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
-- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局，CSS 完全复刻 QT 配色方案。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）
+- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）。**三主题切换**：默认墨绿、深红+象牙白、皇家蓝+碧落，🎨 按钮切换，localStorage 持久化
 - **数据回溯面板**: 右下角系统控制+回溯并排双卡片，含秒数输入/相机选择/文件列表，通过 REST API 与 Qt 双向 dirty flag 同步
 - **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
 - **暂停保护**: 暂停时自动停止推流/录像/预览；推流/录像启动时若相机已暂停则自动恢复，避免死锁
@@ -102,6 +121,23 @@ SentinelQT (QT5 嵌入式触控界面)
 - **SPA 热加载**: HTML 从文件系统多路径搜索加载（`web/index.html`），编辑后无需重编译
 
 唯一公共头文件: `include/web_server.h`，API 类: `WebServer`
+
+### icm45686-eis-app — ICM45686 电子防抖
+
+基于 ICM45686 SPI 内核驱动的用户态 EIS（电子防抖）组件。通过 `/dev/icm45686` 字符设备读取 IMU 数据，在用户态完成陀螺仪积分和像素偏移计算。通过回调注入模式集成到 SentinelQT 的 sentinel-visioner 管线。
+
+- **Icm45686Reader**: 后台 `std::thread` 以可配置频率（默认 100Hz）轮询 `/dev/icm45686` ioctl，推入线程安全 `ImuRingBuffer`（默认 512 样本 `std::deque` + `std::mutex`）
+- **EisStabilizer**: 梯形陀螺仪积分 → 像素偏移。核心 API `calculate_eis_offset(focalX, focalY, targetTimestampNs, halfWindowMs, offsetX, offsetY)`，目标时间窗口查询 IMU 样本，小角度近似 `offset ≈ focal × angle`，裁剪到 `maxOffsetPixel`
+- **回调注入**: SentinelVisioner 加入 `set_eis_offset_callback(std::function)`，采集线程每帧调用回调获取偏移，传入 `rga_process_to_rgb_()` 的 `horizontalOffset/verticalOffset` 参数。**仅作用于 NPU 640×640 RGB888 推理路径（不作用于预览和推流原始帧）**
+- **偏移钳位**: `rga_process_to_rgb_()` 新增 drect 边界钳位，防止 letterbox 边距为零时 EIS 偏移导致 drect 越界 RGA 崩溃（#13）。`maxOffX = (dstW - scaled_w) / 2`
+- **低通滤波**: 采集线程内 EMA 平滑：`smoothed = alpha * current + (1-alpha) * prev`，消除 IMU 噪声微颤。通过 `set_eis_smooth_alpha()` 配置（默认 0.7），`config.ini` `[EIS]` 节 `smoothAlpha` 键可调
+- **Streamer EIS**: sentinel-streamer 的 `rga_scale_nv12_to_720p()` 支持 EIS crop+scale，在 1080p→720p 缩放步骤中一次 RGA 操作完成防抖。EIS 偏移通过 DmaBuffer_t 字段（`eisOffsetX/Y`、`eisActive`）随帧传递，裁切边距通过 `set_eis_params()` 配置（默认 32px，`config.ini` `[EIS]` 节 `streamerMargin`）。EIS 关闭时走原路径无开销
+- **两路隔离**: 两路相机共用 IMU 硬件和 Reader，但各自独立 `eisEnabled_[camNum]` 开关、`focalX/Y`、`axisSignX/Y`。线程安全：`setAxisSign()` 不在回调内调用，符号在回调结果上手动乘
+- **配置**: `config.ini` 中 `[EIS]` 节：`device`、`sampleHz`、`gyroRange/accelRange`、`halfWindowMs`、`maxOffsetPixel`、`smoothAlpha`、`streamerMargin`、per-camera `focalX/Y` 和 `axisSignX/Y`
+- **API**: REST `POST /api/v1/cam/{0,1}/eis/start|stop`，WebSocket status 含 `eisEnabled` 字段
+- **依赖**: POSIX + pthread + libm + `<functional>`（回调），不依赖 ICM45686 头文件（sentinel-visioner 侧解耦）
+
+构建: `icm45686_eis_lib` (STATIC, C++14, `src/imu_eis.cpp`) + `icm45686_user_lib` (STATIC, C99, `src/icm45686_user.c`)
 
 ### sentinel-lslidarer — 镭神 N10Plus 单线雷达驱动
 
@@ -133,6 +169,20 @@ SentinelQT (QT5 嵌入式触控界面)
 - `update_camera_intrinsics(camIndex, fx, fy, cx, cy, w, h)` — 运行时更新相机内参（保留外参矩阵）
 - `get_cam_count()` — 获取当前相机数量
 - `configure_tracker(config)` — 支持运行时热更新（已移除 `trackingEnabled_` 前置守卫）
+- `set_detection_provider(provider)` — 设置外部 YOLO 检测提供者，替换内部假检测回退
+
+### sentinel-yolo-infer — RKNN YOLOv8 NPU 推理
+
+基于哨兵视觉者（SentinelVisioner）的 640×640 RGB888 NPU 小图进行 YOLOv8 RKNN 推理。每路摄像头独立一个推理线程 + RKNN context，零拷贝 DMA-BUF fd 导入 NPU。
+
+- **双队列输出**: 推理结果同时推入 `fusionQueue`（供融合）和 `osdQueue`（供推流 OSD 叠加），各自独立消费
+- **DMA 零拷贝**: `rknn_create_mem_from_fd(dmaFd)` 直接导入 DMA-BUF，无 CPU memcpy
+- **NpuBufferGuard (RAII)**: 作用域守卫确保异常路径也归还 DMA buffer
+- **result provider 回调**: 通过 `SentinelYoloInfer` 提供 `try_get_fusion_result()` / `try_get_osd_result()` 供消费者轮询
+- **模型**: `yolov8n.rknn`（INT8 量化，640×640×3 输入，9 输出分支），通过 `rknn_model_zoo` 转换生成
+- **配置**: `SentinelYoloInferConfig` 含 modelPath、boxThreshold、nmsThreshold、waitTimeoutMs、pushEmptyResult
+
+唯一公共头文件: `include/SentinelYoloInfer.h`，API 类: `SentinelYoloInfer`
 
 ### sentinel-visioner — 多路视觉流水线
 
@@ -153,9 +203,9 @@ SentinelQT (QT5 嵌入式触控界面)
 
 唯一公共头文件: `include/sentinel-visioner.h`，API 类: `SentinelVisioner`
 
-### sentinel-streamer — 推流与录像组件
+### sentinel-streamer — 推流与录像 + OSD 叠加组件
 
-作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 NV12 帧 → RGA 缩放为 720p → MPP 硬件编码 H.264 → 双路输出。
+作为 SentinelVisioner 的下游消费者，从 `processTaskQueue` 拉取 NV12 帧 → RGA 缩放为 720p → **YOLO 检测框 OSD 叠加（CPU NV12 绘制）** → MPP 硬件编码 H.264 → 双路输出。
 
 - **双编码器架构**: `streamEncCtx`（720p, 推流）和 `recordEncCtx`（1080p/720p, 录像）各自独立，惰性创建，互不干扰
 - **动态源分辨率**: RGA 缩放器 `rga_scale_nv12_to_720p(srcFd, srcWidth, srcHeight, dstFd)` 支持任意源分辨率（1080p→720p 下采样、720p→720p imcopy），不再硬编码 1080p
@@ -166,8 +216,11 @@ SentinelQT (QT5 嵌入式触控界面)
 - **线程安全**: 每路摄像头独立推流线程，编码器和输出上下文严格在 `workerThread.join()` 后销毁，杜绝 use-after-free
 - **状态回调**: `StreamerCallback` 函数指针，通知上层启停/错误事件
 - **反复启停**: 编码器每轮销毁重建，无 DTS 残留
+- **OSD 叠加**: 通过 `StreamOsdProvider` 回调注入检测框，推流线程每帧非阻塞轮询（5ms 超时），仅叠加推流画面不影响录像。Y 平面 2px 白色边框 + 标签（3×5 点阵字体 2x 放大），640×640 NPU → 720p 坐标自动变换（含 letterbox 逆变换）。`set_osd_provider()` 绑定 provider，`set_stream_osd_mode()` 运行时切换
 - **RecordBufferPool 环形缓冲**: 基于 DmaBufferPool + RGA DMA 拷贝的 NV12 帧环形缓冲区，在编码前暂存历史帧供数据回溯。每路独立，槽位数可配
 - **rga_nv12_copy**: RGA IM2D `imcopy` 硬件 DMA 零拷贝，避免 CPU memcpy 开销
+- **EIS 防抖推流/录像**: `rga_scale_nv12_to_720p()` 支持 EIS 参数（`eisOffsetX/Y`、`eisActive`、`eisMargin`），EIS 激活时在 1080p→720p 缩放中一次 RGA 完成 crop+scale 防抖。偏移量通过 DmaBuffer_t 字段随帧传递，无需重复计算
+- **录像 PTS 独立基准**: `recordBaseTsUs` 与推流 `baselineTsUs` 解耦，每次录像从首帧时间戳自动初始化，确保 PTS 从 0 开始
 - **回溯公共 API**: `init_record_buffer(camNum, slotCount, width, height)` 初始化缓冲池，`try_get_record_frame(camNum, &data, &size, &ts)` 非阻塞 FIFO 消费帧，`release_record_frame(camNum, data)` 归还缓冲
 
 唯一公共头文件: `include/sentinel_streamer.h`，API 类: `SentinelStreamer`
@@ -175,7 +228,7 @@ SentinelQT (QT5 嵌入式触控界面)
 ### dma-buffer-pool — DMA 内存池
 
 - O(1) 空闲链表（Free List）分配/归还模型
-- `DmaBuffer_t` 包含 dmaFd、virtAddr、timestampUs、链表 next 指针
+- `DmaBuffer_t` 包含 dmaFd、virtAddr、timestampUs、eisOffsetX/Y、eisActive、链表 next 指针
 - "花名册"（`allBuffers_` vector）确保析构时零泄漏回收
 - 通过 `3rdparty/allocator/dma_alloc.h` 调用底层 `dma_buf_alloc()`（DMA heap ioctl + mmap）
 
@@ -192,15 +245,17 @@ SentinelQT (QT5 嵌入式触控界面)
 
 ### SentinelQT — QT5 嵌入式触控界面
 
-RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner 和 SentinelStreamer 的上层集成者。
+RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisioner、SentinelStreamer 和 SentinelYoloInfer 的上层集成者。
 
 - **技术栈**: Qt5 Widgets，QStackedWidget 四页布局（主控页 / 视频管理页 / 融合管理页 / 数据回溯页），全屏无边框
 - **共享标题栏**: `titleBar`（温度/CPU/RGA/NPU + 标题 + 时钟）位于根布局 QStackedWidget 上方，三页共享。hwLabel 和 clockLabel 均为 280px 确保标题居中
 - **双路预览**: 左右并排 `previewLabel0` / `previewLabel1`，两个独立 PreviewWorker 各自运行在独立 QThread，通过 lambda 捕获 camNum 将 `frameReady` 信号路由到对应 label。每路预览可独立开启/关闭
-- **双路控制**: 每路相机独立 4 按钮（预览切换、推流、录像、暂停），全局系统按钮一键启停两路
+- **双路控制**: 每路相机独立 6 按钮（预览切换、推流、录像、暂停、OSD、EIS），全局系统按钮一键启停两路
 - **实时预览**: PreviewWorker 子线程通过 `try_get_preview(camNum, 200)` 拉取 RGB888 帧，DMA-BUF virtAddr 零拷贝 QImage → Qt::QueuedConnection 信号槽投递至主线程
 - **推流控制**: 调用 SentinelStreamer API 启停 RTSP 推流，StreamerCallback → QMetaObject::invokeMethod 跨线程通知 UI。两路独立 RTSP URL
 - **录像控制**: 按相机独立启停 MP4 录像，实时显示录制时长（QTimer 每秒更新），时间戳文件名。双路均支持 1080p/720p 录制分辨率（底部栏 per-camera QComboBox 选择），Web 远程切换双向同步
+- **NPU 推理管理**: `SentinelYoloInfer` 实例懒加载，融合或 OSD 首次需要时创建，两路都关闭且融合未启用时自动销毁。融合和 OSD 各自绑定独立 provider 回调
+- **OSD 叠加控制**: 每路相机独立 OSD 按钮（Qt + Web 双端同步），绑定 `StreamOsdProvider` 回调到 streamer，运行时切换 OSD 模式
 - **视频管理**: QTableWidget 列表展示录制文件（libavformat 读分辨率/时长），支持删除
 - **融合目标跟踪**: 第三页独立子页面，集成 SentinelLslidarer + LidarCameraFusion：
   - **俯视图**: `TopDownView` 自定义 QWidget，paintEvent 绘制距离网格、目标（按 TrackState 着色）、速度箭头、告警脉冲圈、中文图例
@@ -209,9 +264,9 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
   - **融合启停**: `on_btn_fusion_toggle_()` 控制完整生命周期（lidar start → fusion start → FusionWorker 轮询），失败自动回滚
   - **参数热更新**: `editingFinished` 触发 `configure_tracker()` + `update_camera_intrinsics()` 实时推送，无需重启融合
   - **告警输出**: 三层输出 — 俯视图红色脉冲圈 + 状态栏告警计数 + 终端 stderr `[FusionWarning]` 日志
-  - **假检测模式**: 使用 `generate_fake_detections_()` 虚构检测框，待 NPU 推理就绪后替换
+  - **NPU 推理**: 融合线程通过 `DetectionProvider` 回调从 `SentinelYoloInfer` 获取真实 YOLO 检测结果（替换假检测），仅保留 person (classId=0) 且置信度 ≥ 0.75 的检测框
   - **数据回溯**: 第四页独立子页面，通过 RecordBufferPool 实现历史帧查询：
-    - **手动回溯**: 秒数输入框 + 相机选择器 + 回溯按钮，`on_btn_backtrack_()` 触发。当前为终端打印占位（待硬盘数据管理类就绪后从磁盘检索）
+    - **手动回溯**: 秒数输入框 + 相机选择器 + 回溯按钮，`on_btn_backtrack_()` 触发。NvmeWorker QThread 持续写入 NV12 帧 → NVMeDataManager → NVMe SSD。调用 `export_trigger_video_clip()` 扫描磁盘导出 MP4。"全部"模式两路各导出一个视频。Web 支持 POST 触发 + 播放 + 删除。存储格式 NV12 直存，导出时 memcpy 直送 MPP 零 swscale
     - **自动告警回溯**: 融合告警回调触发 `on_fusion_alert_backtrack_()`，根据告警时间戳和配置的回溯秒数终端打印回溯范围。双路相机同时回溯
     - **双向 Web↔Qt 同步**: dirty flag 机制 — 回溯参数/l融合参数/录分辨率通过 status JSON 推送同步，用户正在修改时暂停覆盖
 - **硬件监控**: 标题栏实时显示温度（thermal_zone0）、CPU（/proc/stat）、RGA/NPU 逐核利用率（debugfs）及日期时间。紧凑格式（无 `%` 符号）
@@ -219,7 +274,7 @@ RK3588 边缘端嵌入式触控人机交互界面（HMI），作为 SentinelVisi
 - **线程模型**: 两个 PreviewWorker + 一个 FusionWorker 各自独立 QThread + std::atomic<bool>；LidarCameraFusion 内部 std::thread；主线程处理 UI 和定时器。FusionWorker 100ms 轮询 + 目标变化去重。析构逆序释放（FusionWorker → fusion → lidar → preview → visioner/streamer）
 - **状态栏**: 底部自动合并显示两路相机状态（`CAM0: xxx | CAM1: xxx`），全局消息直接显示
 - **Web 远程控制**: 嵌入 WebServer（cpp-httplib），提供 REST API + WebSocket 实时推送。浏览器打开 `http://<IP>:8080` 即可远程操控。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889）
-- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]` 七节，USB 相机支持 1080p（MJPG 模式）
+- **配置**: `config.ini` 分 `[Camera0]`/`[Camera1]`/`[Lidar]`/`[Fusion]`/`[Record]`/`[WebServer]`/`[Backtrack]`/`[EIS]` 八节，USB 相机支持 1080p（MJPG 模式）
 
 关键文件: `widget.h/cpp/ui`（主界面）、`preview_worker.h/cpp`（预览线程）、`fusion_worker.h/cpp`（融合轮询线程）、`top_down_view.h/cpp`（俯视图组件）、`virtual_keyboard.h/cpp`（虚拟键盘）、`main.cpp`（入口）、`config.ini`（配置，`[Backtrack]` 节）、`build.sh`（构建脚本）
 

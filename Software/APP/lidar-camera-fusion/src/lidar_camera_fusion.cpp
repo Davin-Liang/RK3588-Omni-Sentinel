@@ -15,6 +15,12 @@ LidarCameraFusion::LidarCameraFusion()
     , bboxPointCountsBuf(nullptr)
     , bboxOffsets(nullptr)
     , writeCursor(nullptr)
+    , bboxPointUBuf_(nullptr)
+    , bboxPointVBuf_(nullptr)
+    , tempU_(nullptr)
+    , tempV_(nullptr)
+    , lidarPointXBuf_(nullptr)
+    , lidarPointYBuf_(nullptr)
     , totalBboxCount(0)
     , totalCandidateCount(0)
     , behindCameraCount(0)
@@ -28,17 +34,31 @@ LidarCameraFusion::LidarCameraFusion()
     bboxPointCountsBuf = new (std::nothrow) uint32_t[kMaxDetections];
     bboxOffsets        = new (std::nothrow) uint32_t[kMaxDetections];
     writeCursor        = new (std::nothrow) uint32_t[kMaxDetections];
+    bboxPointUBuf_     = new (std::nothrow) float[kMaxLidarPoints];
+    bboxPointVBuf_     = new (std::nothrow) float[kMaxLidarPoints];
+    tempU_             = new (std::nothrow) float[kMaxLidarPoints];
+    tempV_             = new (std::nothrow) float[kMaxLidarPoints];
+    lidarPointXBuf_    = new (std::nothrow) float[kMaxLidarPoints];
+    lidarPointYBuf_    = new (std::nothrow) float[kMaxLidarPoints];
     lidarPointsBuf_    = new (std::nothrow) LidarPoint[kMaxLidarPoints];
     tracker_           = new (std::nothrow) LidarTargetTracker();
 
     if (!candidatePointBuf || !pointToBbox || !bboxPointCountsBuf ||
-        !bboxOffsets || !writeCursor || !lidarPointsBuf_ || !tracker_) {
+        !bboxOffsets || !writeCursor || !bboxPointUBuf_ || !bboxPointVBuf_ ||
+        !tempU_ || !tempV_ || !lidarPointXBuf_ || !lidarPointYBuf_ ||
+        !lidarPointsBuf_ || !tracker_) {
         fprintf(stderr, "[LidarCameraFusion] buffer allocation failed in constructor\n");
         delete[] candidatePointBuf;   candidatePointBuf  = nullptr;
         delete[] pointToBbox;         pointToBbox        = nullptr;
         delete[] bboxPointCountsBuf;  bboxPointCountsBuf = nullptr;
         delete[] bboxOffsets;         bboxOffsets        = nullptr;
         delete[] writeCursor;         writeCursor        = nullptr;
+        delete[] bboxPointUBuf_;      bboxPointUBuf_     = nullptr;
+        delete[] bboxPointVBuf_;      bboxPointVBuf_     = nullptr;
+        delete[] tempU_;              tempU_             = nullptr;
+        delete[] tempV_;              tempV_             = nullptr;
+        delete[] lidarPointXBuf_;     lidarPointXBuf_    = nullptr;
+        delete[] lidarPointYBuf_;     lidarPointYBuf_    = nullptr;
         delete[] lidarPointsBuf_;     lidarPointsBuf_    = nullptr;
         delete tracker_;              tracker_           = nullptr;
     }
@@ -65,6 +85,12 @@ LidarCameraFusion::~LidarCameraFusion()
     delete[] bboxPointCountsBuf;
     delete[] bboxOffsets;
     delete[] writeCursor;
+    delete[] bboxPointUBuf_;
+    delete[] bboxPointVBuf_;
+    delete[] tempU_;
+    delete[] tempV_;
+    delete[] lidarPointXBuf_;
+    delete[] lidarPointYBuf_;
     delete[] lidarPointsBuf_;
     delete tracker_;
 }
@@ -84,6 +110,8 @@ void LidarCameraFusion::reset()
 
     for (uint32_t i = 0; i < kMaxLidarPoints; ++i) {
         pointToBbox[i] = -1;
+        tempU_[i] = 0.0f;
+        tempV_[i] = 0.0f;
     }
     for (uint32_t b = 0; b < kMaxDetections; ++b) {
         bboxPointCountsBuf[b] = 0;
@@ -168,6 +196,9 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
             }
         }
 
+        tempU_[i] = u;
+        tempV_[i] = v;
+
         if (bboxIdx >= 0) {
             uint32_t gb = totalBboxCount + static_cast<uint32_t>(bboxIdx);
             pointToBbox[i] = static_cast<int32_t>(gb);
@@ -190,7 +221,10 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
         int32_t gb = pointToBbox[i];
         if (gb >= 0) {
             uint32_t gbu = static_cast<uint32_t>(gb);
-            candidatePointBuf[bboxOffsets[gbu] + writeCursor[gbu]] = i;
+            uint32_t pos = bboxOffsets[gbu] + writeCursor[gbu];
+            candidatePointBuf[pos] = i;
+            bboxPointUBuf_[pos]   = tempU_[i];
+            bboxPointVBuf_[pos]   = tempV_[i];
             ++writeCursor[gbu];
         }
     }
@@ -199,6 +233,8 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
     result_.lidarTimestampNs = lidarFrame.timestampNs;
     result_.bboxPointIndices = candidatePointBuf;
     result_.bboxPointCounts  = bboxPointCountsBuf;
+    result_.bboxPointU       = bboxPointUBuf_;
+    result_.bboxPointV       = bboxPointVBuf_;
     result_.bboxCount        = totalBboxCount;
 
     return true;
@@ -355,4 +391,13 @@ bool LidarCameraFusion::copy_tracked_targets(TrackedTarget* out,
         return false;
     }
     return tracker_->copy_snapshot(out, maxCount, outCount);
+}
+
+bool LidarCameraFusion::try_get_lidar_osd_snapshot(LidarOsdSnapshot& out, int timeoutMs)
+{
+    (void)timeoutMs;
+    std::lock_guard<std::mutex> lock(osdSnapshotMutex_);
+    if (latestOsdSnapshot_.camCount == 0) return false;
+    out = latestOsdSnapshot_;
+    return true;
 }

@@ -5,7 +5,16 @@
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
+#include <algorithm>
 #include <iostream>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
+#include <libswscale/swscale.h>
+}
 
 NVMeDataManager::NVMeDataManager()
     : running_(false)
@@ -20,9 +29,11 @@ NVMeDataManager::~NVMeDataManager() {
     shutdown();
 }
 
-bool NVMeDataManager::initialize() {
+bool NVMeDataManager::initialize(const char* device_path) {
+    nvme_device_path_ = device_path;
+
     // 打开NVMe设备（使用 O_DIRECT 绕过 page cache，降低 CPU 占用）
-    nvme_fd_ = open("/dev/nvme0n1", O_WRONLY | O_DIRECT);
+    nvme_fd_ = open(nvme_device_path_.c_str(), O_WRONLY | O_DIRECT);
     if (nvme_fd_ < 0) {
         std::cerr << "Failed to open NVMe device: " << strerror(errno) << std::endl;
         return false;
@@ -281,7 +292,7 @@ bool NVMeDataManager::write_imu_data_to_disk(const uint8_t* imu_data, size_t imu
 bool NVMeDataManager::read_video_frame_from_disk(uint64_t target_timestamp, float time_interval,
                                                   std::vector<uint8_t>& out_frame_data) {
     // 打开NVMe设备用于读取
-    int read_fd = open("/dev/nvme0n1", O_RDONLY);
+    int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
     if (read_fd < 0) {
         std::cerr << "Failed to open NVMe device for reading: " << strerror(errno) << std::endl;
         return false;
@@ -349,6 +360,252 @@ bool NVMeDataManager::read_video_frame_from_disk(uint64_t target_timestamp, floa
     }
 
     return found;
+}
+
+bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
+                                                const std::string& output_path,
+                                                double time_window_sec,
+                                                int fps,
+                                                int frame_width,
+                                                int frame_height,
+                                                int camera_id,
+                                                bool input_is_nv12) {
+    // 计算时间窗口（纳秒）：仅回溯 time_window_sec 秒
+    uint64_t window_ns = static_cast<uint64_t>(time_window_sec * 1'000'000'000.0);
+    uint64_t start_ns = (trigger_timestamp_ns > window_ns)
+                      ? (trigger_timestamp_ns - window_ns) : 0;
+    uint64_t end_ns = trigger_timestamp_ns;  // 不包含未来数据
+    const size_t expected_frame_size = input_is_nv12
+        ? static_cast<size_t>(frame_width) * frame_height * 3 / 2
+        : static_cast<size_t>(frame_width) * frame_height * 3;
+
+    // 打开 NVMe 设备用于读取
+    int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
+    if (read_fd < 0) {
+        std::cerr << "Failed to open NVMe device for reading: " << strerror(errno) << std::endl;
+        return false;
+    }
+
+    // 收集时间窗口内的视频帧
+    struct FrameRecord {
+        uint64_t timestamp_ns;
+        std::vector<uint8_t> data;
+    };
+    std::vector<FrameRecord> frames;
+
+    off_t offset = 0;
+    Header header;
+
+    while (true) {
+        ssize_t n = pread(read_fd, &header, sizeof(Header), offset);
+        if (n != static_cast<ssize_t>(sizeof(Header))) break;
+        if (header.magic_number != MAGIC_NUMBER) break;
+
+        size_t record_payload = sizeof(Header) + header.data_size;
+        size_t padding = (HEADER_ALIGNMENT - (record_payload % HEADER_ALIGNMENT)) % HEADER_ALIGNMENT;
+        size_t record_size = record_payload + padding;
+
+        bool is_video = false;
+        if (camera_id == -1) {
+            // -1: 匹配所有视频类型（支持后续扩展更多摄像头）
+            is_video = (header.data_type == static_cast<uint8_t>(DataType::VIDEO_FRONT) ||
+                        header.data_type == static_cast<uint8_t>(DataType::VIDEO_REAR));
+        } else {
+            // 精确匹配指定摄像头ID（data_type 即摄像头序列号）
+            is_video = (header.data_type == static_cast<uint8_t>(camera_id));
+        }
+
+        if (is_video && header.timestamp_ns >= start_ns && header.timestamp_ns <= end_ns) {
+            if (header.data_size == expected_frame_size) {
+                FrameRecord fr;
+                fr.timestamp_ns = header.timestamp_ns;
+                fr.data.resize(header.data_size);
+                n = pread(read_fd, fr.data.data(), header.data_size, offset + sizeof(Header));
+                if (n == static_cast<ssize_t>(header.data_size)) {
+                    frames.push_back(std::move(fr));
+                }
+            }
+        }
+
+        offset += record_size;
+    }
+
+    close(read_fd);
+
+    if (frames.empty()) {
+        std::cerr << "No video frames found in time window ["
+                  << start_ns << ", " << end_ns << "]" << std::endl;
+        return false;
+    }
+
+    // 按时间戳排序保证播放顺序
+    std::sort(frames.begin(), frames.end(), [](const FrameRecord& a, const FrameRecord& b) {
+        return a.timestamp_ns < b.timestamp_ns;
+    });
+
+    // ================================================================
+    //  MPP 硬件编码 + FFmpeg MP4 复用（参照 sentinel-streamer/mpp_encoder）
+    //  数据流: RGB888(内存) → swscale → NV12 → h264_rkmpp → MP4
+    // ================================================================
+
+    // Step A: 打开 MPP H.264 硬件编码器
+    const AVCodec* codec = avcodec_find_encoder_by_name("h264_rkmpp");
+    if (!codec) {
+        std::cerr << "[NVMeExport] h264_rkmpp encoder not found" << std::endl;
+        return false;
+    }
+
+    AVCodecContext* encCtx = avcodec_alloc_context3(codec);
+    if (!encCtx) {
+        std::cerr << "[NVMeExport] avcodec_alloc_context3 failed" << std::endl;
+        return false;
+    }
+
+    encCtx->width       = frame_width;
+    encCtx->height      = frame_height;
+    encCtx->time_base   = AVRational{1, 90000};
+    encCtx->framerate   = AVRational{fps, 1};
+    encCtx->gop_size    = fps;
+    encCtx->bit_rate    = 8000000;   // 8 Mbps, 1080p 回溯录像质量
+    encCtx->max_b_frames = 0;
+    encCtx->pix_fmt     = AV_PIX_FMT_NV12;
+
+    encCtx->color_range     = AVCOL_RANGE_JPEG;
+    encCtx->color_primaries = AVCOL_PRI_BT709;
+    encCtx->color_trc       = AVCOL_TRC_BT709;
+    encCtx->colorspace      = AVCOL_SPC_BT709;
+
+    av_opt_set_int(encCtx->priv_data, "rc_mode", 0, 0);  // VBR
+    av_opt_set_int(encCtx->priv_data, "delay",  0, 0);
+
+    if (avcodec_open2(encCtx, codec, nullptr) < 0) {
+        std::cerr << "[NVMeExport] avcodec_open2 failed" << std::endl;
+        avcodec_free_context(&encCtx);
+        return false;
+    }
+
+    // Step B: 打开 MP4 复用器
+    AVFormatContext* fmtCtx = nullptr;
+    if (avformat_alloc_output_context2(&fmtCtx, nullptr, "mp4",
+                                       output_path.c_str()) < 0 || !fmtCtx) {
+        std::cerr << "[NVMeExport] avformat_alloc_output_context2 failed" << std::endl;
+        avcodec_free_context(&encCtx);
+        return false;
+    }
+
+    AVStream* stream = avformat_new_stream(fmtCtx, nullptr);
+    if (!stream) {
+        std::cerr << "[NVMeExport] avformat_new_stream failed" << std::endl;
+        avformat_free_context(fmtCtx);
+        avcodec_free_context(&encCtx);
+        return false;
+    }
+
+    if (avcodec_parameters_from_context(stream->codecpar, encCtx) < 0) {
+        std::cerr << "[NVMeExport] avcodec_parameters_from_context failed" << std::endl;
+        avformat_free_context(fmtCtx);
+        avcodec_free_context(&encCtx);
+        return false;
+    }
+    stream->time_base = encCtx->time_base;
+
+    if (avio_open(&fmtCtx->pb, output_path.c_str(), AVIO_FLAG_WRITE) < 0) {
+        std::cerr << "[NVMeExport] avio_open failed: " << output_path << std::endl;
+        avformat_free_context(fmtCtx);
+        avcodec_free_context(&encCtx);
+        return false;
+    }
+
+    if (avformat_write_header(fmtCtx, nullptr) < 0) {
+        std::cerr << "[NVMeExport] avformat_write_header failed" << std::endl;
+        avio_closep(&fmtCtx->pb);
+        avformat_free_context(fmtCtx);
+        avcodec_free_context(&encCtx);
+        return false;
+    }
+
+    // Step C: 创建 swscale 上下文 (仅 RGB888→NV12 时需要)
+    SwsContext* swsCtx = nullptr;
+    if (!input_is_nv12) {
+        swsCtx = sws_getContext(
+            frame_width, frame_height, AV_PIX_FMT_RGB24,
+            frame_width, frame_height, AV_PIX_FMT_NV12,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!swsCtx) {
+            std::cerr << "[NVMeExport] sws_getContext failed" << std::endl;
+            av_write_trailer(fmtCtx);
+            avio_closep(&fmtCtx->pb);
+            avformat_free_context(fmtCtx);
+            avcodec_free_context(&encCtx);
+            return false;
+        }
+    }
+
+    // Step D: 逐帧 → NV12 → MPP 编码 → MP4 写盘
+    uint64_t baseNs = frames.empty() ? 0 : frames[0].timestamp_ns;
+    int y_size = frame_width * frame_height;
+
+    for (const auto& fr : frames) {
+        // D1: 创建 NV12 AVFrame
+        AVFrame* nv12 = av_frame_alloc();
+        if (!nv12) continue;
+        nv12->format = AV_PIX_FMT_NV12;
+        nv12->width  = frame_width;
+        nv12->height = frame_height;
+        nv12->pts    = static_cast<int64_t>((fr.timestamp_ns - baseNs) * 90000 / 1000'000'000);
+        av_frame_get_buffer(nv12, 0);
+
+        // D2: 填充 NV12 数据
+        if (input_is_nv12) {
+            memcpy(nv12->data[0], fr.data.data(), y_size);
+            memcpy(nv12->data[1], fr.data.data() + y_size, y_size / 2);
+        } else {
+            const uint8_t* srcData[1] = { fr.data.data() };
+            int srcStride[1] = { frame_width * 3 };
+            sws_scale(swsCtx, srcData, srcStride, 0, frame_height,
+                      nv12->data, nv12->linesize);
+        }
+
+        // D3: 送编码器
+        avcodec_send_frame(encCtx, nv12);
+        av_frame_free(&nv12);
+
+        // D4: 收编码包 → 写 MP4
+        AVPacket* pkt = av_packet_alloc();
+        if (pkt) {
+            while (avcodec_receive_packet(encCtx, pkt) == 0) {
+                pkt->stream_index = 0;
+                av_write_frame(fmtCtx, pkt);
+                av_packet_unref(pkt);
+            }
+            av_packet_free(&pkt);
+        }
+    }
+
+    // Step E: 排空编码器残余帧
+    avcodec_send_frame(encCtx, nullptr);
+    AVPacket* drainPkt = av_packet_alloc();
+    if (drainPkt) {
+        while (avcodec_receive_packet(encCtx, drainPkt) == 0) {
+            drainPkt->stream_index = 0;
+            av_write_frame(fmtCtx, drainPkt);
+            av_packet_unref(drainPkt);
+        }
+        av_packet_free(&drainPkt);
+    }
+
+    // Step F: 清理
+    if (swsCtx) sws_freeContext(swsCtx);
+    av_write_trailer(fmtCtx);
+    avio_closep(&fmtCtx->pb);
+    avformat_free_context(fmtCtx);
+    avcodec_free_context(&encCtx);
+
+    std::cout << "Exported " << frames.size() << " frames ("
+              << (static_cast<double>(frames.size()) / fps) << "s) to "
+              << output_path << std::endl;
+
+    return true;
 }
 
 size_t NVMeDataManager::get_queue_size() const {

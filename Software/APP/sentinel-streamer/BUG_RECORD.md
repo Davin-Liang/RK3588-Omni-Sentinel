@@ -219,3 +219,57 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 **原因**: ffmpeg 推流默认使用 UDP，RTP 包超过 MTU 限制且分片异常。
 
 **解决**: ffmpeg 推流命令增加 `-rtsp_transport tcp`，使用 TCP 传输避免 RTP 包大小限制和丢包问题。
+
+---
+
+## 21. OSD 叠加导致推流画面变黑白
+
+**现象**: 开启 OSD 后 RTSP 推流画面整体变为黑白（灰度），关闭 OSD 恢复彩色。
+
+**原因**: `draw_rect_nv12()` 将 bbox 矩形区域内的 UV 平面全部填充为中性色（128,128），清除了所有色度信息。person 检测框通常覆盖画面大面积，整框区域去色导致画面呈现黑白。
+
+**解决**: 移除 UV 平面全框填充循环。Y 平面 2px 白色边框足够醒目，无需修改 UV。边框本身仅 2 像素宽，即使保留原 UV 值也视觉不受影响。
+
+## 22. USB 相机 OSD 延迟 5-6 秒
+
+**现象**: MIPI 相机 OSD 实时跟随人物，USB 相机 OSD 在人物移动后 5-6 秒才更新，期间框停留在原位。
+
+**原因**: YOLO 推理结果通过 `ThreadSafeQueue`（FIFO）传给 streamer 推流线程。USB 相机 NPU 管线产帧速率（~30fps）高于推流消费速率（~15fps），队列持续积压。`try_get_osd_result(5ms)` 每次从队首取最旧帧 → 叠加的是数秒前的检测结果。
+
+**解决**: OSD provider 回调改为 `while(try_get_osd_result(0))` 清空整个队列，仅保留最后一条（最新）结果。每次推流帧都拿到最新检测框，延迟降至 1 帧以内。
+
+---
+
+## 23. 推流中停止录像导致 MP4 文件 moov atom 缺失
+
+**现象**: 推流运行中停止录像，视频列表刷新时 FFmpeg 报 `moov atom not found`，录制的 MP4 文件无法播放或时长异常。
+
+**原因**: `stop_record()` 在推流仍在运行时（`streamEnabled == true`）仅设置 `recordEnabled = false`，不关闭 MP4 muxer。`av_write_trailer()` 未执行，moov atom 未写入。直到 `stop_stream()` 才关 MP4，若用户先停录像后停推流，中间 MP4 一直处于未完成状态。
+
+**解决**: `stop_record()` 新增 else 分支：推流中停录像时单独关闭 `mp4Ctx` 和 `recordEncCtx`，线程继续跑推流。`mp4_output_close()` 内部调用 `av_write_trailer()` 正确写入 moov atom。
+
+---
+
+## 24. 推流 + 720p EIS 录像时 RGA 负载过高导致 NPU 路径失败
+
+**现象**: 同时开启 EIS 防抖和 OSD 框叠加后，NPU RGA 转换偶发失败（`improcess failed`），实际 RGA 硬件利用率仅 ~10%，非过载。
+
+**原因**: 排查后确认根因在 NPU 路径而非 streamer。EIS 偏移导致 NPU `rga_process_to_rgb_()` 的 drect 越界（见 visioner BUG #13）。streamer OSD 叠加与该问题无关，属误判。
+
+**解决**: 修复 visioner 的 drect 钳位（visioner #13）后问题消失。
+
+---
+
+## 25. 720p 录像 EIS crop+scale 防抖实现
+
+**新增功能**: `rga_scale_nv12_to_720p()` 新增 EIS 参数（`eisOffsetX/Y`、`eisActive`、`eisMargin`）。EIS 激活时，从源帧裁切 `margin + offset` 区域 → 缩放至 1280×720，一次 RGA 操作完成防抖。EIS 关闭时走原路径（720p 源用 imcopy，其他全幅 improcess）。裁切边距通过 `set_eis_params()` 配置（默认 32px，`config.ini` `[EIS]` 节 `streamerMargin`）。
+
+---
+
+## 26. 录像 PTS 基准独立化
+
+**现象**: 推流已运行一段时间后开始录像，录像 MP4 文件 PTS 不从 0 开始，播放器进度条跳变。
+
+**原因**: 推流和录像共用 `baselineTsUs`。`start_record()` 虽然会更新它，但 stream 线程可能在更新前已用旧值计算了若干帧的 PTS。
+
+**解决**: 新增独立 `recordBaseTsUs`，首帧时间戳自动初始化，确保每次录像 PTS 从 0 开始。推流和录像 PTS 完全解耦。

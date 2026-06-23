@@ -17,6 +17,7 @@ void ffmpeg_init_once();
 
 // ---- MPP 编码器 ----
 bool mpp_encoder_open(AVCodecContext** outCtx, int width, int height, int bitRate);
+void mpp_encoder_flush(AVCodecContext* encCtx, AVFormatContext* mp4Ctx);
 void mpp_encoder_close(AVCodecContext** ctx);
 
 // ---- ffmpeg 子进程推流（代替 RTSP API muxer） ----

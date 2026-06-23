@@ -6,7 +6,7 @@
 |_| \_\_|\_\____/____/ \___/ \___/    \___/|_| |_| |_|_| |_|_|    |____/ \___|_| |_|\__|_|_| |_|\___|_|
 ```
 
-基于瑞芯微 **RK3588** 的边缘端多传感器融合平台。集成激光雷达驱动、相机视觉管线、传感器融合跟踪、RTSP 推流录像、嵌入式触控界面五大组件，全部脱离 ROS，以 C++14 静态库形式存在，通过 **DMA-BUF** 在 NPU / RGA / V4L2 硬件加速器之间实现零拷贝数据流转。
+基于瑞芯微 **RK3588** 的边缘端多传感器融合平台。集成激光雷达驱动、相机视觉管线、NPU YOLO 推理、传感器融合跟踪、RTSP 推流录像（含 OSD 叠加）、IMU 电子防抖、嵌入式触控界面七大组件，全部脱离 ROS，以 C++14 静态库形式存在，通过 **DMA-BUF** 在 NPU / RGA / V4L2 硬件加速器之间实现零拷贝数据流转。
 
 ---
 
@@ -24,10 +24,14 @@
                     └── 推流副本 (NV12, 1080p/720p)
                          │           │            │
                          ▼           ▼            ▼
-                    NPU 推理    SentinelQT    SentinelStreamer
-                    (待接入)    (双路触控HMI)  ├─ RGA 缩放 → MPP 编码
-                                              ├─ ffmpeg 子进程 → RTSP
-                                              └─ FFmpeg API → MP4
+                 SentinelYoloInfer  SentinelQT  SentinelStreamer
+                 (YOLOv8 RKNN推理) (双路触控HMI) ├─ RGA 缩放 → 720p
+                    │              │   │         ├─ OSD 叠加(YOLO框)
+                    ▼              │   │         ├─ MPP H.264 编码
+             LidarCameraFusion ←───┘   │         ├─ ffmpeg → RTSP
+             (视觉-雷达融合跟踪)        │         └─ FFmpeg API → MP4
+                    │                  │
+                    └──── 告警 ←───────┘
 
  /dev/sentinel_lidar (N10Plus 单线雷达, 10Hz)
          │
@@ -53,9 +57,11 @@
 |------|------|------|------|
 | **SentinelLslidarer** | `Software/APP/sentinel-lslidarer/` | 镭神 N10Plus 单线雷达驱动，SWCR 无锁环形缓冲区，时间戳融合接口 | 仅 libpthread |
 | **SentinelVisioner** | `Software/APP/sentinel-visioner/` | 双路相机视觉管线（ISP 1080p + USB 720p），V4L2 + RGA 硬件加速"一分三"零拷贝扇出 | dma-buffer-pool, librga |
+| **SentinelYoloInfer** | `Software/APP/sentinel-yolo-infer/` | RKNN YOLOv8 NPU 推理，双队列输出（融合+OSD），DMA-BUF 零拷贝 | sentinel-visioner, rknpu2, lidar-camera-fusion (类型) |
 | **LidarCameraFusion** | `Software/APP/lidar-camera-fusion/` | 视觉-雷达数据融合，Alpha-Beta 多目标跟踪，四态生命周期管理 | sentinel-lslidarer (仅头文件) |
-| **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像，MPP 硬件编码 H.264，双编码器独立架构，动态源分辨率 | sentinel-visioner, librga, ffmpeg |
-| **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 按相机独立推流/录像/暂停控制 + 视频管理 | sentinel-visioner, sentinel-streamer, Qt5 |
+| **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像 + OSD 叠加，MPP 硬件编码 H.264，双编码器独立架构 | sentinel-visioner, librga, ffmpeg |
+| **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 推流/录像/暂停/OSD 控制 + 融合管理 | sentinel-visioner, sentinel-streamer, sentinel-yolo-infer, Qt5 |
+| **icm45686-eis-app** | `Software/APP/icm45686-eis-app/` | ICM45686 电子防抖，陀螺仪积分 → 像素偏移，回调注入 sentinel-visioner NPU 路径 | 仅 libpthread + libm |
 | **DmaBufferPool** | `Software/APP/dma-buffer-pool/` | DMA 内存池，O(1) 空闲链表分配/归还 | librga, libdrm |
 
 每个组件目录下均有独立的 `README.md` 和完整文档，详见各组件的 `docs/` 目录。
@@ -86,7 +92,8 @@ cd Software/APP/dma-buffer-pool   && ./build.sh   # DMA 内存池（基础设施
 cd ../sentinel-lslidarer          && ./build.sh   # 雷达驱动（无依赖）
 cd ../sentinel-visioner           && ./build.sh   # 视觉管线（依赖 dma-buffer-pool）
 cd ../lidar-camera-fusion         && ./build.sh   # 融合跟踪（依赖 lslidarer 头文件）
-cd ../sentinel-streamer           && ./build.sh   # 推流录像（依赖 visioner）
+cd ../sentinel-yolo-infer         && ./build.sh   # YOLO NPU 推理（依赖 visioner + rknpu2）
+cd ../sentinel-streamer           && ./build.sh   # 推流录像 + OSD（依赖 visioner）
 cd ../SentinelQT                  && ./build.sh   # 触控界面（依赖 visioner + streamer）
 ```
 
@@ -113,6 +120,7 @@ sudo ./SentinelQT -platform eglfs      # 启动触控界面
 | `Software/APP/CLAUDE.md` | 编码规范、构建系统、架构约定、文档规范 |
 | `sentinel-lslidarer/` | [README](Software/APP/sentinel-lslidarer/README.md) · [实现](Software/APP/sentinel-lslidarer/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/sentinel-lslidarer/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/sentinel-lslidarer/BUG_RECORD.md) |
 | `sentinel-visioner/` | [README](Software/APP/sentinel-visioner/README.md) · [实现](Software/APP/sentinel-visioner/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/sentinel-visioner/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/sentinel-visioner/BUG_RECORD.md) |
+| `sentinel-yolo-infer/` | [README](Software/APP/sentinel-yolo-infer/README.md) · [实现](Software/APP/sentinel-yolo-infer/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/sentinel-yolo-infer/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/sentinel-yolo-infer/BUG_RECORD.md) |
 | `lidar-camera-fusion/` | [README](Software/APP/lidar-camera-fusion/README.md) · [实现](Software/APP/lidar-camera-fusion/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/lidar-camera-fusion/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/lidar-camera-fusion/BUG_RECORD.md) |
 | `sentinel-streamer/` | [README](Software/APP/sentinel-streamer/README.md) · [实现](Software/APP/sentinel-streamer/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/sentinel-streamer/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/sentinel-streamer/BUG_RECORD.md) |
 | `SentinelQT/` | [README](Software/APP/SentinelQT/README.md) · [实现](Software/APP/SentinelQT/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/SentinelQT/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/SentinelQT/BUG_RECORD.md) |
@@ -155,8 +163,9 @@ RK3588-Omni-Sentinel/
 │       ├── dma-buffer-pool/           # DMA 内存池（基础设施）
 │       ├── sentinel-lslidarer/        # 激光雷达驱动
 │       ├── sentinel-visioner/         # 相机视觉管线
+│       ├── sentinel-yolo-infer/       # YOLOv8 RKNN NPU 推理
 │       ├── lidar-camera-fusion/       # 视觉-雷达融合跟踪
-│       ├── sentinel-streamer/         # RTSP 推流 + MP4 录像
+│       ├── sentinel-streamer/         # RTSP 推流 + MP4 录像 + OSD
 │       └── SentinelQT/                # Qt5 嵌入式触控 HMI
 └── Hardware/                          # 硬件驱动层
     └── Driver/

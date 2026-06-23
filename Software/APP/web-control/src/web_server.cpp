@@ -156,6 +156,10 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/cam/0/record/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/0/pause)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/0/resume)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/osd/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/osd/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/eis/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/eis/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/preview/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/preview/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/stream/start)", wrap_post);
@@ -164,6 +168,14 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/cam/1/record/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/pause)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/cam/1/resume)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/osd/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/osd/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/eis/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/eis/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/lidar-osd/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/0/lidar-osd/stop)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/lidar-osd/start)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/cam/1/lidar-osd/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/system/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/system/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/lidar/start)", wrap_post);
@@ -187,6 +199,7 @@ bool WebServer::start()
         handle_api(req, res, "DELETE");
     };
     impl_->httpServer_.Delete(R"(/api/v1/videos)", wrap_delete);
+    impl_->httpServer_.Delete(R"(/api/v1/backtrack/files)", wrap_delete);
 
     // 录像文件播放（流式输出，支持 Range 请求）
     impl_->httpServer_.Get(R"(/api/v1/playback)", [](const httplib::Request& req, httplib::Response& res) {
