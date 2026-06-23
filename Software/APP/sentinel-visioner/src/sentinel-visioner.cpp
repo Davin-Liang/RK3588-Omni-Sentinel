@@ -598,7 +598,8 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     if (targetOrigBuf != nullptr) {
                         targetOrigBuf->timestampUs = timestampUs;
                         bool copyOk = rga_copy_buffer_(nv12DmaFd, ctx->width, ctx->height,
-                                                        nv12Stride, targetOrigBuf);
+                                                        nv12Stride, targetOrigBuf,
+                                                        currentHorizOffset, currentVertOffset);
                         if (copyOk) {
                             ctx->processTaskQueue.push(targetOrigBuf);
                         } else {
@@ -896,10 +897,10 @@ bool SentinelVisioner::rga_convert_to_rgb_full_(int srcFd, int srcWidth, int src
 }
 
 bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height,
-                                         int srcStride, DmaBuffer_t* dstBuf) {
+                                         int srcStride, DmaBuffer_t* dstBuf,
+                                         int eisOffsetX, int eisOffsetY) {
     if (srcFd <= 0 || !dstBuf || dstBuf->dmaFd <= 0) return false;
 
-    // MIPI 摄像头通常输入为 NV12 (YCrCb_420_SP)
     int fmt = RK_FORMAT_YCrCb_420_SP;
 
     im_handle_param_t in_param = { srcStride, height, fmt };
@@ -916,8 +917,44 @@ bool SentinelVisioner::rga_copy_buffer_(int srcFd, int width, int height,
     rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, srcStride, height, fmt, srcStride, height);
     rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, fmt, dstBuf->width, dstBuf->height);
 
-    // 调用 RGA 硬件拷贝
-    IM_STATUS ret_rga = imcopy(rga_buf_src, rga_buf_dst);
+    IM_STATUS ret_rga;
+    if (eisOffsetX == 0 && eisOffsetY == 0) {
+        ret_rga = imcopy(rga_buf_src, rga_buf_dst);
+    } else {
+        // crop+scale：裁剪 + 缩放填满，无黑边。margin=32 约 3.4% zoom
+        const int marginX = 32;
+        const int marginY = marginX * height / width;
+
+        int cropX = marginX + eisOffsetX;
+        int cropY = marginY + eisOffsetY;
+        int cropW = width  - 2 * marginX;
+        int cropH = height - 2 * marginY;
+
+        // NV12 偶数对齐
+        cropX &= ~1; cropY &= ~1;
+        cropW &= ~1; cropH &= ~1;
+
+        if (cropX < 0) cropX = 0;
+        if (cropY < 0) cropY = 0;
+        if (cropX + cropW > width)  cropX = width  - cropW;
+        if (cropY + cropH > height) cropY = height - cropH;
+        cropX &= ~1; cropY &= ~1;
+
+        im_rect srect = {cropX, cropY, cropW, cropH};
+        im_rect drect = {0, 0, dstBuf->width, dstBuf->height};
+
+        rga_buffer_t pat;   memset(&pat,   0, sizeof(rga_buffer_t));
+        im_rect      prect; memset(&prect, 0, sizeof(im_rect));
+
+        ret_rga = improcess(rga_buf_src, rga_buf_dst, pat, srect, drect, prect, IM_SYNC);
+        if (ret_rga != IM_STATUS_SUCCESS) {
+            fprintf(stderr, "[RGA Error] EIS copy improcess failed "
+                    "(ret=%d, src=%dx%d srect=%d,%d,%d,%d -> dst=%dx%d)\n",
+                    (int)ret_rga, width, height,
+                    cropX, cropY, cropW, cropH,
+                    dstBuf->width, dstBuf->height);
+        }
+    }
 
     releasebuffer_handle(rga_handle_src);
     releasebuffer_handle(rga_handle_dst);
