@@ -356,3 +356,16 @@ IMU 读取 → 时间戳标记 → 环形缓冲区 → 时间窗口查询 → �
 4. 加入陀螺仪零偏估计，降低静态窗口内的积分误差；
 5. 将 `offsetX / offsetY` 接入图像裁剪、平移或 RGA 图像处理模块，形成完整电子防抖闭环；
 6. 如需更严格实时性，可将当前字符设备方案升级为 IIO + 中断 + kfifo 方案。
+
+
+## EIS 画面抖动评估工具
+
+本工程新增 `icm45686_jitter_eval` 离线评估工具，用于比较原始视频和防抖后视频的帧间位移 RMS 抖动。该工具依赖 OpenCV，如果编译环境中没有 OpenCV，CMake 会自动跳过该工具，不影响原有 IMU/EIS Demo。
+
+使用方式：
+
+```bash
+./icm45686_jitter_eval raw.mp4 eis.mp4 900
+```
+
+详细说明见：`docs/JITTER-EVALUATION.md`。
