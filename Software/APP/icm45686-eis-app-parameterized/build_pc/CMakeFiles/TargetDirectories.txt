@@ -1,0 +1,11 @@
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/icm45686_user_lib.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/icm45686_eis_lib.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/icm45686_app.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/icm45686_eis_demo.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/icm45686_jitter_eval.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/edit_cache.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/rebuild_cache.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/list_install_components.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/install.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/install/local.dir
+/home/elf/RK3588-Omni-Sentinel/Software/APP/icm45686-eis-app-parameterized/build_pc/CMakeFiles/install/strip.dir

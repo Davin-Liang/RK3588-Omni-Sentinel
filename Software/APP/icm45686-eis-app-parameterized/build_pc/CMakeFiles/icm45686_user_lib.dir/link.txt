@@ -1,0 +1,2 @@
+/usr/bin/ar qc libicm45686_user_lib.a CMakeFiles/icm45686_user_lib.dir/src/icm45686_user.c.o
+/usr/bin/ranlib libicm45686_user_lib.a
