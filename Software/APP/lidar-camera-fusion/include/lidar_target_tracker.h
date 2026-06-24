@@ -64,6 +64,10 @@ public:
     bool copy_snapshot(TrackedTarget* out, uint32_t maxCount,
                        uint32_t* outCount) const;
 
+    /** @brief 查询指定 bbox 的聚类质心（update() 后调用） */
+    bool get_bbox_detection_centroid(uint32_t globalBboxIdx,
+                                     float& outX, float& outY) const;
+
 private:
     // ---- 内部结构 ----
     struct DetectionCandidate {

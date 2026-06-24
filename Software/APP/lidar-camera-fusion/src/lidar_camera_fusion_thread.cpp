@@ -2,6 +2,7 @@
 #include "lidar_target_tracker.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 // ============================================================================
@@ -93,6 +94,8 @@ void LidarCameraFusion::fusion_thread_()
             continue;
         }
 
+        // [LidarCalib] 已注释
+
         // ---- 步骤 4：累积融合 + 同步记录 bbox ----
         reset();
         YoloBBox allBboxes[kMaxDetections];
@@ -111,7 +114,13 @@ void LidarCameraFusion::fusion_thread_()
             }
         }
 
-        // ---- 步骤 4.5：构建 LiDAR OSD 快照 ----
+        // ---- 步骤 4.5：目标跟踪 ----
+        if (trackingEnabled_ && tracker_) {
+            tracker_->update(result_, lidarPointsBuf_, frame.pointsCount,
+                             allBboxes, totalBboxes, frame.timestampNs);
+        }
+
+        // ---- 步骤 5：构建 LiDAR OSD 快照（含 tracker 聚类距离） ----
         for (uint32_t i = 0; i < frame.pointsCount; ++i) {
             lidarPointXBuf_[i] = lidarPointsBuf_[i].x;
             lidarPointYBuf_[i] = lidarPointsBuf_[i].y;
@@ -162,18 +171,28 @@ void LidarCameraFusion::fusion_thread_()
             cam.lidarPointX.assign(lidarPointXBuf_, lidarPointXBuf_ + frame.pointsCount);
             cam.lidarPointY.assign(lidarPointYBuf_, lidarPointYBuf_ + frame.pointsCount);
 
+            // 复用 tracker 聚类质心距离
+            cam.bboxClusterDistMeters.resize(camBboxCount, 0.0f);
+            for (uint32_t b = 0; b < camBboxCount; ++b) {
+                float cx = 0, cy = 0;
+                bool ok = (trackingEnabled_ && tracker_
+                    && tracker_->get_bbox_detection_centroid(globalBboxIdx + b, cx, cy));
+                if (ok) {
+                    cam.bboxClusterDistMeters[b] = std::sqrt(cx * cx + cy * cy);
+                }
+                if (iterationCount % 10 == 0) {
+                    fprintf(stderr, "[LidarOSD] cam%u bbox[%u] track_cx=%.3f track_cy=%.3f dist=%.2fm %s\n",
+                            c, b, cx, cy, cam.bboxClusterDistMeters[b],
+                            ok ? "" : "NO_TRACK");
+                }
+            }
+
             globalBboxIdx += camBboxCount;
         }
 
         {
             std::lock_guard<std::mutex> lock(osdSnapshotMutex_);
             latestOsdSnapshot_ = std::move(snap);
-        }
-
-        // ---- 步骤 5：目标跟踪 ----
-        if (trackingEnabled_ && tracker_) {
-            tracker_->update(result_, lidarPointsBuf_, frame.pointsCount,
-                             allBboxes, totalBboxes, frame.timestampNs);
         }
 
         // ---- 步骤 6：输出结果 ----

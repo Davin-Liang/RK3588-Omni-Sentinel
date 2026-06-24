@@ -188,11 +188,17 @@ bool LidarCameraFusion::fuse_data(const std::vector<YoloBBox>& detections,
         uint32_t ui = static_cast<uint32_t>(u);
         uint32_t vi = static_cast<uint32_t>(v);
         int32_t bboxIdx = -1;
+        float   bestDist2 = 1e9f;
         for (uint32_t b = 0; b < nBboxes; ++b) {
             const YoloBBox& bb = detections[b];
             if (ui >= bb.x1 && ui < bb.x2 && vi >= bb.y1 && vi < bb.y2) {
-                bboxIdx = static_cast<int32_t>(b);
-                break;
+                float bcx = (bb.x1 + bb.x2) * 0.5f;
+                float bcy = (bb.y1 + bb.y2) * 0.5f;
+                float d2 = (u - bcx) * (u - bcx) + (v - bcy) * (v - bcy);
+                if (d2 < bestDist2) {
+                    bestDist2 = d2;
+                    bboxIdx = static_cast<int32_t>(b);
+                }
             }
         }
 

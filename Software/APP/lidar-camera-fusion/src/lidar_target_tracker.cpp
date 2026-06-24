@@ -137,6 +137,19 @@ bool LidarTargetTracker::copy_snapshot(TrackedTarget* out, uint32_t maxCount,
     return true;
 }
 
+bool LidarTargetTracker::get_bbox_detection_centroid(uint32_t globalBboxIdx,
+                                                       float& outX, float& outY) const
+{
+    for (uint32_t i = 0; i < detectionCount_; ++i) {
+        if (detections_[i].bboxIdx == globalBboxIdx && !detections_[i].isOrphan) {
+            outX = detections_[i].x;
+            outY = detections_[i].y;
+            return true;
+        }
+    }
+    return false;
+}
+
 // ============================================================================
 // 配置校验
 // ============================================================================
@@ -275,12 +288,7 @@ void LidarTargetTracker::cluster_bbox_points_(
             float cy = clusters[ci].sumY / static_cast<float>(clusters[ci].count);
             float dist = std::sqrt(cx * cx + cy * cy);
             if (dist > 2.5f) continue;   // 忽略 2.5m 外的簇（排除远处工位/墙壁）
-            float distanceBonus = 1.0f - (dist / 50.0f);
-            if (distanceBonus < 0.0f) distanceBonus = 0.0f;
-            if (distanceBonus > 1.0f) distanceBonus = 1.0f;
-
-            float score = static_cast<float>(clusters[ci].count) * 1.0f
-                         + distanceBonus * 1.0f;
+            float score = static_cast<float>(clusters[ci].count) * (2.5f / dist);
 
             if (score > bestScore) {
                 bestScore   = score;

@@ -1203,14 +1203,6 @@ void Widget::load_fusion_config_()
         fusionCamCfg_[0].tLidarToCam[i] =
             config_.value(QString("Fusion/Cam0T%1").arg(i), 0.0f).toFloat();
     }
-    // 默认外参: cx = ly, cz = -lx (见 demo_thread)
-    if (fusionCamCfg_[0].tLidarToCam[1] == 0.0f &&
-        fusionCamCfg_[0].tLidarToCam[8] == 0.0f) {
-        fusionCamCfg_[0].tLidarToCam[1]  = 1.0f;   // cx = ly
-        fusionCamCfg_[0].tLidarToCam[8]  = -1.0f;  // cz = -lx
-        fusionCamCfg_[0].tLidarToCam[15] = 1.0f;
-    }
-
     // Camera 1
     fusionCamCfg_[1].fx = config_.value("Fusion/Cam1Fx", 400.0f).toFloat();
     fusionCamCfg_[1].fy = config_.value("Fusion/Cam1Fy", 400.0f).toFloat();
@@ -1221,12 +1213,6 @@ void Widget::load_fusion_config_()
     for (int i = 0; i < 16; ++i) {
         fusionCamCfg_[1].tLidarToCam[i] =
             config_.value(QString("Fusion/Cam1T%1").arg(i), 0.0f).toFloat();
-    }
-    if (fusionCamCfg_[1].tLidarToCam[1] == 0.0f &&
-        fusionCamCfg_[1].tLidarToCam[8] == 0.0f) {
-        fusionCamCfg_[1].tLidarToCam[1]  = 1.0f;
-        fusionCamCfg_[1].tLidarToCam[8]  = -1.0f;
-        fusionCamCfg_[1].tLidarToCam[15] = 1.0f;
     }
 }
 
@@ -1577,13 +1563,10 @@ void Widget::setup_lidar_osd_provider_()
                                        cam.bboxPointU.begin() + offset + box.pointCount);
                     box.pointsV.assign(cam.bboxPointV.begin() + offset,
                                        cam.bboxPointV.begin() + offset + box.pointCount);
-                    float sumDist = 0.0f;
-                    for (uint32_t j = 0; j < box.pointCount; ++j) {
-                        uint32_t pi = cam.bboxPointIndices[offset + j];
-                        sumDist += std::sqrt(cam.lidarPointX[pi] * cam.lidarPointX[pi] +
-                                              cam.lidarPointY[pi] * cam.lidarPointY[pi]);
-                    }
-                    box.distanceMeters = (box.pointCount > 0) ? sumDist / box.pointCount : 0.0f;
+                    box.distanceMeters = (b < cam.bboxClusterDistMeters.size())
+                        ? cam.bboxClusterDistMeters[b] : 0.0f;
+                    fprintf(stderr, "[OSD_Widget] cam%u bbox[%u] x1=%u y1=%u dist=%.2fm\n",
+                            camNum, b, box.x1, box.y1, box.distanceMeters);
                     offset += box.pointCount;
                     out.push_back(std::move(box));
                 }
@@ -1668,7 +1651,8 @@ void Widget::on_btn_fusion_toggle_()
 
         fusion_->configure_tracker(fusionTrackerCfg_);
         fusion_->enable_tracking(true);
-        fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+        // 自动回溯暂关闭
+        // fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
 
         if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
             if (!osdEnabled_[0] && !osdEnabled_[1]) {
@@ -2470,7 +2454,8 @@ std::string Widget::web_fusion_start_()
 
     fusion_->configure_tracker(fusionTrackerCfg_);
     fusion_->enable_tracking(true);
-    fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+    // 自动回溯暂关闭
+    // fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
 
     if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
         if (!osdEnabled_[0] && !osdEnabled_[1] && yoloInfer_) {

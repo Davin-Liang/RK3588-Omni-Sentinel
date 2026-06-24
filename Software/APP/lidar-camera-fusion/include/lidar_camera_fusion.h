@@ -82,6 +82,7 @@ struct PerCameraLidarOsd {
     std::vector<float>    lidarPointX;
     std::vector<float>    lidarPointY;
     std::vector<uint32_t> bboxPointIndices;
+    std::vector<float>    bboxClusterDistMeters;
 };
 
 /**
