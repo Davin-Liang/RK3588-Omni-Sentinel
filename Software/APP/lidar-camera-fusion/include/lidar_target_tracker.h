@@ -64,9 +64,15 @@ public:
     bool copy_snapshot(TrackedTarget* out, uint32_t maxCount,
                        uint32_t* outCount) const;
 
+    /** @brief 返回最近一次 update() 的检测总数 */
+    uint32_t get_detection_count() const { return detectionCount_; }
+
     /** @brief 查询指定 bbox 的聚类质心（update() 后调用） */
     bool get_bbox_detection_centroid(uint32_t globalBboxIdx,
                                      float& outX, float& outY) const;
+
+    /** @brief 设置相机配置（全局聚类用） */
+    void set_camera_configs(const CameraConfig* configs, uint32_t count);
 
 private:
     // ---- 内部结构 ----
@@ -114,7 +120,6 @@ private:
     float    clusterPointsY_[kMaxLidarPoints];
     uint32_t clusterPointIndices_[kMaxLidarPoints];
     int32_t  clusterAssignments_[kMaxLidarPoints];
-    bool     pointAssigned_[kMaxLidarPoints];     // 标记已被 bbox 认领的点
 
     // ---- 关联缓冲区 ----
     int32_t trackMatches_[kMaxTracks];
@@ -125,16 +130,15 @@ private:
     // ---- 配置校验 ----
     bool validate_config_(const TrackerConfig& cfg) const;
 
+    // ---- 相机配置 ----
+    CameraConfig camCfg_[2];
+    uint32_t     camCfgCount_{0};
+
     // ---- 聚类 ----
-    void cluster_bbox_points_(const FusionResult& fusionResult,
-                              const LidarPoint* lidarPoints,
+    void cluster_all_points_(const LidarPoint* lidarPoints,
                               uint32_t pointCount,
                               const YoloBBox* bboxes,
                               uint32_t bboxCount);
-
-    void cluster_orphan_points_(const FusionResult& fusionResult,
-                                 const LidarPoint* lidarPoints,
-                                 uint32_t pointCount);
 
     // ---- 预测 ----
     void predict_tracks_(uint64_t timestampNs);

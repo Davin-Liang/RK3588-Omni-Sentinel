@@ -337,6 +337,7 @@ bool LidarCameraFusion::update_camera_intrinsics(uint32_t camIndex,
     camConfigs_[camIndex].cy        = cy;
     camConfigs_[camIndex].imgWidth  = imgWidth;
     camConfigs_[camIndex].imgHeight = imgHeight;
+    if (tracker_) tracker_->set_camera_configs(camConfigs_, camCount_);
     return true;
 }
 

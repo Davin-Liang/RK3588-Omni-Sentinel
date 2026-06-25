@@ -35,6 +35,7 @@ struct TrackedTarget {
     float    confidence;        ///< 最近一次检测置信度 [0.0, 1.0]
     float    avgIntensity;      ///< 关联点云的平均反射强度 (0-255)
     uint32_t pointCount;        ///< 关联点云的点数
+    uint32_t bboxIdx;           ///< 创建该航迹的 bbox 索引（0xFFFFFFFF=孤儿）
     uint64_t lastWarningNs;     ///< 上次触发告警的时间戳
     bool     warningActive;     ///< 当前是否处于告警状态
 };
@@ -60,13 +61,15 @@ struct TrackerConfig {
 
     // ---- 关联 ----
     float    maxAssociationDistMeters   = 1.5f;
+    float    maxOrphanAssocDistMeters   = 0.5f;
     bool     requireClassIdMatch        = true;
 
     // ---- 生命周期 ----
     uint32_t minHitsToConfirm           = 3;
+    uint32_t orphanMinHitsToConfirm     = 5;
     uint32_t maxTentativeMisses         = 1;
     uint32_t maxCoastingFrames          = 5;
-    uint32_t maxStaleCoastingFrames     = 2;
+    uint32_t maxStaleCoastingFrames     = 5;
     uint32_t maxTracks                  = 50;
 
     // ---- 告警（迟滞） ----

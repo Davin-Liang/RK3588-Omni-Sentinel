@@ -1165,8 +1165,12 @@ void Widget::load_fusion_config_()
         config_.value("Fusion/beta", 0.3f).toFloat();
     fusionTrackerCfg_.maxAssociationDistMeters =
         config_.value("Fusion/maxAssociationDistMeters", 2.0f).toFloat();
+    fusionTrackerCfg_.maxOrphanAssocDistMeters =
+        config_.value("Fusion/maxOrphanAssocDistMeters", 0.5f).toFloat();
     fusionTrackerCfg_.minHitsToConfirm =
         config_.value("Fusion/minHitsToConfirm", 3u).toUInt();
+    fusionTrackerCfg_.orphanMinHitsToConfirm =
+        config_.value("Fusion/orphanMinHitsToConfirm", 5u).toUInt();
     fusionTrackerCfg_.maxCoastingFrames =
         config_.value("Fusion/maxCoastingFrames", 5u).toUInt();
     fusionTrackerCfg_.maxTracks =
@@ -1225,7 +1229,9 @@ void Widget::save_fusion_config_()
     config_.setValue("Fusion/alpha", fusionTrackerCfg_.alpha);
     config_.setValue("Fusion/beta", fusionTrackerCfg_.beta);
     config_.setValue("Fusion/maxAssociationDistMeters", fusionTrackerCfg_.maxAssociationDistMeters);
+    config_.setValue("Fusion/maxOrphanAssocDistMeters", fusionTrackerCfg_.maxOrphanAssocDistMeters);
     config_.setValue("Fusion/minHitsToConfirm", fusionTrackerCfg_.minHitsToConfirm);
+    config_.setValue("Fusion/orphanMinHitsToConfirm", fusionTrackerCfg_.orphanMinHitsToConfirm);
     config_.setValue("Fusion/maxCoastingFrames", fusionTrackerCfg_.maxCoastingFrames);
     config_.setValue("Fusion/maxTracks", fusionTrackerCfg_.maxTracks);
     config_.setValue("Fusion/warningEnterDistMeters", fusionTrackerCfg_.warningEnterDistMeters);
@@ -1565,8 +1571,7 @@ void Widget::setup_lidar_osd_provider_()
                                        cam.bboxPointV.begin() + offset + box.pointCount);
                     box.distanceMeters = (b < cam.bboxClusterDistMeters.size())
                         ? cam.bboxClusterDistMeters[b] : 0.0f;
-                    fprintf(stderr, "[OSD_Widget] cam%u bbox[%u] x1=%u y1=%u dist=%.2fm\n",
-                            camNum, b, box.x1, box.y1, box.distanceMeters);
+                    // [OSD_Widget] 已注释
                     offset += box.pointCount;
                     out.push_back(std::move(box));
                 }
