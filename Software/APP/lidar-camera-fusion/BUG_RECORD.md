@@ -80,3 +80,81 @@
 **原因**: build 目录残留了 aarch64 交叉编译的 CMake 缓存，x86 编译器尝试运行交叉编译产物。
 
 **解决**: `rm -rf build` 后再 `cmake ..` 重新配置。`build_local.sh` 与 `build.sh` 应使用不同的 build 目录，或确保 `build.sh` 每次都重新 cmake。
+
+---
+
+## 9. load_fusion_config_ 自动修正覆写 T 矩阵
+
+**现象**: config.ini 中 cam1 外参设为 `T0=1,T1=0,T8=0,T9=1`，但运行时实际行为是 `cx=ly`（T1=1），导致人在画面中心投影到 u=619 右边缘。
+
+**原因**: `load_fusion_config_()` 中有一段硬编码兜底逻辑，检测 `T1==0 && T8==0` 时覆盖为 `T1=1, T8=-1`（`cx=ly, cz=-lx`）。此逻辑将合法的正交旋转矩阵（`cx=lx, cz=ly`）误判为"未配置"。
+
+**解决**: 删除 cam0 和 cam1 两处的自动修正代码块。外参完全由 config.ini 决定。
+
+---
+
+## 10. per-bbox 聚类相互污染导致 track 跳变
+
+**现象**: 两个人在画面中时，track 位置反复跳变，ID 频繁重建。bbox A 的检测有时拿到 bbox B 的人的簇。
+
+**原因**: `fuse_data` 的 first-hit 策略将 LiDAR 点预分配给 bbox。两个 bbox 重叠时，先检查的 bbox 抢走后者的点。per-bbox 独立聚类在此基础上进行，污染无法消除。
+
+**解决**: 重构为全局聚类（`cluster_all_points_`）：
+- 全部 LiDAR 点统一排序+CDC 聚类，不预分配给 bbox
+- 每个簇质心投影到相机像素后匹配最近的 bbox（距离评分`点数×2.5/距离`）
+- 每个 bbox 选评分最高的簇（最优者得，而非先到先得）
+- 未被选中的簇自动变为孤儿检测
+
+---
+
+## 11. 孤儿不建 track + Coasting 恢复逻辑死锁
+
+**现象**: YOLO 短暂掉帧或 bbox 数<人数时，track 在 Confirmed/Coasting 之间反复震荡（C/K/C/K...），最终积累 10 帧 miss 被删，永久丢失。
+
+**原因**: 三个设计互锁：
+1. 孤儿检测只能匹配 Coasting 的 track（不能匹配 Confirmed）
+2. 孤儿匹配成功后将 track 从 Coasting 恢复为 Confirmed
+3. 恢复 Confirmed 后下一帧孤儿不再匹配 → 又变 Coasting
+→ 无限循环 C/K 震荡
+
+**解决**: 
+- 孤儿匹配成功后**不恢复 Confirmed**，保持 Coasting 状态（仅 bbox 检测能恢复 Confirmed）
+- 放宽孤儿匹配：删除 `track.state != Coasting` 限制，孤儿可匹配任意已确认航迹
+- `maxCoastingFrames` 和 `maxStaleCoastingFrames` 从 5/2 提升至 20/20
+- 后续回退孤儿放宽至仅 Coasting（因孤儿匹配 Confirmed 导致幽灵 track 增殖）
+
+---
+
+## 12. minClusterPoints=10 导致近距目标无法检测
+
+**现象**: 人在 0.3m 处画面框内有 80+ LiDAR 点（OSD 可见），但 tracker `det=0` 完全检测不到。
+
+**原因**: LiDAR 打到极近距离的人体上，点云覆盖宽角度，CDC 连续扫描聚类将 80 个点打散成多个不足 10 点的小簇，全部被 `minClusterPoints` 过滤。
+
+**解决**: `minClusterPoints` 从 10 降至 5。后续可考虑动态门限（越近越宽松）。
+
+---
+
+## 13. bboxIdx 硬绑定导致跨框 track 跳变
+
+**现象**: 两个 bbox 对应两个人时，track 的 bboxIdx 每帧可能变化（簇投影像素跨过两框中线），导致 track 在关联时跳配到另一个 bbox 的检测上。
+
+**原因**: bboxIdx 绑定采用硬约束（pass=0 仅匹配同 bboxIdx 的 track），bboxIdx 变化时 pass=0 找不到匹配，pass=1 全门限匹配可能配到错误的 track。
+
+**解决**: 改为软约束——同 bboxIdx 全门限 1.0m，跨 bboxIdx 门限缩至 25%（0.5m）。跨框匹配需要检测和 track 位于 0.5m 以内才允许。
+
+---
+
+## 当前局限
+
+1. **孤儿不创建新 track** — track 被删后永久丢失，需 YOLO 重新发现才能恢复。当 YOLO 掉帧且 track 积累超过 20 帧 miss 时发生。曾尝试放开但造成大量幽灵 track，已回退。
+
+2. **2.5m 硬编码上限** — 簇质心距离 >2.5m 直接丢弃，无法跟踪远处目标。在 `cluster_all_points_()` 和 bbox 匹配步骤中硬编码。
+
+3. **每 bbox 最多一个检测** — 当 YOLO bbox 数 < 人数时，多余的人只能孤儿续命，不能获得独立 track。
+
+4. **投影和聚类分离** — OSD 画面上的点云来自 `fuse_data()` 投影，tracker 的全局聚类独立运行。画面上能看到点 ≠ tracker 能检测到目标。
+
+5. **CDC 聚类对极近距目标(≤0.3m)碎片化** — 点云覆盖宽角度，连续扫描聚类将点打散为多个小簇。
+
+6. **config.ini 被 QSettings 二进制序列化(@Variant)覆盖** — 手动编辑的文本值被程序 `save_fusion_config_()` 重写为二进制格式，后续手动编辑需注意。

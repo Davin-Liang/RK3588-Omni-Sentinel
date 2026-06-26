@@ -149,27 +149,33 @@ SentinelQT (QT5 嵌入式触控界面)
 
 唯一公共头文件: `include/sentinel_lslidarer.h`，API 类: `SentinelLslidarer`
 
-### lidar-camera-fusion — 视觉-雷达数据融合
+### lidar-camera-fusion — 视觉-雷达数据融合 (v2 全局聚类)
 
-纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，输出每个检测框内的 LiDAR 点索引。
+纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，内置多目标跟踪器（`LidarTargetTracker`）。独立融合线程 `fusion_thread_()` 以 10ms 周期驱动全局聚类 + Alpha-Beta 跟踪管线。
 
-- **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化为 6 次乘法 + 3 次加法
-- **内参投影**: pinhole 模型 `u = fx*cx/cz + cx_principal`，过滤相机后方及画面外点
-- **2D bbox 判定**: first-hit 策略，每个 LiDAR 点归属至多一个检测框
-- **两阶段算法**: Pass 1 — 透射+投影+分类；Pass 2 — 计数排序写回候选点索引
-- **累计融合**: `reset()` → 多次 `fuse_data()` (不同相机) → `result()`，支持多相机累计
-- **预分配内存**: `new (std::nothrow)` 预分配约 12 KB 缓冲区，零运行时堆分配
-- **线程模型**: 无内部线程/锁，设计为单线程顺序调用
+- **全局聚类** (`cluster_all_points_`): 全部 LiDAR 点按角度排序 → CDC 线性扫描 + wrap-around → 簇质心通过外参+内参投影到像素 → 匹配 YOLO bbox（评分 `点数×2.5/距离`，每 bbox 选最优簇）。未匹配 bbox 的簇变孤儿检测
+- **Alpha-Beta 跟踪器** (`LidarTargetTracker`): 预测 → 贪心最近邻关联（bbox 检测全门限 1.0m / 孤儿检测 0.5m / 跨 bbox 缩至 25%）→ 校正 → 生命周期状态机（Tentative→Confirmed→Coasting→Deleted）
+- **孤儿检测**: 纯 LiDAR 簇，仅匹配 Coasting 航迹续命，不创建新 track（最大短板）。孤儿匹配不恢复 Confirmed 以防 C/K 震荡
+- **bboxIdx 软绑定**: track 记录创建它的 bbox 编号，关联时同框全门限、跨框缩限 25%
+- **纯雷达模式**: YOLO 无检测时 `get_latest_frame()` 取雷达帧，全点归孤儿聚类继续跟踪
+- **OSD 快照**: `fuse_data()` 投影 LiDAR 点供推流画面显示（独立于 tracker 聚类），tracker 质心供距离标签
+- **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化
+- **预分配内存**: 构造时 `new (std::nothrow)` 全预分配，零运行时堆分配
 
-唯一公共头文件: `include/lidar_camera_fusion.h`，API 类: `LidarCameraFusion`
+核心头文件: `include/lidar_camera_fusion.h`, `include/lidar_target_tracker.h`, `include/lidar_tracking_types.h`
 
-运行时配置 API：
-- `get_tracker_config()` — 获取当前 TrackerConfig 只读引用
-- `get_camera_config(camIndex, outCfg)` — 获取指定相机配置
-- `update_camera_intrinsics(camIndex, fx, fy, cx, cy, w, h)` — 运行时更新相机内参（保留外参矩阵）
-- `get_cam_count()` — 获取当前相机数量
-- `configure_tracker(config)` — 支持运行时热更新（已移除 `trackingEnabled_` 前置守卫）
-- `set_detection_provider(provider)` — 设置外部 YOLO 检测提供者，替换内部假检测回退
+关键调试日志: `[Fusion]` 每 5 帧输出 track 状态/检测数, `[LidarCalib]` 每 100 帧全点投影像素, `[OSD_pts]` 每 10 帧 bbox 内点数+置信度
+
+可调参数: 见 `config.ini [Fusion]` 节 (clusterEpsMeters, minClusterPoints, alpha, beta, 各门限等 20+ 项)
+
+已知局限:
+- 孤儿不创建新 track (track 被删永久丢失)
+- 2.5m 硬编码最大跟踪距离
+- 每 bbox 最多一个检测 (人数>框数时多余的人仅孤儿续命)
+- CDC 聚类对 ≤0.3m 极近距目标碎片化
+- OSD 投影与 tracker 聚类独立 (画面上有点 ≠ tracker 检测到)
+
+详细文档: `lidar-camera-fusion/docs/FUSION_PIPELINE.md`, `lidar-camera-fusion/BUG_RECORD.md`
 
 ### sentinel-yolo-infer — RKNN YOLOv8 NPU 推理
 

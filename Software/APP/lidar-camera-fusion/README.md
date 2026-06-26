@@ -283,30 +283,36 @@ ls install/include/                            # 头文件
 
 ---
 
-## 核心架构
+## 核心架构 (v2 全局聚类)
 
 ```
-YOLO (暂未接入)                SentinelLslidarer (雷达)
+YOLO NPU 推理                 SentinelLslidarer (雷达)
       │                              │
       ▼                              ▼
-std::vector<YoloBBox>            LidarFrame
+fakeDetections_                LidarFrame
       │                              │
-      └──────────┬───────────────────┘
-                 ▼
-          fuse_data()              ← 外参变换 + 投影 + bbox 分类
-                 │
-                 ▼
-          FusionResult              ← bboxPointIndices / bboxPointCounts
-                 │
-                 ▼
-         update_tracking()
-            ├── cluster_bbox_points_()    ← bbox 内点扫描顺序 CDC 聚类
-            ├── cluster_orphan_points_()  ← 孤儿 LiDAR 点聚类（仅续命，不新建）
-            ├── predict_tracks_()          ← Alpha-Beta 预测（dt 三层保护）
-            ├── associate_()               ← classId 门控 + 贪心 NN
-            ├── apply_correction_()        ← Alpha-Beta 校正
-            ├── manage_lifecycle_()        ← Tentative→Confirmed→Coasting→Deleted
-            └── check_warnings_()          ← 迟滞告警 + 冷却节流
+      ├──────────────────────────────┤
+      ▼                              ▼
+  fusion_thread_() 10ms周期
+      │
+      ├─ fuse_data()               ← 外参变换+投影 (OSD用, 不影响跟踪)
+      │
+      ├─ tracker_->update()
+      │     │
+      │     ├─ cluster_all_points_()  ← 全局CDC聚类 (v2)
+      │     │     ├─ 全部点→角度排序→CDC+wrap-around
+      │     │     ├─ 簇质心投影→匹配bbox (评分=点数×2.5/距离)
+      │     │     └─ 未匹配→孤儿检测
+      │     │
+      │     ├─ predict_tracks_()      ← Alpha-Beta 预测
+      │     ├─ associate_()           ← bbox 1.0m / 孤儿 0.5m / 跨框 0.25x
+      │     ├─ apply_correction_()    ← 孤儿不恢复Confirmed
+      │     ├─ manage_lifecycle_()    ← T→C→K→Deleted
+      │     └─ check_warnings_()      ← 迟滞告警
+      │
+      └─ OSD 快照                    ← bbox点云 + tracker质心距离
 ```
+
+详细文档: `docs/FUSION_PIPELINE.md`
 
 ---
