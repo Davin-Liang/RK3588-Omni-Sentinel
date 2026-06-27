@@ -124,17 +124,21 @@ void TopDownView::draw_targets_(QPainter& p, float mPerPx)
         // 按状态选择颜色
         QColor fillColor, borderColor;
         switch (t.state) {
-        case TrackState::Confirmed:
+        case TrackState::FusionTracking:
             fillColor   = QColor(0x3f, 0xb9, 0x50);
             borderColor = QColor(0x2e, 0xa0, 0x43);
             break;
-        case TrackState::Tentative:
+        case TrackState::PureRadarTracking:
             fillColor   = QColor(0xd2, 0x99, 0x22);
             borderColor = QColor(0xb0, 0x88, 0x00);
             break;
-        case TrackState::Coasting:
-            fillColor   = QColor(0x8b, 0x94, 0x9e);
-            borderColor = QColor(0x6e, 0x76, 0x81);
+        case TrackState::Tentative:
+            fillColor   = QColor(0x44, 0x93, 0xf8);
+            borderColor = QColor(0x35, 0x72, 0xc8);
+            break;
+        case TrackState::Lost:
+            fillColor   = QColor(0xda, 0x36, 0x33);
+            borderColor = QColor(0xb0, 0x26, 0x24);
             break;
         default:
             continue;
@@ -213,9 +217,10 @@ void TopDownView::draw_legend_(QPainter& p)
         QString label;
     };
     LegendItem items[] = {
-        { QColor(0x3f, 0xb9, 0x50), QString::fromUtf8("已确认") },
-        { QColor(0xd2, 0x99, 0x22), QString::fromUtf8("待确认") },
-        { QColor(0x8b, 0x94, 0x9e), QString::fromUtf8("外推中") },
+        { QColor(0x3f, 0xb9, 0x50), QString::fromUtf8("视觉雷达融合") },
+        { QColor(0xd2, 0x99, 0x22), QString::fromUtf8("纯雷达跟踪") },
+        { QColor(0x44, 0x93, 0xf8), QString::fromUtf8("待确认") },
+        { QColor(0xda, 0x36, 0x33), QString::fromUtf8("跟踪丢失中") },
         { QColor(0xda, 0x36, 0x33), QString::fromUtf8("告警")   },
     };
 

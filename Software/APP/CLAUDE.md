@@ -113,9 +113,9 @@ SentinelQT (QT5 嵌入式触控界面)
 - **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 27+ REST 路由（含回溯）和 WebSocket 端点
 - **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
 - **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
-- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）。**三主题切换**：默认墨绿、深红+象牙白、皇家蓝+碧落，🎨 按钮切换，localStorage 持久化
-- **数据回溯面板**: 右下角系统控制+回溯并排双卡片，含秒数输入/相机选择/文件列表，通过 REST API 与 Qt 双向 dirty flag 同步
-- **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
+- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯（录像时显示时长和分辨率）。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）。**五主题切换**：默认墨绿、深红+象牙白、皇家蓝+碧落、灰蓝+珍珠、紫罗兰+thistle，🎨 按钮切换，localStorage 持久化。按钮配色随主题联动（btn-on 用 accent 色，btn-off 用 bg2 色）
+- **数据回溯面板**: 左列系统控制+数据回溯，右列录像管理。回溯/刷新按钮在标题右侧，相机选择和秒数输入并排。文件列表在各卡片下方，最多显示 30 条
+- **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 和 ClusterVisData，实时绘制距离网格（刻度自适应范围）、目标（蓝/绿/黄/红四色状态）、速度箭头、告警脉冲圈、DBSCAN 聚类半透明圆（YOLO认领绿/孤儿蓝）。未启动融合时显示"融合待启动"
 - **暂停保护**: 暂停时自动停止推流/录像/预览；推流/录像启动时若相机已暂停则自动恢复，避免死锁
 - **配置**: `config.ini` 中 `[WebServer]` 节（`port=8080`, `enabled=true`）
 - **SPA 热加载**: HTML 从文件系统多路径搜索加载（`web/index.html`），编辑后无需重编译
@@ -151,28 +151,32 @@ SentinelQT (QT5 嵌入式触控界面)
 
 ### lidar-camera-fusion — 视觉-雷达数据融合 (v2 全局聚类)
 
-纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，内置多目标跟踪器（`LidarTargetTracker`）。独立融合线程 `fusion_thread_()` 以 10ms 周期驱动全局聚类 + Alpha-Beta 跟踪管线。
+纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，内置多目标跟踪器（`LidarTargetTracker`）。独立融合线程 `fusion_thread_()` 以 LiDAR 帧率（10Hz）驱动 DBSCAN 聚类 + Alpha-Beta 跟踪管线，融合循环仅在 LiDAR 新帧到达时执行。
 
-- **全局聚类** (`cluster_all_points_`): 全部 LiDAR 点按角度排序 → CDC 线性扫描 + wrap-around → 簇质心通过外参+内参投影到像素 → 匹配 YOLO bbox（评分 `点数×2.5/距离`，每 bbox 选最优簇）。未匹配 bbox 的簇变孤儿检测
-- **Alpha-Beta 跟踪器** (`LidarTargetTracker`): 预测 → 贪心最近邻关联（bbox 检测全门限 1.0m / 孤儿检测 0.5m / 跨 bbox 缩至 25%）→ 校正 → 生命周期状态机（Tentative→Confirmed→Coasting→Deleted）
-- **孤儿检测**: 纯 LiDAR 簇，仅匹配 Coasting 航迹续命，不创建新 track（最大短板）。孤儿匹配不恢复 Confirmed 以防 C/K 震荡
-- **bboxIdx 软绑定**: track 记录创建它的 bbox 编号，关联时同框全门限、跨框缩限 25%
-- **纯雷达模式**: YOLO 无检测时 `get_latest_frame()` 取雷达帧，全点归孤儿聚类继续跟踪
+- **DBSCAN 聚类** (`dbscan_cluster_`): 2D 笛卡尔空间聚类（O(n²)，540点可忽略），BFS 扩张。替代旧 CDC 角度链聚类。参数 `dbscanEpsMeters` / `dbscanMinPoints` / `maxPointDistanceMeters` / `maxClusterDistanceMeters`
+- **时间证据累积** (`persist_clusters_`): DBSCAN 输出不直接变 detection，先做帧间 cluster 匹配（质心距离 < max(eps×2.5, 1.0m)）。连续出现 ≥ `clusterPersistenceFrames`(2) 帧才输出为正式 detection。槽位满时复用失效记录或淘汰最老记录
+- **bbox 认领评分** (`bbox_claim_`): 对每个 confirmed 簇，投影质心到各相机，计算 `score = 1/(1+dist) * proximityFactor(pixelDist)`。每 bbox 选最高分簇，冲突时一个簇只能被一个 bbox 认领（赢家通吃+补选）。点数 < `minBboxClaimPoints`(10) 的簇不参与竞争
+- **Alpha-Beta 跟踪器** (`LidarTargetTracker`): 预测 → 评分制贪心最近邻关联（纯距离评分 `1/(1+d²)`，无 bboxIdx/classId 门控，不同检测类型用不同硬门限）→ 校正 → 5 状态生命周期
+- **5 状态生命周期** (`manage_lifecycle_`): Tentative(蓝) → FusionTracking(绿, YOLO+LiDAR) ⇄ PureRadarTracking(黄, 纯LiDAR) → Lost(红, 预测中) → Deleted。允许连续丢失 `maxFusionMisses`(2) 帧缓冲，单帧丢失不跳变
+- **孤儿检测**: 未被 bbox 认领的确认簇，仅匹配非 Tentative 非 Deleted 航迹续命（门限 `orphanAssocMaxDistMeters=0.5m`），不创建新 track
+- **纯雷达模式**: YOLO 无检测时全点归孤儿聚类，维持已有 track
+- **LiDAR 帧去重**: `update()` 入口检查时间戳，相同则跳过；融合循环先取雷达帧再决定是否 drain YOLO
+- **maxTracks 淘汰**: 槽位满时自动淘汰最老的 Lost track 腾出空间
 - **OSD 快照**: `fuse_data()` 投影 LiDAR 点供推流画面显示（独立于 tracker 聚类），tracker 质心供距离标签
+- **聚类可视化**: 通过 `copy_cluster_vis()` 导出 ClusterVisData（质心+半径+类型），WebSocket 推送至前端 Canvas 渲染半透明圆
 - **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化
-- **预分配内存**: 构造时 `new (std::nothrow)` 全预分配，零运行时堆分配
+- **预分配内存**: 全栈数组预分配，零运行时堆分配
 
 核心头文件: `include/lidar_camera_fusion.h`, `include/lidar_target_tracker.h`, `include/lidar_tracking_types.h`
 
-关键调试日志: `[Fusion]` 每 5 帧输出 track 状态/检测数, `[LidarCalib]` 每 100 帧全点投影像素, `[OSD_pts]` 每 10 帧 bbox 内点数+置信度
+关键调试日志: `[Fusion]` 每 5 帧输出 track 状态 F/P/L/T, `[BboxClaim]` 每帧输出 bbox 认领详情, `[TrackerTime]` 每帧输出 tracker 耗时
 
-可调参数: 见 `config.ini [Fusion]` 节 (clusterEpsMeters, minClusterPoints, alpha, beta, 各门限等 20+ 项)
+可调参数: 见 `config.ini [Fusion]` 节 (dbscanEpsMeters, alpha, bboxAssocMaxDistMeters, maxFusionMisses 等 24 项，全部热修改)
 
 已知局限:
-- 孤儿不创建新 track (track 被删永久丢失)
-- 2.5m 硬编码最大跟踪距离
+- 孤儿不创建新 track (需 YOLO 首次探测)
 - 每 bbox 最多一个检测 (人数>框数时多余的人仅孤儿续命)
-- CDC 聚类对 ≤0.3m 极近距目标碎片化
+- YOLO 检测到但 LiDAR 看不到的目标无法跟踪 (单线雷达扫描面有限)
 - OSD 投影与 tracker 聚类独立 (画面上有点 ≠ tracker 检测到)
 
 详细文档: `lidar-camera-fusion/docs/FUSION_PIPELINE.md`, `lidar-camera-fusion/BUG_RECORD.md`

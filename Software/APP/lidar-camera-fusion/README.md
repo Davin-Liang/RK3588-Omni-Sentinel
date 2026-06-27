@@ -1,6 +1,6 @@
 # LidarCameraFusion — 激光雷达-相机融合与多目标跟踪
 
-单线激光雷达（N10Plus）+ YOLO 2D 检测框融合，外参变换 + 内参投影 + 点云聚类 + Alpha-Beta 滤波 + 多目标跟踪。**脱离 ROS，无外部运行时依赖。**
+单线激光雷达（N10Plus）+ YOLO 2D 检测框融合，外参变换 + 内参投影 + DBSCAN点云聚类 + Alpha-Beta 滤波 + 多目标跟踪。**脱离 ROS，无外部运行时依赖。**
 
 ---
 
@@ -74,14 +74,14 @@ YOLO 推理类尚未实现，暂用 `generate_fake_detections_()` 生成**固定
 
 ### YOLO 就绪后需要做的事情
 1. **替换 `generate_fake_detections_()`**：从 YOLO 推理队列 pop 真实检测结果，替换 `lidar_camera_fusion_thread.cpp:54-56`
-2. **classId 门控自动生效**：`requireClassIdMatch=true` 时，不同类型目标自动隔离，**不再需要距离过滤硬编码**
+2. **classId 门控自动生效**：`=true` 时，不同类型目标自动隔离，**不再需要距离过滤硬编码**
 3. **bbox 跟随人体移动**：不再固定位置，人体走到哪里都有对应 bbox，**关联距离可恢复 2.0m**
 4. **建议调整的参数**：
 
 | 参数 | 虚构框测试值 | YOLO 就绪后建议 |
 |------|-------------|-----------------|
-| `maxAssociationDistMeters` | 3.0 | 2.0（YOLO 框限定了空间范围） |
-| `requireClassIdMatch` | true | true（保持） |
+| `bboxAssocMaxDistMeters` | 3.0 | 2.0（YOLO 框限定了空间范围） |
+| `` | true | true（保持） |
 | bbox 范围 | 虚构固定区域 | 由 YOLO 输出决定 |
 | 距离过滤 | 硬编码 2.5m | **移除**，YOLO classId 可替代 |
 
@@ -241,16 +241,16 @@ Qt UI 上用两个 `QCheckBox` 或 `QPushButton` 绑定 `setFusionEnabled()` / `
 
 | 类别 | 参数 | 默认 | 说明 |
 |------|------|------|------|
-| 聚类 | `clusterEpsMeters` | 0.5 | 簇内点间距上限 (m) |
-| 聚类 | `minClusterPoints` | 3 | 最小簇点数，少于丢弃 |
+| 聚类 | `dbscanEpsMeters` | 0.5 | 簇内点间距上限 (m) |
+| 聚类 | `dbscanMinPoints` | 3 | 最小簇点数，少于丢弃 |
 | 滤波 | `alpha` | 0.7 | 位置平滑增益 [0,1] |
 | 滤波 | `beta` | 0.3 | 速度平滑增益 [0,1] |
 | 滤波 | `minHitsForVelocity` | 2 | 速度初始化需连续命中帧数 |
-| 关联 | `maxAssociationDistMeters` | 2.0 | 航迹-检测匹配门限 (m) |
-| 关联 | `requireClassIdMatch` | true | classId 不一致时拒绝匹配 |
+| 关联 | `bboxAssocMaxDistMeters` | 2.0 | 航迹-检测匹配门限 (m) |
+| 关联 | `` | true | classId 不一致时拒绝匹配 |
 | 生命周期 | `minHitsToConfirm` | 3 | 确认航迹需连续命中帧数 |
 | 生命周期 | `maxTentativeMisses` | 1 | Tentative 容忍丢失帧数 |
-| 生命周期 | `maxCoastingFrames` | 5 | Coasting 最大外推帧数 |
+| 生命周期 | `maxLostFrames` | 5 | Coasting 最大外推帧数 |
 | 生命周期 | `maxTracks` | 50 | 最大同时跟踪目标数 |
 | 告警 | `warningEnterDistMeters` | 3.0 | 进入告警距离 (m) |
 | 告警 | `warningExitDistMeters` | 3.5 | 解除告警距离 (m) |

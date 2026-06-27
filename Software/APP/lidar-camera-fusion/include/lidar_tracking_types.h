@@ -5,13 +5,14 @@
 
 /**
  * @enum  TrackState
- * @brief 航迹生命周期状态。
+ * @brief 航迹生命周期状态（5-状态模型）。
  */
 enum class TrackState : uint8_t {
-    Tentative = 0,  ///< 新建未确认，连续命中足够帧数后升级
-    Confirmed = 1,  ///< 已确认，正常跟踪中
-    Coasting  = 2,  ///< 短暂丢失，仅靠预测外推
-    Deleted   = 3   ///< 已删除，槽位可回收
+    Tentative       = 0,  ///< 待确认，新track试探期
+    FusionTracking  = 1,  ///< 视觉雷达融合跟踪（YOLO+LiDAR）
+    PureRadarTracking = 2, ///< 纯雷达跟踪（YOLO丢失，LiDAR续命）
+    Lost            = 3,  ///< 跟踪丢失中，仅靠Alpha-Beta外推
+    Deleted         = 4   ///< 已删除，槽位可回收
 };
 
 /**
@@ -41,15 +42,30 @@ struct TrackedTarget {
 };
 
 /**
+ * @struct ClusterVisData
+ * @brief  聚类可视化数据（供 Web Canvas 渲染）。
+ */
+struct ClusterVisData {
+    float    cx, cy;       ///< 质心（LiDAR 坐标系，米）
+    float    radius;       ///< 簇内点到质心的最大距离（米）
+    uint32_t pointCount;   ///< 簇内点数
+    uint32_t bboxIdx;      ///< 认领该簇的 bbox 索引（0xFFFFFFFF=孤儿）
+    bool     isOrphan;     ///< 是否为孤儿簇
+};
+
+/**
  * @struct TrackerConfig
  * @brief  跟踪器全部可调参数。
  *
  * 调用 configure_tracker() 时进行合法性校验，不满足则返回 false。
  */
 struct TrackerConfig {
-    // ---- 聚类 ----
-    float    clusterEpsMeters           = 0.5f;
-    uint32_t minClusterPoints           = 3;
+    // ---- DBSCAN 聚类 ----
+    float    dbscanEpsMeters           = 0.5f;
+    uint32_t dbscanMinPoints           = 5;
+    float    maxPointDistanceMeters    = 30.0f;
+    float    maxClusterDistanceMeters  = 10.0f;
+    uint32_t clusterPersistenceFrames  = 2;
 
     // ---- Alpha-Beta 滤波 ----
     float    alpha                      = 0.45f;
@@ -59,17 +75,22 @@ struct TrackerConfig {
     float    defaultDtSec               = 0.1f;
     uint32_t minHitsForVelocity         = 2;
 
+    // ---- 过滤 ----
+    float    minTrackDistanceMeters      = 0.3f;  // 小于此距离的检测不创建 track（过滤原点噪声）
+
     // ---- 关联 ----
-    float    maxAssociationDistMeters   = 1.5f;
-    float    maxOrphanAssocDistMeters   = 0.5f;
-    bool     requireClassIdMatch        = true;
+    float    bboxAssocMaxDistMeters     = 0.75f;
+    float    orphanAssocMaxDistMeters   = 0.5f;
+
+    // ---- Bbox 认领 ----
+    float    bboxClaimMaxPixelDist      = 100.0f;
+    uint32_t minBboxClaimPoints         = 10;     // bbox 只认领点数 >= 此值的簇（过滤噪声）
 
     // ---- 生命周期 ----
     uint32_t minHitsToConfirm           = 3;
-    uint32_t orphanMinHitsToConfirm     = 5;
     uint32_t maxTentativeMisses         = 1;
-    uint32_t maxCoastingFrames          = 5;
-    uint32_t maxStaleCoastingFrames     = 5;
+    uint32_t maxFusionMisses            = 2;   // FusionTracking/PureRadar 连续丢失多少帧才→Lost
+    uint32_t maxLostFrames              = 20;
     uint32_t maxTracks                  = 50;
 
     // ---- 告警（迟滞） ----
@@ -77,6 +98,10 @@ struct TrackerConfig {
     float    warningExitDistMeters      = 3.5f;
     uint32_t minConfirmedAgeForWarning  = 2;
     uint64_t warningCooldownNs          = 2000000000ULL;
+
+    // ---- 可视化 ----
+    float    clusterVisOpacity          = 0.30f;
+    float    radarRangeMeters           = 10.0f;  // 俯视图显示范围
 };
 
 /**

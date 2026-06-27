@@ -276,6 +276,9 @@ public:
     bool copy_tracked_targets(TrackedTarget* out, uint32_t maxCount,
                               uint32_t* outCount) const;
 
+    bool copy_cluster_vis(ClusterVisData* out, uint32_t maxCount,
+                          uint32_t* outCount) const;
+
 private:
     // ---- 数学辅助 ----
     void transform_point_(float lx, float ly, const float* T,

@@ -3,10 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-
-// ============================================================================
-// 构造 / 析构
-// ============================================================================
+#include <ctime>
 
 LidarTargetTracker::LidarTargetTracker()
 {
@@ -21,16 +18,20 @@ LidarTargetTracker::LidarTargetTracker()
     std::memset(clusterPointsY_, 0, sizeof(clusterPointsY_));
     std::memset(clusterPointIndices_, 0, sizeof(clusterPointIndices_));
     std::memset(clusterAssignments_, 0, sizeof(clusterAssignments_));
+    std::memset(seedStack_, 0, sizeof(seedStack_));
+    std::memset(clusterCentroidX_, 0, sizeof(clusterCentroidX_));
+    std::memset(clusterCentroidY_, 0, sizeof(clusterCentroidY_));
+    std::memset(clusterRadii_, 0, sizeof(clusterRadii_));
+    std::memset(clusterPointCounts_, 0, sizeof(clusterPointCounts_));
+    std::memset(clusterBboxMatch_, 0, sizeof(clusterBboxMatch_));
+    std::memset(clusterScore_, 0, sizeof(clusterScore_));
+    std::memset(claimedByBbox_, 0, sizeof(claimedByBbox_));
+    std::memset(bboxCluster_, 0xFF, sizeof(bboxCluster_));
+    std::memset(clusterHistory_, 0, sizeof(clusterHistory_));
+    std::memset(clusterVisBuf_, 0, sizeof(clusterVisBuf_));
 }
 
-LidarTargetTracker::~LidarTargetTracker()
-{
-    // 所有缓冲区为栈数组，无需手动释放
-}
-
-// ============================================================================
-// 配置与回调
-// ============================================================================
+LidarTargetTracker::~LidarTargetTracker() {}
 
 bool LidarTargetTracker::configure(const TrackerConfig& config)
 {
@@ -50,10 +51,14 @@ void LidarTargetTracker::reset()
     std::memset(predY_, 0, sizeof(predY_));
     std::memset(predVX_, 0, sizeof(predVX_));
     std::memset(predVY_, 0, sizeof(predVY_));
+    std::memset(clusterHistory_, 0, sizeof(clusterHistory_));
     activeTrackCount_   = 0;
     snapshotTrackCount_ = 0;
     nextTrackId_        = 1;
     detectionCount_     = 0;
+    clusterHistoryCount_ = 0;
+    rawClusterCount_    = 0;
+    lastLidarTimestampNs_ = 0;
 }
 
 void LidarTargetTracker::register_callback(TrackingCallback cb, void* userData)
@@ -62,60 +67,60 @@ void LidarTargetTracker::register_callback(TrackingCallback cb, void* userData)
     warningUserData_ = userData;
 }
 
-// ============================================================================
-// 主入口
-// ============================================================================
-
-bool LidarTargetTracker::update(const FusionResult& /*fusionResult*/,
+bool LidarTargetTracker::update(const FusionResult&,
                                  const LidarPoint* lidarPoints,
                                  uint32_t pointCount,
                                  const YoloBBox* bboxes,
                                  uint32_t bboxCount,
                                  uint64_t timestampNs)
 {
-    if (!lidarPoints && pointCount > 0) {
-        fprintf(stderr, "[LidarTargetTracker] update: null input\n");
-        return false;
-    }
+    if (!lidarPoints && pointCount > 0) return false;
 
-    // 1. 全局聚类：所有 LiDAR 点 → 簇 → 匹配 bbox 或标记孤儿
-    cluster_all_points_(lidarPoints, pointCount, bboxes, bboxCount);
+    if (timestampNs == lastLidarTimestampNs_ && lastLidarTimestampNs_ != 0)
+        return true;
+    lastLidarTimestampNs_ = timestampNs;
 
-    // 2. 预测：所有活跃航迹向前预测
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    dbscan_cluster_(lidarPoints, pointCount, bboxes, bboxCount);
+    persist_clusters_();
+    bbox_claim_(bboxes, bboxCount, 0, nullptr);
     predict_tracks_(timestampNs);
-
-    // 3. 关联：检测与航迹匹配
     associate_(timestampNs, bboxes);
-
-    // 4. 生命周期管理
     manage_lifecycle_();
-
-    // 5. 告警检查
     check_warnings_(timestampNs);
-
-    // 6. 更新快照（线程安全）
     update_snapshot_();
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    static uint32_t timeLogCnt = 0;
+    int64_t us = (t1.tv_sec - t0.tv_sec) * 1000000
+               + (t1.tv_nsec - t0.tv_nsec) / 1000;
+    fprintf(stderr, "[TrackerTime] %ld us\n", (long)us);
 
     return true;
 }
 
-// ============================================================================
-// 快照拷贝
-// ============================================================================
-
 bool LidarTargetTracker::copy_snapshot(TrackedTarget* out, uint32_t maxCount,
                                         uint32_t* outCount) const
 {
-    if (!out || !outCount) {
-        return false;
-    }
-
+    if (!out || !outCount) return false;
     std::lock_guard<std::mutex> lock(snapshotMutex_);
     uint32_t count = snapshotTrackCount_;
-    if (count > maxCount) {
-        count = maxCount;
-    }
+    if (count > maxCount) count = maxCount;
     std::memcpy(out, snapshotTracks_, count * sizeof(TrackedTarget));
+    *outCount = count;
+    return true;
+}
+
+bool LidarTargetTracker::copy_cluster_vis(ClusterVisData* out, uint32_t maxCount,
+                                           uint32_t* outCount) const
+{
+    if (!out || !outCount) return false;
+    std::lock_guard<std::mutex> lock(clusterVisMutex_);
+    uint32_t count = clusterVisCount_;
+    if (count > maxCount) count = maxCount;
+    std::memcpy(out, clusterVisBuf_, count * sizeof(ClusterVisData));
     *outCount = count;
     return true;
 }
@@ -141,25 +146,26 @@ bool LidarTargetTracker::validate_config_(const TrackerConfig& cfg) const
 {
     if (cfg.alpha < 0.0f || cfg.alpha > 1.0f)       return false;
     if (cfg.beta  < 0.0f || cfg.beta  > 1.0f)       return false;
+    if (cfg.beta  > cfg.alpha)                       return false;
     if (cfg.minDtSec     <= 0.0f)                    return false;
     if (cfg.defaultDtSec <  cfg.minDtSec)            return false;
     if (cfg.maxDtSec     <= cfg.minDtSec)            return false;
-    if (cfg.clusterEpsMeters <= 0.0f)                return false;
-    if (cfg.minClusterPoints < 1)                    return false;
-    if (cfg.maxAssociationDistMeters <= 0.0f)        return false;
+    if (cfg.dbscanEpsMeters <= 0.0f)                 return false;
+    if (cfg.dbscanMinPoints < 1)                     return false;
+    if (cfg.maxPointDistanceMeters <= 0.0f)          return false;
+    if (cfg.maxClusterDistanceMeters <= 0.0f)        return false;
+    if (cfg.clusterPersistenceFrames < 1)            return false;
+    if (cfg.bboxAssocMaxDistMeters <= 0.0f)          return false;
+    if (cfg.orphanAssocMaxDistMeters <= 0.0f)        return false;
+    if (cfg.bboxClaimMaxPixelDist <= 0.0f)           return false;
     if (cfg.maxTracks > kMaxTracks)                  return false;
     if (cfg.warningEnterDistMeters <= 0.0f)          return false;
     if (cfg.warningExitDistMeters <= cfg.warningEnterDistMeters) return false;
     if (cfg.warningCooldownNs == 0)                  return false;
     if (cfg.minHitsToConfirm < 1)                    return false;
-    if (cfg.maxCoastingFrames < 1)                   return false;
-    if (cfg.maxStaleCoastingFrames > cfg.maxCoastingFrames) return false;
+    if (cfg.maxLostFrames < 1)                       return false;
     return true;
 }
-
-// ============================================================================
-// set_camera_configs
-// ============================================================================
 
 void LidarTargetTracker::set_camera_configs(const CameraConfig* configs, uint32_t count)
 {
@@ -169,24 +175,22 @@ void LidarTargetTracker::set_camera_configs(const CameraConfig* configs, uint32_
 }
 
 // ============================================================================
-// 1. 全局聚类：全部 LiDAR 点 → CDC → 簇质心投影匹配 bbox
+// 1. DBSCAN 聚类
 // ============================================================================
 
-void LidarTargetTracker::cluster_all_points_(
-    const LidarPoint* lidarPoints,
-    uint32_t pointCount,
-    const YoloBBox* bboxes,
-    uint32_t bboxCount)
+void LidarTargetTracker::dbscan_cluster_(const LidarPoint* lidarPoints,
+                                          uint32_t pointCount,
+                                          const YoloBBox*, uint32_t)
 {
     detectionCount_ = 0;
 
-    // ---- 1a. 收集有效点 ----
+    float maxDist2 = config_.maxPointDistanceMeters * config_.maxPointDistanceMeters;
     uint32_t validCount = 0;
     for (uint32_t i = 0; i < pointCount && i < kMaxLidarPoints; ++i) {
         if (lidarPoints[i].x == 0.0f && lidarPoints[i].y == 0.0f) continue;
         float d2 = lidarPoints[i].x * lidarPoints[i].x
                   + lidarPoints[i].y * lidarPoints[i].y;
-        if (d2 > 900.0f) continue;
+        if (d2 > maxDist2) continue;
         clusterPointIndices_[validCount] = i;
         clusterPointsX_[validCount]      = lidarPoints[i].x;
         clusterPointsY_[validCount]      = lidarPoints[i].y;
@@ -194,160 +198,386 @@ void LidarTargetTracker::cluster_all_points_(
         ++validCount;
     }
 
-    if (validCount < config_.minClusterPoints) return;
+    rawClusterCount_ = 0;
+    if (validCount < config_.dbscanMinPoints) return;
 
-    // ---- 1b. 按角度排序 ----
-    for (uint32_t i = 1; i < validCount; ++i) {
-        float kx = clusterPointsX_[i], ky = clusterPointsY_[i];
-        uint32_t ki = clusterPointIndices_[i];
-        float ka = std::atan2(ky, kx);
-        int32_t j = static_cast<int32_t>(i) - 1;
-        while (j >= 0 && std::atan2(clusterPointsY_[j], clusterPointsX_[j]) > ka) {
-            clusterPointsX_[j + 1]      = clusterPointsX_[j];
-            clusterPointsY_[j + 1]      = clusterPointsY_[j];
-            clusterPointIndices_[j + 1] = clusterPointIndices_[j];
-            --j;
+    float eps2 = config_.dbscanEpsMeters * config_.dbscanEpsMeters;
+
+    for (uint32_t i = 0; i < validCount && rawClusterCount_ < kMaxClusters; ++i) {
+        if (clusterAssignments_[i] != -1) continue;
+
+        uint32_t nCount = 0;
+        for (uint32_t j = 0; j < validCount; ++j) {
+            if (j == i) continue;
+            float dx = clusterPointsX_[i] - clusterPointsX_[j];
+            float dy = clusterPointsY_[i] - clusterPointsY_[j];
+            if (dx * dx + dy * dy < eps2) ++nCount;
         }
-        clusterPointsX_[j + 1]      = kx;
-        clusterPointsY_[j + 1]      = ky;
-        clusterPointIndices_[j + 1] = ki;
-    }
 
-    // ---- 1c. CDC 聚类 ----
-    ClusterInfo clusters[32];
-    uint32_t nc = 0;
-    {
-        uint32_t ci = 0;
-        clusters[ci].startIdx = 0; clusters[ci].count = 1;
-        clusters[ci].sumX = clusterPointsX_[0];
-        clusters[ci].sumY = clusterPointsY_[0]; clusters[ci].sumI = 0.0f;
-        for (uint32_t i = 1; i < validCount && ci < 32; ++i) {
-            float dx = clusterPointsX_[i] - clusterPointsX_[i - 1];
-            float dy = clusterPointsY_[i] - clusterPointsY_[i - 1];
-            float d2 = dx * dx + dy * dy;
-            if (d2 < config_.clusterEpsMeters * config_.clusterEpsMeters) {
-                clusters[ci].count++;
-                clusters[ci].sumX += clusterPointsX_[i];
-                clusters[ci].sumY += clusterPointsY_[i];
-            } else {
-                ++ci; if (ci >= 32) break;
-                clusters[ci].startIdx = i; clusters[ci].count = 1;
-                clusters[ci].sumX = clusterPointsX_[i];
-                clusters[ci].sumY = clusterPointsY_[i]; clusters[ci].sumI = 0.0f;
+        if (nCount < config_.dbscanMinPoints) {
+            clusterAssignments_[i] = -2;
+            continue;
+        }
+
+        clusterAssignments_[i] = static_cast<int32_t>(rawClusterCount_);
+        float sumX = clusterPointsX_[i];
+        float sumY = clusterPointsY_[i];
+        uint32_t cnt = 1;
+
+        int32_t stackTop = 0;
+        seedStack_[0] = static_cast<int32_t>(i);
+
+        while (stackTop >= 0) {
+            int32_t p = seedStack_[stackTop--];
+
+            for (uint32_t j = 0; j < validCount; ++j) {
+                if (clusterAssignments_[j] != -1) continue;
+
+                float dx = clusterPointsX_[p] - clusterPointsX_[j];
+                float dy = clusterPointsY_[p] - clusterPointsY_[j];
+                if (dx * dx + dy * dy >= eps2) continue;
+
+                clusterAssignments_[j] = static_cast<int32_t>(rawClusterCount_);
+                sumX += clusterPointsX_[j];
+                sumY += clusterPointsY_[j];
+                ++cnt;
+
+                uint32_t jnCount = 0;
+                for (uint32_t k = 0; k < validCount; ++k) {
+                    if (k == j) continue;
+                    float dx2 = clusterPointsX_[j] - clusterPointsX_[k];
+                    float dy2 = clusterPointsY_[j] - clusterPointsY_[k];
+                    if (dx2 * dx2 + dy2 * dy2 < eps2) ++jnCount;
+                    if (jnCount >= config_.dbscanMinPoints) break;
+                }
+                if (jnCount >= config_.dbscanMinPoints)
+                    seedStack_[++stackTop] = static_cast<int32_t>(j);
             }
         }
-        nc = ci + 1; if (nc > 32) nc = 32;
+
+        clusterCentroidX_[rawClusterCount_] = sumX / static_cast<float>(cnt);
+        clusterCentroidY_[rawClusterCount_] = sumY / static_cast<float>(cnt);
+        clusterPointCounts_[rawClusterCount_] = cnt;
+
+        float maxR2 = 0.0f;
+        float cx = clusterCentroidX_[rawClusterCount_];
+        float cy = clusterCentroidY_[rawClusterCount_];
+        for (uint32_t j = 0; j < validCount; ++j) {
+            if (static_cast<uint32_t>(clusterAssignments_[j]) == rawClusterCount_) {
+                float dx = clusterPointsX_[j] - cx;
+                float dy = clusterPointsY_[j] - cy;
+                float r2 = dx * dx + dy * dy;
+                if (r2 > maxR2) maxR2 = r2;
+            }
+        }
+        clusterRadii_[rawClusterCount_] = std::sqrt(maxR2);
+        clusterBboxMatch_[rawClusterCount_] = -1;
+        claimedByBbox_[rawClusterCount_] = false;
+
+        ++rawClusterCount_;
+    }
+}
+
+// ============================================================================
+// 2. 时间证据累积
+// ============================================================================
+
+void LidarTargetTracker::persist_clusters_()
+{
+    uint32_t nc = rawClusterCount_;
+
+    for (uint32_t ci = 0; ci < nc; ++ci) {
+        float cx = clusterCentroidX_[ci];
+        float cy = clusterCentroidY_[ci];
+
+        // 历史匹配门限 > DBSCAN 邻域半径：cluster 质心帧间跳动可达 0.5m+（尤其远处稀疏点）
+        float matchDist = config_.dbscanEpsMeters * 2.5f;
+        if (matchDist < 1.0f) matchDist = 1.0f;
+        float bestDist2 = matchDist * matchDist;
+        int32_t bestMatch = -1;
+
+        for (uint32_t hi = 0; hi < clusterHistoryCount_; ++hi) {
+            if (clusterHistory_[hi].consecutiveFrames == 0) continue;
+            float dx = cx - clusterHistory_[hi].cx;
+            float dy = cy - clusterHistory_[hi].cy;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < bestDist2) {
+                bestDist2 = d2;
+                bestMatch = static_cast<int32_t>(hi);
+            }
+        }
+
+        uint32_t hi;
+        if (bestMatch >= 0) {
+            hi = static_cast<uint32_t>(bestMatch);
+            clusterHistory_[hi].cx = cx;
+            clusterHistory_[hi].cy = cy;
+            clusterHistory_[hi].radius = clusterRadii_[ci];
+            clusterHistory_[hi].pointCount = clusterPointCounts_[ci];
+            clusterHistory_[hi].consecutiveFrames++;
+            clusterHistory_[hi].lastLidarTs = lastLidarTimestampNs_;
+        } else {
+            // 优先复用已失效的槽位，避免 history 只增不减
+            int32_t reuseSlot = -1;
+            for (uint32_t s = 0; s < clusterHistoryCount_; ++s) {
+                if (clusterHistory_[s].consecutiveFrames == 0) {
+                    reuseSlot = static_cast<int32_t>(s);
+                    break;
+                }
+            }
+            if (reuseSlot >= 0) {
+                hi = static_cast<uint32_t>(reuseSlot);
+            } else if (clusterHistoryCount_ < kMaxClusters) {
+                hi = clusterHistoryCount_++;
+            } else {
+                // 全满：淘汰最老的记录（lastLidarTs 最小）
+                uint64_t oldestTs = UINT64_MAX;
+                int32_t oldestSlot = -1;
+                for (uint32_t s = 0; s < clusterHistoryCount_; ++s) {
+                    if (clusterHistory_[s].lastLidarTs < oldestTs) {
+                        oldestTs = clusterHistory_[s].lastLidarTs;
+                        oldestSlot = static_cast<int32_t>(s);
+                    }
+                }
+                if (oldestSlot < 0) continue;
+                hi = static_cast<uint32_t>(oldestSlot);
+            }
+            clusterHistory_[hi].cx = cx;
+            clusterHistory_[hi].cy = cy;
+            clusterHistory_[hi].radius = clusterRadii_[ci];
+            clusterHistory_[hi].pointCount = clusterPointCounts_[ci];
+            clusterHistory_[hi].consecutiveFrames = 1;
+            clusterHistory_[hi].lastLidarTs = lastLidarTimestampNs_;
+        }
+
+        // 将 history 索引存入 clusterBboxMatch_（复用字段传持久化状态）
+        clusterBboxMatch_[ci] = static_cast<int32_t>(hi);
     }
 
-    // Wrap-around
-    if (nc >= 2) {
-        uint32_t li = clusters[nc - 1].startIdx + clusters[nc - 1].count - 1;
-        float dx = clusterPointsX_[li] - clusterPointsX_[0];
-        float dy = clusterPointsY_[li] - clusterPointsY_[0];
-        if ((dx * dx + dy * dy) < config_.clusterEpsMeters * config_.clusterEpsMeters) {
-            clusters[0].startIdx = clusters[nc - 1].startIdx;
-            clusters[0].count   += clusters[nc - 1].count;
-            clusters[0].sumX    += clusters[nc - 1].sumX;
-            clusters[0].sumY    += clusters[nc - 1].sumY;
-            --nc;
+    // 清理过期 history
+    for (uint32_t hi = 0; hi < clusterHistoryCount_; ++hi) {
+        if (clusterHistory_[hi].consecutiveFrames == 0) continue;
+        if (clusterHistory_[hi].lastLidarTs != lastLidarTimestampNs_)
+            clusterHistory_[hi].consecutiveFrames = 0;
+    }
+}
+
+// ============================================================================
+// 3. Bbox 认领评分 → detection
+// ============================================================================
+
+void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
+                                      uint32_t /*nc*/, ClusterInfo* /*clusters*/)
+{
+    detectionCount_ = 0;
+    uint32_t nc = rawClusterCount_;
+
+    // 筛选 confirmed 簇
+    bool confirmed[kMaxClusters] = {};
+    for (uint32_t ci = 0; ci < nc; ++ci) {
+        int32_t hi = clusterBboxMatch_[ci];
+        if (hi < 0) continue;
+        uint32_t hu = static_cast<uint32_t>(hi);
+        if (hu >= kMaxClusters) continue;
+        if (clusterHistory_[hu].consecutiveFrames >= config_.clusterPersistenceFrames) {
+            float dist = std::sqrt(clusterCentroidX_[ci] * clusterCentroidX_[ci]
+                                 + clusterCentroidY_[ci] * clusterCentroidY_[ci]);
+            if (dist <= config_.maxClusterDistanceMeters)
+                confirmed[ci] = true;
         }
     }
 
-    // ---- 1d. 选簇 + 投影匹配 bbox（每 bbox 选评分最高簇） ----
-    struct BboxCandidate { uint32_t ci; float score; };
-    BboxCandidate bboxBest[50];
-    // 非孤儿簇计数：<= bboxCount
+    static uint32_t claimLogCnt = 0; ++claimLogCnt;
+    uint32_t confCnt = 0;
+    for (uint32_t ci = 0; ci < nc; ++ci) if (confirmed[ci]) ++confCnt;
+    fprintf(stderr, "[BboxClaim] nc=%u confirmed=%u bboxes=%u\n",
+            nc, confCnt, bboxCount);
 
-    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
-        bboxBest[bb].ci = 0xFFFFFFFF;
-        bboxBest[bb].score = -1.0f;
-    }
+    // 每 bbox 选最佳簇
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb)
+        bboxCluster_[bb] = 0xFFFFFFFF;
+
+    float bboxBestScore[50];
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb)
+        bboxBestScore[bb] = -1.0f;
 
     for (uint32_t ci = 0; ci < nc; ++ci) {
-        if (clusters[ci].count < config_.minClusterPoints) continue;
-
-        float cx = clusters[ci].sumX / static_cast<float>(clusters[ci].count);
-        float cy = clusters[ci].sumY / static_cast<float>(clusters[ci].count);
-        float dist = std::sqrt(cx * cx + cy * cy);
-        if (dist > 2.5f) continue;
-
-        float score = static_cast<float>(clusters[ci].count) * (2.5f / dist);
-
-        // 投影质心到各相机，匹配 bbox
-        int32_t  bestBb = -1;
-        float    bestBbD2 = 1e9f;
+        if (!confirmed[ci]) continue;  // 只有持久化确认的簇才参与 bbox 认领
+        if (clusterPointCounts_[ci] < config_.minBboxClaimPoints) continue;  // 点数太少不参与
+        float cx = clusterCentroidX_[ci];
+        float cy = clusterCentroidY_[ci];
+        float centroidDist = std::sqrt(cx * cx + cy * cy);
+        if (centroidDist > config_.maxClusterDistanceMeters) continue;
+        if (centroidDist < config_.minTrackDistanceMeters) continue;
 
         for (uint32_t cc = 0; cc < camCfgCount_; ++cc) {
             const CameraConfig& cfg = camCfg_[cc];
+
             float cX = cfg.tLidarToCam[0] * cx + cfg.tLidarToCam[1] * cy
                      + cfg.tLidarToCam[3];
+            float cY = cfg.tLidarToCam[4] * cx + cfg.tLidarToCam[5] * cy
+                     + cfg.tLidarToCam[7];
             float cZ = cfg.tLidarToCam[8] * cx + cfg.tLidarToCam[9] * cy
                      + cfg.tLidarToCam[11];
             if (cZ <= 0.0f) continue;
 
             float u = cfg.fx * cX / cZ + cfg.cx;
-            float v = cfg.fy * cfg.tLidarToCam[7] / cZ + cfg.cy;
+            float v = cfg.fy * cY / cZ + cfg.cy;
 
             for (uint32_t bb = 0; bb < bboxCount; ++bb) {
-                if (u < static_cast<float>(bboxes[bb].x1)) continue;
-                if (u >= static_cast<float>(bboxes[bb].x2)) continue;
-                if (v < static_cast<float>(bboxes[bb].y1)) continue;
-                if (v >= static_cast<float>(bboxes[bb].y2)) continue;
+                float pixelDist = 0.0f;
 
-                float bcx = (bboxes[bb].x1 + bboxes[bb].x2) * 0.5f;
-                float bcy = (bboxes[bb].y1 + bboxes[bb].y2) * 0.5f;
-                float d2 = (u - bcx) * (u - bcx) + (v - bcy) * (v - bcy);
-                if (d2 < bestBbD2) {
-                    bestBbD2 = d2;
-                    bestBb = static_cast<int32_t>(bb);
+                if (u >= static_cast<float>(bboxes[bb].x1) &&
+                    u <  static_cast<float>(bboxes[bb].x2) &&
+                    v >= static_cast<float>(bboxes[bb].y1) &&
+                    v <  static_cast<float>(bboxes[bb].y2)) {
+                    pixelDist = 0.0f;
+                } else {
+                    float dx = 0.0f, dy = 0.0f;
+                    if (u < static_cast<float>(bboxes[bb].x1))
+                        dx = static_cast<float>(bboxes[bb].x1) - u;
+                    else if (u >= static_cast<float>(bboxes[bb].x2))
+                        dx = u - (static_cast<float>(bboxes[bb].x2) - 1.0f);
+                    if (v < static_cast<float>(bboxes[bb].y1))
+                        dy = static_cast<float>(bboxes[bb].y1) - v;
+                    else if (v >= static_cast<float>(bboxes[bb].y2))
+                        dy = v - (static_cast<float>(bboxes[bb].y2) - 1.0f);
+                    pixelDist = std::sqrt(dx * dx + dy * dy);
+                }
+
+                float proximityFactor = 1.0f - pixelDist / config_.bboxClaimMaxPixelDist;
+                if (proximityFactor <= 0.0f) continue;
+
+                float score = 1.0f / (1.0f + centroidDist) * proximityFactor;
+
+                if (score > bboxBestScore[bb]) {
+                    bboxBestScore[bb] = score;
+                    bboxCluster_[bb] = ci;
                 }
             }
         }
+    }
 
-        if (bestBb >= 0 && score > bboxBest[bestBb].score) {
-            bboxBest[bestBb].ci = ci;
-            bboxBest[bestBb].score = score;
+    // ---- 冲突解决：一个 cluster 不能被多个 bbox 认领 ----
+    for (uint32_t ci = 0; ci < nc; ++ci)
+        claimedByBbox_[ci] = false;
+
+    // 找出被多个 bbox 选中的 cluster
+    uint32_t bboxCountForCluster[kMaxClusters] = {};
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
+        uint32_t ci = bboxCluster_[bb];
+        if (ci != 0xFFFFFFFF && ci < nc)
+            bboxCountForCluster[ci]++;
+    }
+
+    // 对每个冲突 cluster，只保留得分最高的 bbox
+    for (uint32_t ci = 0; ci < nc; ++ci) {
+        if (bboxCountForCluster[ci] <= 1) continue;
+        // 找到得分最高的 bbox
+        float bestSc = -1.0f;
+        uint32_t bestBb = 0xFFFFFFFF;
+        for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
+            if (bboxCluster_[bb] == ci && bboxBestScore[bb] > bestSc) {
+                bestSc = bboxBestScore[bb];
+                bestBb = bb;
+            }
+        }
+        // 取消其他 bbox 对此 cluster 的认领
+        for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
+            if (bboxCluster_[bb] == ci && bb != bestBb)
+                bboxCluster_[bb] = 0xFFFFFFFF;
         }
     }
 
-    // 输出 bbox 检测 + 孤儿检测
-    bool ciUsed[32] = {};
-    for (uint32_t bb = 0; bb < bboxCount; ++bb) {
-        if (bboxBest[bb].ci == 0xFFFFFFFF) continue;
-        if (detectionCount_ >= kMaxDetections) break;
-        uint32_t ci = bboxBest[bb].ci;
-        ciUsed[ci] = true;
+    // 标记被认领的簇（冲突解决后的赢家）
+    for (uint32_t ci = 0; ci < nc; ++ci)
+        claimedByBbox_[ci] = false;
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
+        uint32_t ci = bboxCluster_[bb];
+        if (ci != 0xFFFFFFFF && ci < nc)
+            claimedByBbox_[ci] = true;
+    }
 
-        float cx = clusters[ci].sumX / static_cast<float>(clusters[ci].count);
-        float cy = clusters[ci].sumY / static_cast<float>(clusters[ci].count);
+    // 冲突后补选：空出的 bbox 从未认领的簇中重新选择
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
+        if (bboxCluster_[bb] != 0xFFFFFFFF) continue;  // 已有簇
+        float bestSc = -1.0f;
+        uint32_t bestCi = 0xFFFFFFFF;
+        for (uint32_t ci = 0; ci < nc; ++ci) {
+            if (claimedByBbox_[ci]) continue;  // 已被认领
+            float cx = clusterCentroidX_[ci];
+            float cy = clusterCentroidY_[ci];
+            float cDist = std::sqrt(cx * cx + cy * cy);
+            if (cDist > config_.maxClusterDistanceMeters || cDist < config_.minTrackDistanceMeters) continue;
+            // 重新计算对 bb 的 score
+            float sc = -1.0f;
+            for (uint32_t cc = 0; cc < camCfgCount_; ++cc) {
+                const CameraConfig& cfg = camCfg_[cc];
+                float cX = cfg.tLidarToCam[0]*cx + cfg.tLidarToCam[1]*cy + cfg.tLidarToCam[3];
+                float cY = cfg.tLidarToCam[4]*cx + cfg.tLidarToCam[5]*cy + cfg.tLidarToCam[7];
+                float cZ = cfg.tLidarToCam[8]*cx + cfg.tLidarToCam[9]*cy + cfg.tLidarToCam[11];
+                if (cZ <= 0.0f) continue;
+                float u = cfg.fx * cX / cZ + cfg.cx;
+                float v = cfg.fy * cY / cZ + cfg.cy;
+                float pixDist = 0.0f;
+                if (u < static_cast<float>(bboxes[bb].x1)) pixDist = static_cast<float>(bboxes[bb].x1) - u;
+                else if (u >= static_cast<float>(bboxes[bb].x2)) pixDist = u - (static_cast<float>(bboxes[bb].x2) - 1.0f);
+                else if (v < static_cast<float>(bboxes[bb].y1)) pixDist = static_cast<float>(bboxes[bb].y1) - v;
+                else if (v >= static_cast<float>(bboxes[bb].y2)) pixDist = v - (static_cast<float>(bboxes[bb].y2) - 1.0f);
+                float pf = 1.0f - pixDist / config_.bboxClaimMaxPixelDist;
+                if (pf <= 0.0f) continue;
+                float s = 1.0f / (1.0f + cDist) * pf;
+                if (s > sc) sc = s;
+            }
+            if (sc > bestSc) { bestSc = sc; bestCi = ci; }
+        }
+        if (bestCi != 0xFFFFFFFF) {
+            bboxCluster_[bb] = bestCi;
+            claimedByBbox_[bestCi] = true;
+        }
+    }
+
+    // 输出 bbox detection
+    for (uint32_t bb = 0; bb < bboxCount; ++bb) {
+        uint32_t ci = bboxCluster_[bb];
+        if (ci == 0xFFFFFFFF || ci >= nc) {
+            fprintf(stderr, "[BboxClaim] bbox[%u] -> NONE\n", bb);
+            continue;
+        }
+        if (detectionCount_ >= kMaxDetections) break;
 
         DetectionCandidate& det = detections_[detectionCount_];
-        det.x = cx; det.y = cy;
+        det.x = clusterCentroidX_[ci];
+        det.y = clusterCentroidY_[ci];
         det.classId     = bboxes[bb].classId;
         det.confidence  = bboxes[bb].confidence;
         det.avgIntensity = 0.0f;
-        det.pointCount  = clusters[ci].count;
+        det.pointCount  = clusterPointCounts_[ci];
         det.bboxIdx     = bb;
         det.isOrphan    = false;
         ++detectionCount_;
+
+        float d = std::sqrt(det.x * det.x + det.y * det.y);
+        fprintf(stderr, "[BboxClaim] bbox[%u] -> ci=%u dist=%.2fm pts=%u score=%.3f\n",
+                bb, ci, d, det.pointCount, bboxBestScore[bb]);
     }
 
-    // 未被 bbox 选中的簇 → 孤儿
+    // 输出 orphan detection
     for (uint32_t ci = 0; ci < nc; ++ci) {
-        if (ciUsed[ci]) continue;
-        if (clusters[ci].count < config_.minClusterPoints) continue;
+        if (!confirmed[ci]) continue;
+        if (claimedByBbox_[ci]) continue;
+        float d = std::sqrt(clusterCentroidX_[ci] * clusterCentroidX_[ci]
+                          + clusterCentroidY_[ci] * clusterCentroidY_[ci]);
+        if (d < config_.minTrackDistanceMeters) continue;  // 过滤原点噪声
         if (detectionCount_ >= kMaxDetections) break;
 
-        float cx = clusters[ci].sumX / static_cast<float>(clusters[ci].count);
-        float cy = clusters[ci].sumY / static_cast<float>(clusters[ci].count);
-        if (std::sqrt(cx * cx + cy * cy) > 2.5f) continue;
-
         DetectionCandidate& det = detections_[detectionCount_];
-        det.x = cx; det.y = cy;
+        det.x = clusterCentroidX_[ci];
+        det.y = clusterCentroidY_[ci];
         det.classId     = 0;
         det.confidence  = 0.5f;
         det.avgIntensity = 0.0f;
-        det.pointCount  = clusters[ci].count;
+        det.pointCount  = clusterPointCounts_[ci];
         det.bboxIdx     = 0xFFFFFFFF;
         det.isOrphan    = true;
         ++detectionCount_;
@@ -355,7 +585,7 @@ void LidarTargetTracker::cluster_all_points_(
 }
 
 // ============================================================================
-// 2. Alpha-Beta 预测
+// 4. Alpha-Beta 预测
 // ============================================================================
 
 void LidarTargetTracker::predict_tracks_(uint64_t timestampNs)
@@ -366,12 +596,8 @@ void LidarTargetTracker::predict_tracks_(uint64_t timestampNs)
         float dt = static_cast<float>(timestampNs - workingTracks_[i].lastUpdateNs)
                    * 1e-9f;
 
-        if (dt <= config_.minDtSec) {
-            dt = config_.defaultDtSec;
-        }
-        if (dt > config_.maxDtSec) {
-            dt = 0.0f;
-        }
+        if (dt <= config_.minDtSec)  dt = config_.defaultDtSec;
+        if (dt >  config_.maxDtSec)  dt = 0.0f;
 
         if (dt > 0.0f && workingTracks_[i].age > 0) {
             predX_[i]  = workingTracks_[i].posX + workingTracks_[i].velX * dt;
@@ -388,61 +614,42 @@ void LidarTargetTracker::predict_tracks_(uint64_t timestampNs)
 }
 
 // ============================================================================
-// 3. 贪心最近邻关联（classId 门控）
+// 5. 评分制贪心最近邻关联
 // ============================================================================
 
-void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox* /*bboxes*/)
+void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox*)
 {
-    // 重置关联状态
+    std::memset(detAssigned_, 0, sizeof(detAssigned_));
     for (uint32_t i = 0; i < activeTrackCount_; ++i) {
         trackMatches_[i]  = -1;
         trackAssigned_[i] = false;
     }
-    // 对每个检测，找最近的未匹配活跃航迹
-    float gateDist2 = config_.maxAssociationDistMeters * config_.maxAssociationDistMeters;
 
     for (uint32_t j = 0; j < detectionCount_; ++j) {
         const DetectionCandidate& det = detections_[j];
+
+        float gateDist = det.isOrphan
+            ? config_.orphanAssocMaxDistMeters
+            : config_.bboxAssocMaxDistMeters;
+        float gateDist2 = gateDist * gateDist;
+
         int32_t bestTrack = -1;
-        float   bestDist2 = gateDist2;
+        float   bestScore = -1.0f;
 
         for (uint32_t i = 0; i < activeTrackCount_; ++i) {
             TrackedTarget& track = workingTracks_[i];
             if (track.state == TrackState::Deleted) continue;
             if (trackAssigned_[i]) continue;
-
-            // classId 门控
-            if (config_.requireClassIdMatch && track.classId != det.classId) {
-                continue;
-            }
-
-            // 孤儿检测（纯 LiDAR）只能匹配 Coasting 的已确认航迹
-            if (det.isOrphan) {
-                if (track.state != TrackState::Coasting
-                    || track.consecutiveHits < config_.minHitsToConfirm) {
-                    continue;
-                }
-            }
+            if (det.isOrphan && track.state == TrackState::Tentative) continue;
 
             float dx = det.x - predX_[i];
             float dy = det.y - predY_[i];
             float d2 = dx * dx + dy * dy;
+            if (d2 > gateDist2) continue;
 
-            // bbox 检测：跨 bbox 匹配时门限缩到 25%
-            if (!det.isOrphan && track.bboxIdx != 0xFFFFFFFF
-                && track.bboxIdx != det.bboxIdx) {
-                if (d2 > gateDist2 * 0.25f) continue;
-            }
-
-            // 孤儿检测使用独立门限
-            if (det.isOrphan) {
-                float g2 = config_.maxOrphanAssocDistMeters
-                         * config_.maxOrphanAssocDistMeters;
-                if (d2 > g2) continue;
-            }
-
-            if (d2 < bestDist2) {
-                bestDist2 = d2;
+            float score = 1.0f / (1.0f + d2);
+            if (score > bestScore) {
+                bestScore = score;
                 bestTrack = static_cast<int32_t>(i);
             }
         }
@@ -455,7 +662,7 @@ void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox* /*bbox
         }
     }
 
-    // 匹配成功 → 校正
+    // 匹配校正
     for (uint32_t i = 0; i < activeTrackCount_; ++i) {
         TrackedTarget& track = workingTracks_[i];
         if (track.state == TrackState::Deleted) continue;
@@ -464,15 +671,13 @@ void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox* /*bbox
             uint32_t j = static_cast<uint32_t>(trackMatches_[i]);
             const DetectionCandidate& det = detections_[j];
 
-            float dt = static_cast<float>(timestampNs - track.lastUpdateNs)
-                       * 1e-9f;
-            if (dt <= config_.minDtSec)  dt = config_.defaultDtSec;
-            if (dt >  config_.maxDtSec)  dt = 0.0f;
+            float dt = static_cast<float>(timestampNs - track.lastUpdateNs) * 1e-9f;
+            if (dt <= config_.minDtSec) dt = config_.defaultDtSec;
+            if (dt >  config_.maxDtSec) dt = 0.0f;
 
             apply_correction_(i, det, dt);
             track.consecutiveMisses = 0;
             track.age++;
-            // consecutiveHits 在 apply_correction_ 中递增
             track.lastUpdateNs = timestampNs;
             track.classId      = det.classId;
             track.bboxIdx      = det.bboxIdx;
@@ -480,27 +685,20 @@ void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox* /*bbox
             track.avgIntensity = det.avgIntensity;
             track.pointCount   = det.pointCount;
             track.distanceMeters = std::sqrt(track.posX * track.posX
-                                            + track.posY * track.posY);
-
-            // 仅 bbox 检测能恢复 Coasting → Confirmed，孤儿检测保持 Coasting
-            if (track.state == TrackState::Coasting && !det.isOrphan) {
-                track.state = TrackState::Confirmed;
-            }
+                                           + track.posY * track.posY);
         } else {
-            // 未匹配：递增丢失计数
             track.consecutiveMisses++;
             track.age++;
         }
     }
 
-    // 未匹配检测 → 创建新 Tentative 航迹（孤儿检测不创建航迹）
+    // 未匹配 bbox 检测 → 新 Tentative
     for (uint32_t j = 0; j < detectionCount_; ++j) {
         if (detAssigned_[j]) continue;
-        if (detections_[j].isOrphan) continue;   // 孤儿检测不创建航迹
+        if (detections_[j].isOrphan) continue;
 
         const DetectionCandidate& det = detections_[j];
 
-        // 线性扫描找空闲槽位
         int32_t slot = -1;
         for (uint32_t i = 0; i < activeTrackCount_; ++i) {
             if (workingTracks_[i].state == TrackState::Deleted) {
@@ -508,13 +706,25 @@ void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox* /*bbox
                 break;
             }
         }
-        if (slot < 0 && activeTrackCount_ < config_.maxTracks) {
+        if (slot < 0 && activeTrackCount_ < config_.maxTracks)
             slot = static_cast<int32_t>(activeTrackCount_++);
-        }
+
+        // maxTracks 满：淘汰最老 Lost
         if (slot < 0) {
-            fprintf(stderr, "[LidarTargetTracker] track slots exhausted\n");
-            continue;
+            uint32_t oldestIdx = 0xFFFFFFFF, oldestAge = 0;
+            for (uint32_t i = 0; i < activeTrackCount_; ++i) {
+                if (workingTracks_[i].state == TrackState::Lost
+                    && workingTracks_[i].age > oldestAge) {
+                    oldestAge = workingTracks_[i].age;
+                    oldestIdx = i;
+                }
+            }
+            if (oldestIdx != 0xFFFFFFFF) {
+                workingTracks_[oldestIdx].state = TrackState::Deleted;
+                slot = static_cast<int32_t>(oldestIdx);
+            }
         }
+        if (slot < 0) continue;
 
         uint32_t si = static_cast<uint32_t>(slot);
         std::memset(&workingTracks_[si], 0, sizeof(TrackedTarget));
@@ -545,17 +755,12 @@ void LidarTargetTracker::associate_(uint64_t timestampNs, const YoloBBox* /*bbox
     }
 }
 
-// ============================================================================
-// 校正：Alpha-Beta 位置 + 速度更新
-// ============================================================================
-
 void LidarTargetTracker::apply_correction_(uint32_t trackIdx,
                                             const DetectionCandidate& det,
                                             float dt)
 {
     TrackedTarget& track = workingTracks_[trackIdx];
-
-    track.consecutiveHits++;  // 先递增，再判断速度更新条件
+    track.consecutiveHits++;
 
     float rx = det.x - predX_[trackIdx];
     float ry = det.y - predY_[trackIdx];
@@ -568,53 +773,61 @@ void LidarTargetTracker::apply_correction_(uint32_t trackIdx,
         track.velX = predVX_[trackIdx] + (config_.beta / dt) * rx;
         track.velY = predVY_[trackIdx] + (config_.beta / dt) * ry;
     }
-    // 否则速度保持为 0（新航迹不急于估计速度）
 }
 
 // ============================================================================
-// 4. 生命周期管理
+// 6. 5 状态生命周期
 // ============================================================================
 
 void LidarTargetTracker::manage_lifecycle_()
 {
+    // Phase 1: miss-based transitions
     for (uint32_t i = 0; i < activeTrackCount_; ++i) {
         TrackedTarget& track = workingTracks_[i];
         if (track.state == TrackState::Deleted) continue;
 
         switch (track.state) {
         case TrackState::Tentative:
-            if (track.consecutiveMisses > config_.maxTentativeMisses) {
+            if (track.consecutiveMisses > config_.maxTentativeMisses)
                 track.state = TrackState::Deleted;
-            } else if (track.consecutiveHits >= config_.minHitsToConfirm) {
-                track.state = TrackState::Confirmed;
-            }
+            else if (track.consecutiveHits >= config_.minHitsToConfirm)
+                track.state = TrackState::FusionTracking;
             break;
-
-        case TrackState::Confirmed:
-            if (track.consecutiveMisses > 0) {
-                track.state = TrackState::Coasting;
-            }
+        case TrackState::FusionTracking:
+        case TrackState::PureRadarTracking:
+            if (track.consecutiveMisses > config_.maxFusionMisses)
+                track.state = TrackState::Lost;
             break;
-
-        case TrackState::Coasting:
-            if (track.consecutiveMisses >= config_.maxCoastingFrames) {
+        case TrackState::Lost:
+            if (track.consecutiveMisses >= config_.maxLostFrames)
                 track.state = TrackState::Deleted;
-            }
-            if (track.consecutiveMisses >= config_.maxStaleCoastingFrames
-                && track.age > config_.minHitsToConfirm) {
-                track.state = TrackState::Deleted;
-            }
             break;
-
-        case TrackState::Deleted:
         default:
             break;
+        }
+    }
+
+    // Phase 2: match-based transitions
+    for (uint32_t i = 0; i < activeTrackCount_; ++i) {
+        TrackedTarget& track = workingTracks_[i];
+        if (track.state == TrackState::Deleted) continue;
+        if (track.consecutiveMisses > 0) continue;
+
+        bool matchedOrphan = (track.bboxIdx == 0xFFFFFFFF);
+
+        if (track.state == TrackState::Lost) {
+            track.state = matchedOrphan ? TrackState::PureRadarTracking
+                                        : TrackState::FusionTracking;
+        } else if (track.state == TrackState::FusionTracking && matchedOrphan) {
+            track.state = TrackState::PureRadarTracking;
+        } else if (track.state == TrackState::PureRadarTracking && !matchedOrphan) {
+            track.state = TrackState::FusionTracking;
         }
     }
 }
 
 // ============================================================================
-// 5. 告警检查（迟滞 + 冷却）
+// 7. 告警
 // ============================================================================
 
 void LidarTargetTracker::check_warnings_(uint64_t nowNs)
@@ -623,7 +836,8 @@ void LidarTargetTracker::check_warnings_(uint64_t nowNs)
 
     for (uint32_t i = 0; i < activeTrackCount_; ++i) {
         TrackedTarget& track = workingTracks_[i];
-        if (track.state != TrackState::Confirmed) continue;
+        if (track.state != TrackState::FusionTracking
+            && track.state != TrackState::PureRadarTracking) continue;
         if (track.age < config_.minConfirmedAgeForWarning) continue;
 
         float dist = track.distanceMeters;
@@ -646,7 +860,7 @@ void LidarTargetTracker::check_warnings_(uint64_t nowNs)
 }
 
 // ============================================================================
-// 6. 快照拷贝（加锁）
+// 8. 快照
 // ============================================================================
 
 void LidarTargetTracker::update_snapshot_()
@@ -660,4 +874,40 @@ void LidarTargetTracker::update_snapshot_()
         }
     }
     snapshotTrackCount_ = count;
+
+    // 聚类可视化快照
+    {
+        std::lock_guard<std::mutex> vlock(clusterVisMutex_);
+        uint32_t vc = 0;
+        static uint32_t cvLogCounter = 0;
+        if (++cvLogCounter % 50 == 0)
+            fprintf(stderr, "[TrackerVIS] historyCount=%u rawClusters=%u\n",
+                    clusterHistoryCount_, rawClusterCount_);
+        for (uint32_t hi = 0; hi < clusterHistoryCount_ && vc < kMaxClusters; ++hi) {
+            if (clusterHistory_[hi].consecutiveFrames == 0) continue;
+            ClusterVisData& vis = clusterVisBuf_[vc];
+            vis.cx         = clusterHistory_[hi].cx;
+            vis.cy         = clusterHistory_[hi].cy;
+            vis.radius     = clusterHistory_[hi].radius;
+            vis.pointCount = clusterHistory_[hi].pointCount;
+
+            bool orphan = true;
+            uint32_t bbIdx = 0xFFFFFFFF;
+            for (uint32_t bb = 0; bb < 50; ++bb) {
+                if (bboxCluster_[bb] != 0xFFFFFFFF) {
+                    float dx = vis.cx - clusterCentroidX_[bboxCluster_[bb]];
+                    float dy = vis.cy - clusterCentroidY_[bboxCluster_[bb]];
+                    if (dx * dx + dy * dy < 0.01f) {
+                        orphan = false;
+                        bbIdx = bb;
+                        break;
+                    }
+                }
+            }
+            vis.bboxIdx  = bbIdx;
+            vis.isOrphan = orphan;
+            ++vc;
+        }
+        clusterVisCount_ = vc;
+    }
 }

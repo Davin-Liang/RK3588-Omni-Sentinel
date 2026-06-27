@@ -57,8 +57,9 @@ static void fusion_warning_callback_(const TrackedTarget& target, void* /*userDa
     const char* stateStr = "?";
     switch (target.state) {
     case TrackState::Tentative: stateStr = "Tentative"; break;
-    case TrackState::Confirmed: stateStr = "Confirmed"; break;
-    case TrackState::Coasting:  stateStr = "Coasting";  break;
+    case TrackState::FusionTracking:  stateStr = "Fusion"; break;
+    case TrackState::PureRadarTracking: stateStr = "PureRadar"; break;
+    case TrackState::Lost:  stateStr = "Lost";  break;
     default: break;
     }
     fprintf(stderr,
@@ -1156,45 +1157,63 @@ void Widget::load_fusion_config_()
     fusionEnabled_  = config_.value("Fusion/enabled", false).toBool();
     fusionCamCount_ = config_.value("Fusion/camCount", 1).toUInt();
 
-    // Tracker 关键参数
-    fusionTrackerCfg_.clusterEpsMeters =
-        config_.value("Fusion/clusterEpsMeters", 0.5f).toFloat();
+    // DBSCAN 聚类
+    fusionTrackerCfg_.dbscanEpsMeters =
+        config_.value("Fusion/dbscanEpsMeters", 0.5f).toFloat();
+    fusionTrackerCfg_.dbscanMinPoints =
+        config_.value("Fusion/dbscanMinPoints", 5u).toUInt();
+    fusionTrackerCfg_.maxPointDistanceMeters =
+        config_.value("Fusion/maxPointDistanceMeters", 30.0f).toFloat();
+    fusionTrackerCfg_.maxClusterDistanceMeters =
+        config_.value("Fusion/maxClusterDistanceMeters", 10.0f).toFloat();
+    fusionTrackerCfg_.clusterPersistenceFrames =
+        config_.value("Fusion/clusterPersistenceFrames", 2u).toUInt();
+    fusionTrackerCfg_.bboxClaimMaxPixelDist =
+        config_.value("Fusion/bboxClaimMaxPixelDist", 100.0f).toFloat();
+    fusionTrackerCfg_.minBboxClaimPoints =
+        config_.value("Fusion/minBboxClaimPoints", 10u).toUInt();
+
+    // Alpha-Beta 滤波
     fusionTrackerCfg_.alpha =
-        config_.value("Fusion/alpha", 0.7f).toFloat();
+        config_.value("Fusion/alpha", 0.45f).toFloat();
     fusionTrackerCfg_.beta =
-        config_.value("Fusion/beta", 0.3f).toFloat();
-    fusionTrackerCfg_.maxAssociationDistMeters =
-        config_.value("Fusion/maxAssociationDistMeters", 2.0f).toFloat();
-    fusionTrackerCfg_.maxOrphanAssocDistMeters =
-        config_.value("Fusion/maxOrphanAssocDistMeters", 0.5f).toFloat();
+        config_.value("Fusion/beta", 0.2f).toFloat();
+    fusionTrackerCfg_.minHitsForVelocity =
+        config_.value("Fusion/minHitsForVelocity", 2u).toUInt();
+
+    // 关联
+    fusionTrackerCfg_.bboxAssocMaxDistMeters =
+        config_.value("Fusion/bboxAssocMaxDistMeters", 0.75f).toFloat();
+    fusionTrackerCfg_.orphanAssocMaxDistMeters =
+        config_.value("Fusion/orphanAssocMaxDistMeters", 0.5f).toFloat();
+
+    // 生命周期
     fusionTrackerCfg_.minHitsToConfirm =
         config_.value("Fusion/minHitsToConfirm", 3u).toUInt();
-    fusionTrackerCfg_.orphanMinHitsToConfirm =
-        config_.value("Fusion/orphanMinHitsToConfirm", 5u).toUInt();
-    fusionTrackerCfg_.maxCoastingFrames =
-        config_.value("Fusion/maxCoastingFrames", 5u).toUInt();
-    fusionTrackerCfg_.maxTracks =
-        config_.value("Fusion/maxTracks", 50u).toUInt();
-    fusionTrackerCfg_.warningEnterDistMeters =
-        config_.value("Fusion/warningEnterDistMeters", 3.0f).toFloat();
-    fusionTrackerCfg_.warningExitDistMeters =
-        config_.value("Fusion/warningExitDistMeters", 3.5f).toFloat();
-
-    // Tracker 细节参数 (仅 config.ini, UI 不暴露)
-    fusionTrackerCfg_.minClusterPoints =
-        config_.value("Fusion/minClusterPoints", 3u).toUInt();
-    fusionTrackerCfg_.requireClassIdMatch =
-        config_.value("Fusion/requireClassIdMatch", true).toBool();
     fusionTrackerCfg_.maxTentativeMisses =
         config_.value("Fusion/maxTentativeMisses", 1u).toUInt();
-    fusionTrackerCfg_.maxStaleCoastingFrames =
-        config_.value("Fusion/maxStaleCoastingFrames", 2u).toUInt();
+    fusionTrackerCfg_.maxFusionMisses =
+        config_.value("Fusion/maxFusionMisses", 2u).toUInt();
+    fusionTrackerCfg_.maxLostFrames =
+        config_.value("Fusion/maxLostFrames", 20u).toUInt();
+    fusionTrackerCfg_.maxTracks =
+        config_.value("Fusion/maxTracks", 50u).toUInt();
+
+    // 告警
+    fusionTrackerCfg_.warningEnterDistMeters =
+        config_.value("Fusion/warningEnterDistMeters", 0.5f).toFloat();
+    fusionTrackerCfg_.warningExitDistMeters =
+        config_.value("Fusion/warningExitDistMeters", 0.6f).toFloat();
     fusionTrackerCfg_.minConfirmedAgeForWarning =
         config_.value("Fusion/minConfirmedAgeForWarning", 2u).toUInt();
     fusionTrackerCfg_.warningCooldownNs =
         config_.value("Fusion/warningCooldownNs", 2000000000ULL).toULongLong();
-    fusionTrackerCfg_.minHitsForVelocity =
-        config_.value("Fusion/minHitsForVelocity", 2u).toUInt();
+
+    // 可视化
+    fusionTrackerCfg_.clusterVisOpacity =
+        config_.value("Fusion/clusterVisOpacity", 0.3f).toFloat();
+    fusionTrackerCfg_.radarRangeMeters =
+        config_.value("Fusion/radarRangeMeters", 10.0f).toFloat();
 
     // Camera 0
     fusionCamCfg_[0].fx = config_.value("Fusion/Cam0Fx", 400.0f).toFloat();
@@ -1225,17 +1244,29 @@ void Widget::save_fusion_config_()
     config_.setValue("Fusion/enabled", fusionEnabled_);
     config_.setValue("Fusion/camCount", fusionCamCount_);
 
-    config_.setValue("Fusion/clusterEpsMeters", fusionTrackerCfg_.clusterEpsMeters);
+    config_.setValue("Fusion/dbscanEpsMeters", fusionTrackerCfg_.dbscanEpsMeters);
+    config_.setValue("Fusion/dbscanMinPoints", fusionTrackerCfg_.dbscanMinPoints);
+    config_.setValue("Fusion/maxPointDistanceMeters", fusionTrackerCfg_.maxPointDistanceMeters);
+    config_.setValue("Fusion/maxClusterDistanceMeters", fusionTrackerCfg_.maxClusterDistanceMeters);
+    config_.setValue("Fusion/clusterPersistenceFrames", fusionTrackerCfg_.clusterPersistenceFrames);
+    config_.setValue("Fusion/bboxClaimMaxPixelDist", fusionTrackerCfg_.bboxClaimMaxPixelDist);
+    config_.setValue("Fusion/minBboxClaimPoints", fusionTrackerCfg_.minBboxClaimPoints);
     config_.setValue("Fusion/alpha", fusionTrackerCfg_.alpha);
     config_.setValue("Fusion/beta", fusionTrackerCfg_.beta);
-    config_.setValue("Fusion/maxAssociationDistMeters", fusionTrackerCfg_.maxAssociationDistMeters);
-    config_.setValue("Fusion/maxOrphanAssocDistMeters", fusionTrackerCfg_.maxOrphanAssocDistMeters);
+    config_.setValue("Fusion/minHitsForVelocity", fusionTrackerCfg_.minHitsForVelocity);
+    config_.setValue("Fusion/bboxAssocMaxDistMeters", fusionTrackerCfg_.bboxAssocMaxDistMeters);
+    config_.setValue("Fusion/orphanAssocMaxDistMeters", fusionTrackerCfg_.orphanAssocMaxDistMeters);
     config_.setValue("Fusion/minHitsToConfirm", fusionTrackerCfg_.minHitsToConfirm);
-    config_.setValue("Fusion/orphanMinHitsToConfirm", fusionTrackerCfg_.orphanMinHitsToConfirm);
-    config_.setValue("Fusion/maxCoastingFrames", fusionTrackerCfg_.maxCoastingFrames);
+    config_.setValue("Fusion/maxTentativeMisses", fusionTrackerCfg_.maxTentativeMisses);
+    config_.setValue("Fusion/maxFusionMisses", fusionTrackerCfg_.maxFusionMisses);
+    config_.setValue("Fusion/maxLostFrames", fusionTrackerCfg_.maxLostFrames);
     config_.setValue("Fusion/maxTracks", fusionTrackerCfg_.maxTracks);
     config_.setValue("Fusion/warningEnterDistMeters", fusionTrackerCfg_.warningEnterDistMeters);
     config_.setValue("Fusion/warningExitDistMeters", fusionTrackerCfg_.warningExitDistMeters);
+    config_.setValue("Fusion/minConfirmedAgeForWarning", fusionTrackerCfg_.minConfirmedAgeForWarning);
+    config_.setValue("Fusion/warningCooldownNs", (qulonglong)fusionTrackerCfg_.warningCooldownNs);
+    config_.setValue("Fusion/clusterVisOpacity", fusionTrackerCfg_.clusterVisOpacity);
+    config_.setValue("Fusion/radarRangeMeters", fusionTrackerCfg_.radarRangeMeters);
 
     config_.setValue("Fusion/Cam0Fx", fusionCamCfg_[0].fx);
     config_.setValue("Fusion/Cam0Fy", fusionCamCfg_[0].fy);
@@ -1264,24 +1295,36 @@ void Widget::build_fusion_param_ui_()
 
     // 参数说明映射
     QMap<QString, QString> descriptions;
-    descriptions["clusterEpsMeters"] =
-        QString::fromUtf8("两点距离小于此值的归为同一目标，值越小目标分得越细");
+    descriptions["dbscanEpsMeters"] =
+        QString::fromUtf8("DBSCAN邻域半径，两点距离小于此值归为同一簇");
+    descriptions["dbscanMinPoints"] =
+        QString::fromUtf8("DBSCAN核心点所需最小邻居数，不足则视为噪声");
+    descriptions["maxClusterDistanceMeters"] =
+        QString::fromUtf8("簇质心到LiDAR原点的最大距离，更远的簇被丢弃");
+    descriptions["clusterPersistenceFrames"] =
+        QString::fromUtf8("簇需连续出现多少帧后才输出为正式检测（过滤闪烁）");
+    descriptions["bboxClaimMaxPixelDist"] =
+        QString::fromUtf8("簇投影点离bbox边缘的最大像素距离，超出则不被认领");
+    descriptions["minBboxClaimPoints"] =
+        QString::fromUtf8("bbox只认领点数>=此值的簇，过滤远处噪声");
     descriptions["alpha"] =
         QString::fromUtf8("位置滤波平滑系数，越大越信任当前观测（响应快但抖动大）");
     descriptions["beta"] =
         QString::fromUtf8("速度估计平滑系数，越大速度响应越快但噪声也越大");
-    descriptions["maxAssociationDistMeters"] =
-        QString::fromUtf8("检测与航迹匹配的最大距离，超过此值视为不同目标");
+    descriptions["bboxAssocMaxDistMeters"] =
+        QString::fromUtf8("检测与航迹匹配的硬门限距离，超过此值直接不关联");
+    descriptions["orphanAssocMaxDistMeters"] =
+        QString::fromUtf8("孤儿簇与航迹匹配的硬门限距离");
     descriptions["minHitsToConfirm"] =
-        QString::fromUtf8("连续命中这么多帧后航迹从\"待确认\"升级为\"已确认\"");
-    descriptions["maxCoastingFrames"] =
-        QString::fromUtf8("目标短暂丢失后靠预测维持的最大帧数，超时则删除航迹");
+        QString::fromUtf8("连续命中帧数阈值，Tentative→FusionTracking");
+    descriptions["maxLostFrames"] =
+        QString::fromUtf8("Lost状态最大存活帧数，超时则删除航迹");
     descriptions["maxTracks"] =
-        QString::fromUtf8("同时跟踪的目标数量上限，防止内存和CPU过载");
+        QString::fromUtf8("同时跟踪的目标数量上限，满时淘汰最老Lost");
     descriptions["warningEnterDistMeters"] =
-        QString::fromUtf8("目标进入此距离内触发告警（迟滞进入阈值，需小于解除距离）");
+        QString::fromUtf8("目标进入此距离内触发告警（迟滞进入阈值）");
     descriptions["warningExitDistMeters"] =
-        QString::fromUtf8("目标离开此距离外解除告警（迟滞退出阈值，防止边界抖动）");
+        QString::fromUtf8("目标离开此距离外解除告警（迟滞退出阈值）");
     descriptions["cam0_fx"] = QString::fromUtf8("X轴焦距（像素），影响水平投影缩放");
     descriptions["cam0_fy"] = QString::fromUtf8("Y轴焦距（像素），影响垂直投影缩放");
     descriptions["cam0_cx"] = QString::fromUtf8("主点X坐标（像素），图像水平中心");
@@ -1386,12 +1429,18 @@ void Widget::build_fusion_param_ui_()
     };
 
     addSection(QString::fromUtf8("跟踪器参数"), trackerDescLabel, trackerDescTimer);
-    addParam("clusterEpsMeters",          QString::fromUtf8("聚类半径"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("dbscanEpsMeters",           QString::fromUtf8("DBSCAN半径"),    "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("dbscanMinPoints",           QString::fromUtf8("最小点数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
+    addParam("maxClusterDistanceMeters",  QString::fromUtf8("最大聚类距离"),   "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("clusterPersistenceFrames",  QString::fromUtf8("持久帧数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
+    addParam("bboxClaimMaxPixelDist",     QString::fromUtf8("bbox认领像素"),   "px", true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("minBboxClaimPoints",        QString::fromUtf8("认领最小点数"),   "",   false, true,  trackerDescLabel, trackerDescTimer);
     addParam("alpha",                     QString::fromUtf8("Alpha增益"),     "",   true,  false, trackerDescLabel, trackerDescTimer);
     addParam("beta",                      QString::fromUtf8("Beta增益"),      "",   true,  false, trackerDescLabel, trackerDescTimer);
-    addParam("maxAssociationDistMeters",  QString::fromUtf8("关联门限"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("bboxAssocMaxDistMeters",    QString::fromUtf8("关联门限"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
+    addParam("orphanAssocMaxDistMeters",  QString::fromUtf8("孤儿门限"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
     addParam("minHitsToConfirm",          QString::fromUtf8("确认帧数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
-    addParam("maxCoastingFrames",         QString::fromUtf8("外推帧数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
+    addParam("maxLostFrames",             QString::fromUtf8("丢失帧数"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
     addParam("maxTracks",                 QString::fromUtf8("最大航迹"),      "",   false, true,  trackerDescLabel, trackerDescTimer);
     addParam("warningEnterDistMeters",    QString::fromUtf8("告警距离"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
     addParam("warningExitDistMeters",     QString::fromUtf8("解除距离"),      "m",  true,  false, trackerDescLabel, trackerDescTimer);
@@ -1426,15 +1475,21 @@ void Widget::sync_fusion_config_to_ui_()
             fusionParamEdits_[key]->setText(QString::number(v));
     };
 
-    setVal("clusterEpsMeters",         fusionTrackerCfg_.clusterEpsMeters);
-    setVal("alpha",                    fusionTrackerCfg_.alpha);
-    setVal("beta",                     fusionTrackerCfg_.beta);
-    setVal("maxAssociationDistMeters", fusionTrackerCfg_.maxAssociationDistMeters);
-    setInt("minHitsToConfirm",         fusionTrackerCfg_.minHitsToConfirm);
-    setInt("maxCoastingFrames",        fusionTrackerCfg_.maxCoastingFrames);
-    setInt("maxTracks",                fusionTrackerCfg_.maxTracks);
-    setVal("warningEnterDistMeters",   fusionTrackerCfg_.warningEnterDistMeters);
-    setVal("warningExitDistMeters",    fusionTrackerCfg_.warningExitDistMeters);
+    setVal("dbscanEpsMeters",           fusionTrackerCfg_.dbscanEpsMeters);
+    setInt("dbscanMinPoints",           fusionTrackerCfg_.dbscanMinPoints);
+    setVal("maxClusterDistanceMeters",  fusionTrackerCfg_.maxClusterDistanceMeters);
+    setInt("clusterPersistenceFrames",  fusionTrackerCfg_.clusterPersistenceFrames);
+    setVal("bboxClaimMaxPixelDist",     fusionTrackerCfg_.bboxClaimMaxPixelDist);
+    setInt("minBboxClaimPoints",        fusionTrackerCfg_.minBboxClaimPoints);
+    setVal("alpha",                     fusionTrackerCfg_.alpha);
+    setVal("beta",                      fusionTrackerCfg_.beta);
+    setVal("bboxAssocMaxDistMeters",    fusionTrackerCfg_.bboxAssocMaxDistMeters);
+    setVal("orphanAssocMaxDistMeters",  fusionTrackerCfg_.orphanAssocMaxDistMeters);
+    setInt("minHitsToConfirm",          fusionTrackerCfg_.minHitsToConfirm);
+    setInt("maxLostFrames",             fusionTrackerCfg_.maxLostFrames);
+    setInt("maxTracks",                 fusionTrackerCfg_.maxTracks);
+    setVal("warningEnterDistMeters",    fusionTrackerCfg_.warningEnterDistMeters);
+    setVal("warningExitDistMeters",     fusionTrackerCfg_.warningExitDistMeters);
 
     setVal("cam0_fx", fusionCamCfg_[0].fx);
     setVal("cam0_fy", fusionCamCfg_[0].fy);
@@ -1460,12 +1515,18 @@ void Widget::sync_ui_to_fusion_config_()
         return 0;
     };
 
-    fusionTrackerCfg_.clusterEpsMeters         = getVal("clusterEpsMeters");
+    fusionTrackerCfg_.dbscanEpsMeters           = getVal("dbscanEpsMeters");
+    fusionTrackerCfg_.dbscanMinPoints           = getInt("dbscanMinPoints");
+    fusionTrackerCfg_.maxClusterDistanceMeters  = getVal("maxClusterDistanceMeters");
+    fusionTrackerCfg_.clusterPersistenceFrames  = getInt("clusterPersistenceFrames");
+    fusionTrackerCfg_.bboxClaimMaxPixelDist     = getVal("bboxClaimMaxPixelDist");
+    fusionTrackerCfg_.minBboxClaimPoints        = getInt("minBboxClaimPoints");
     fusionTrackerCfg_.alpha                     = getVal("alpha");
     fusionTrackerCfg_.beta                      = getVal("beta");
-    fusionTrackerCfg_.maxAssociationDistMeters  = getVal("maxAssociationDistMeters");
+    fusionTrackerCfg_.bboxAssocMaxDistMeters    = getVal("bboxAssocMaxDistMeters");
+    fusionTrackerCfg_.orphanAssocMaxDistMeters  = getVal("orphanAssocMaxDistMeters");
     fusionTrackerCfg_.minHitsToConfirm          = getInt("minHitsToConfirm");
-    fusionTrackerCfg_.maxCoastingFrames         = getInt("maxCoastingFrames");
+    fusionTrackerCfg_.maxLostFrames             = getInt("maxLostFrames");
     fusionTrackerCfg_.maxTracks                 = getInt("maxTracks");
     fusionTrackerCfg_.warningEnterDistMeters    = getVal("warningEnterDistMeters");
     fusionTrackerCfg_.warningExitDistMeters     = getVal("warningExitDistMeters");
@@ -1713,8 +1774,10 @@ void Widget::on_btn_fusion_toggle_()
 
         lidar_->stop();
         fusionStatusTimer_->stop();
+        fusion_->reset_tracking();
 
         topDownView_->set_targets({});
+        topDownView_->update();
         topDownView_->update();
 
         fusionEnabled_ = false;
@@ -1746,8 +1809,9 @@ void Widget::on_tracking_updated_(const QVector<TrackedTarget>& targets)
         for (const auto& t : targets) {
             nlohmann::json tj;
             tj["id"] = t.id;
-            tj["state"] = (t.state == TrackState::Confirmed) ? "Confirmed" :
-                          (t.state == TrackState::Tentative) ? "Tentative" : "Coasting";
+            tj["state"] = (t.state == TrackState::FusionTracking) ? "FusionTracking" :
+                          (t.state == TrackState::PureRadarTracking) ? "PureRadarTracking" :
+                          (t.state == TrackState::Tentative) ? "Tentative" : "Lost";
             tj["posX"] = t.posX;
             tj["posY"] = t.posY;
             tj["velX"] = t.velX;
@@ -1761,6 +1825,27 @@ void Widget::on_tracking_updated_(const QVector<TrackedTarget>& targets)
             arr.push_back(tj);
         }
         j["targets"] = arr;
+
+        // 聚类可视化数据
+        if (fusion_ && fusion_->is_running()) {
+            ClusterVisData cvData[32];
+            uint32_t cvCount = 0;
+            if (fusion_->copy_cluster_vis(cvData, 32, &cvCount) && cvCount > 0) {
+                nlohmann::json cArr = nlohmann::json::array();
+                for (uint32_t i = 0; i < cvCount; ++i) {
+                    nlohmann::json cj;
+                    cj["cx"] = cvData[i].cx;
+                    cj["cy"] = cvData[i].cy;
+                    cj["radius"] = cvData[i].radius;
+                    cj["pointCount"] = cvData[i].pointCount;
+                    cj["isOrphan"] = cvData[i].isOrphan;
+                    cj["bboxIdx"] = cvData[i].bboxIdx;
+                    cArr.push_back(cj);
+                }
+                j["clusters"] = cArr;
+            }
+        }
+
         j["ts"] = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         webServer_->push_tracking(j.dump());
@@ -1789,25 +1874,26 @@ void Widget::on_fusion_param_changed_()
 void Widget::on_fusion_status_update_()
 {
     uint32_t total = static_cast<uint32_t>(lastTrackedTargets_.size());
-    uint32_t confirmed = 0;
-    uint32_t warnings = 0;
+    uint32_t fusionCnt = 0, pureRadarCnt = 0, warnings = 0;
     for (const auto& t : lastTrackedTargets_) {
-        if (t.state == TrackState::Confirmed) ++confirmed;
+        if (t.state == TrackState::FusionTracking) ++fusionCnt;
+        else if (t.state == TrackState::PureRadarTracking) ++pureRadarCnt;
         if (t.warningActive) ++warnings;
     }
 
     ui->fusionStatusLabel->setText(
-        QString("目标: %1 | 已确认: %2 | 告警: %3 | 融合: %4")
+        QString("目标:%1 | 融合:%2 | 纯雷达:%3 | 告警:%4 | %5")
             .arg(total)
-            .arg(confirmed)
+            .arg(fusionCnt)
+            .arg(pureRadarCnt)
             .arg(warnings)
             .arg(fusionEnabled_ ? "运行中" : "关闭"));
 
-    // 右侧显示最多3个已确认目标的实际距离
     QStringList distItems;
     int shown = 0;
     for (const auto& t : lastTrackedTargets_) {
-        if (t.state == TrackState::Confirmed && shown < 3) {
+        if ((t.state == TrackState::FusionTracking
+             || t.state == TrackState::PureRadarTracking) && shown < 3) {
             distItems.append(QString("T%1:%2m").arg(t.id).arg(t.distanceMeters, 0, 'f', 1));
             ++shown;
         }
@@ -2505,15 +2591,40 @@ std::string Widget::web_fusion_config_(const std::string& body)
 {
     try {
         auto j = nlohmann::json::parse(body);
-        fusionTrackerCfg_.clusterEpsMeters         = j.value("clusterEpsMeters",          fusionTrackerCfg_.clusterEpsMeters);
-        fusionTrackerCfg_.alpha                    = j.value("alpha",                     fusionTrackerCfg_.alpha);
-        fusionTrackerCfg_.beta                     = j.value("beta",                      fusionTrackerCfg_.beta);
-        fusionTrackerCfg_.maxAssociationDistMeters = j.value("maxAssociationDistMeters",  fusionTrackerCfg_.maxAssociationDistMeters);
-        fusionTrackerCfg_.minHitsToConfirm        = j.value("minHitsToConfirm",          fusionTrackerCfg_.minHitsToConfirm);
-        fusionTrackerCfg_.maxCoastingFrames       = j.value("maxCoastingFrames",         fusionTrackerCfg_.maxCoastingFrames);
-        fusionTrackerCfg_.maxTracks               = j.value("maxTracks",                 fusionTrackerCfg_.maxTracks);
-        fusionTrackerCfg_.warningEnterDistMeters  = j.value("warningEnterDistMeters",    fusionTrackerCfg_.warningEnterDistMeters);
-        fusionTrackerCfg_.warningExitDistMeters   = j.value("warningExitDistMeters",     fusionTrackerCfg_.warningExitDistMeters);
+        if (j.contains("dbscanEpsMeters"))
+            fusionTrackerCfg_.dbscanEpsMeters = j["dbscanEpsMeters"];
+        if (j.contains("dbscanMinPoints"))
+            fusionTrackerCfg_.dbscanMinPoints = j["dbscanMinPoints"];
+        if (j.contains("maxClusterDistanceMeters"))
+            fusionTrackerCfg_.maxClusterDistanceMeters = j["maxClusterDistanceMeters"];
+        if (j.contains("clusterPersistenceFrames"))
+            fusionTrackerCfg_.clusterPersistenceFrames = j["clusterPersistenceFrames"];
+        if (j.contains("bboxClaimMaxPixelDist"))
+            fusionTrackerCfg_.bboxClaimMaxPixelDist = j["bboxClaimMaxPixelDist"];
+        if (j.contains("minBboxClaimPoints"))
+            fusionTrackerCfg_.minBboxClaimPoints = j["minBboxClaimPoints"];
+        if (j.contains("alpha"))
+            fusionTrackerCfg_.alpha = j["alpha"];
+        if (j.contains("beta"))
+            fusionTrackerCfg_.beta = j["beta"];
+        if (j.contains("bboxAssocMaxDistMeters"))
+            fusionTrackerCfg_.bboxAssocMaxDistMeters = j["bboxAssocMaxDistMeters"];
+        if (j.contains("orphanAssocMaxDistMeters"))
+            fusionTrackerCfg_.orphanAssocMaxDistMeters = j["orphanAssocMaxDistMeters"];
+        if (j.contains("minHitsToConfirm"))
+            fusionTrackerCfg_.minHitsToConfirm = j["minHitsToConfirm"];
+        if (j.contains("maxLostFrames"))
+            fusionTrackerCfg_.maxLostFrames = j["maxLostFrames"];
+        if (j.contains("maxTracks"))
+            fusionTrackerCfg_.maxTracks = j["maxTracks"];
+        if (j.contains("warningEnterDistMeters"))
+            fusionTrackerCfg_.warningEnterDistMeters = j["warningEnterDistMeters"];
+        if (j.contains("warningExitDistMeters"))
+            fusionTrackerCfg_.warningExitDistMeters = j["warningExitDistMeters"];
+        if (j.contains("clusterVisOpacity"))
+            fusionTrackerCfg_.clusterVisOpacity = j["clusterVisOpacity"];
+        if (j.contains("radarRangeMeters"))
+            fusionTrackerCfg_.radarRangeMeters = j["radarRangeMeters"];
 
         if (fusion_) fusion_->configure_tracker(fusionTrackerCfg_);
         save_fusion_config_();
@@ -2592,8 +2703,9 @@ std::string Widget::get_status_json_() const
         for (const auto& t : lastTrackedTargets_) {
             nlohmann::json tj;
             tj["id"] = t.id;
-            tj["state"] = (t.state == TrackState::Confirmed) ? "Confirmed" :
-                          (t.state == TrackState::Tentative) ? "Tentative" : "Coasting";
+            tj["state"] = (t.state == TrackState::FusionTracking) ? "FusionTracking" :
+                          (t.state == TrackState::PureRadarTracking) ? "PureRadarTracking" :
+                          (t.state == TrackState::Tentative) ? "Tentative" : "Lost";
             tj["posX"] = t.posX;
             tj["posY"] = t.posY;
             tj["velX"] = t.velX;
@@ -2617,6 +2729,31 @@ std::string Widget::get_status_json_() const
     nlohmann::json sys;
     sys["recordResolution"] = recordResolution_[0];
     j["system"] = sys;
+    // 聚类可视化数据（1Hz，不依赖 tracking 信号）
+    if (fusion_ && fusion_->is_running()) {
+        ClusterVisData cvData[32];
+        uint32_t cvCount = 0;
+        fusion_->copy_cluster_vis(cvData, 32, &cvCount);
+        static int cvLogCnt = 0;
+        if (++cvLogCnt % 10 == 0)
+            fprintf(stderr, "[StatusJSON] clusterVis count=%u\n", cvCount);
+        if (cvCount > 0) {
+            nlohmann::json cArr = nlohmann::json::array();
+            for (uint32_t i = 0; i < cvCount; ++i) {
+                nlohmann::json cj;
+                cj["cx"] = cvData[i].cx;
+                cj["cy"] = cvData[i].cy;
+                cj["radius"] = cvData[i].radius;
+                cj["pointCount"] = cvData[i].pointCount;
+                cj["isOrphan"] = cvData[i].isOrphan;
+                cj["bboxIdx"] = cvData[i].bboxIdx;
+                cArr.push_back(cj);
+            }
+            j["clusters"] = cArr;
+        }
+    }
+
+    j["radarRangeMeters"] = fusionTrackerCfg_.radarRangeMeters;
     j["fusionConfigVersion"] = fusionConfigVersion_;
 
     j["ok"] = true;
@@ -2745,15 +2882,22 @@ std::string Widget::get_fusion_config_json_() const
     nlohmann::json j;
 
     // Tracker config
-    j["clusterEpsMeters"]         = fusionTrackerCfg_.clusterEpsMeters;
-    j["alpha"]                    = fusionTrackerCfg_.alpha;
-    j["beta"]                     = fusionTrackerCfg_.beta;
-    j["maxAssociationDistMeters"] = fusionTrackerCfg_.maxAssociationDistMeters;
-    j["minHitsToConfirm"]         = fusionTrackerCfg_.minHitsToConfirm;
-    j["maxCoastingFrames"]        = fusionTrackerCfg_.maxCoastingFrames;
-    j["maxTracks"]                = fusionTrackerCfg_.maxTracks;
-    j["warningEnterDistMeters"]   = fusionTrackerCfg_.warningEnterDistMeters;
-    j["warningExitDistMeters"]    = fusionTrackerCfg_.warningExitDistMeters;
+    j["dbscanEpsMeters"]         = fusionTrackerCfg_.dbscanEpsMeters;
+    j["dbscanMinPoints"]         = fusionTrackerCfg_.dbscanMinPoints;
+    j["maxClusterDistanceMeters"] = fusionTrackerCfg_.maxClusterDistanceMeters;
+    j["clusterPersistenceFrames"] = fusionTrackerCfg_.clusterPersistenceFrames;
+    j["bboxClaimMaxPixelDist"]   = fusionTrackerCfg_.bboxClaimMaxPixelDist;
+    j["minBboxClaimPoints"]      = fusionTrackerCfg_.minBboxClaimPoints;
+    j["alpha"]                   = fusionTrackerCfg_.alpha;
+    j["beta"]                    = fusionTrackerCfg_.beta;
+    j["bboxAssocMaxDistMeters"]  = fusionTrackerCfg_.bboxAssocMaxDistMeters;
+    j["orphanAssocMaxDistMeters"] = fusionTrackerCfg_.orphanAssocMaxDistMeters;
+    j["minHitsToConfirm"]        = fusionTrackerCfg_.minHitsToConfirm;
+    j["maxLostFrames"]           = fusionTrackerCfg_.maxLostFrames;
+    j["maxTracks"]               = fusionTrackerCfg_.maxTracks;
+    j["warningEnterDistMeters"]  = fusionTrackerCfg_.warningEnterDistMeters;
+    j["warningExitDistMeters"]   = fusionTrackerCfg_.warningExitDistMeters;
+    j["clusterVisOpacity"]       = fusionTrackerCfg_.clusterVisOpacity;
 
     // Camera intrinsics
     for (int i = 0; i < 2; ++i) {

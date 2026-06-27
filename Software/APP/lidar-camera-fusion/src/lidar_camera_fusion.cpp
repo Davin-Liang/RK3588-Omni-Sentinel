@@ -400,6 +400,16 @@ bool LidarCameraFusion::copy_tracked_targets(TrackedTarget* out,
     return tracker_->copy_snapshot(out, maxCount, outCount);
 }
 
+bool LidarCameraFusion::copy_cluster_vis(ClusterVisData* out, uint32_t maxCount,
+                                          uint32_t* outCount) const
+{
+    if (!tracker_) {
+        if (outCount) *outCount = 0;
+        return false;
+    }
+    return tracker_->copy_cluster_vis(out, maxCount, outCount);
+}
+
 bool LidarCameraFusion::try_get_lidar_osd_snapshot(LidarOsdSnapshot& out, int timeoutMs)
 {
     (void)timeoutMs;

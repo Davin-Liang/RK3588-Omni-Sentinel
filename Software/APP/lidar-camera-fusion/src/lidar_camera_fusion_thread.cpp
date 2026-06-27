@@ -55,23 +55,45 @@ void LidarCameraFusion::fusion_thread_()
 
     uint64_t iterationCount = 0;
 
+    uint64_t lastLidarTs = 0;
+
     while (running_) {
-        // ---- 步骤 1：获取 YOLO 检测结果 ----
+        // ---- 步骤 1：先取雷达帧做去重检查 ----
+        LidarFrame frame;
+        frame.points = lidarPointsBuf_;
+        if (!lidar_->get_latest_frame(frame)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        if (frame.timestampNs == lastLidarTs) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        lastLidarTs = frame.timestampNs;
+
+        // ---- 步骤 2：新雷达帧到达，drain YOLO 队列取最新 ----
         for (uint32_t c = 0; c < camCount_; ++c) {
             if (detectionProvider_) {
-                if (!detectionProvider_(c, fakeDetections_[c], 33))
-                    fakeDetections_[c].clear();
+                std::vector<YoloBBox> latest;
+                std::vector<YoloBBox> tmp;
+                bool got = false;
+                while (detectionProvider_(c, tmp, 0)) {
+                    latest = std::move(tmp);
+                    tmp.clear();
+                    got = true;
+                }
+                if (got) fakeDetections_[c] = std::move(latest);
+                else fakeDetections_[c].clear();
             } else {
                 generate_fake_detections_(c);
             }
-            // 过滤：只保留 person (classId=0) 且置信度 >= 0.60
             auto& dets = fakeDetections_[c];
             dets.erase(std::remove_if(dets.begin(), dets.end(),
                 [](const YoloBBox& b) { return b.classId != 0 || b.confidence < 0.60f; }),
                 dets.end());
         }
 
-        // ---- 步骤 2：检测是否有 YOLO 数据 ----
+        // ---- 步骤 3：YOLO 时间对齐 ----
         bool hasYolo = false;
         uint32_t yoloBboxCount = 0;
         uint64_t tsNs = 0;
@@ -82,16 +104,8 @@ void LidarCameraFusion::fusion_thread_()
             }
             yoloBboxCount += static_cast<uint32_t>(fakeDetections_[c].size());
         }
-
-        // ---- 步骤 3：取雷达帧 ----
-        LidarFrame frame;
-        frame.points = lidarPointsBuf_;
-        bool gotFrame = hasYolo
-            ? lidar_->get_closest_frame(tsNs, frame)
-            : lidar_->get_latest_frame(frame);
-        if (!gotFrame) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
+        if (hasYolo) {
+            lidar_->get_closest_frame(tsNs, frame);
         }
 
         // [LidarCalib] 已注释
@@ -166,23 +180,24 @@ void LidarCameraFusion::fusion_thread_()
 
         // ---- 跟踪状态日志 ----
         if (iterationCount % 5 == 0 && trackingEnabled_ && tracker_) {
-            uint32_t tcnt = 0, confCnt = 0, tentCnt = 0, coastCnt = 0;
+            uint32_t tcnt = 0, fCnt = 0, pCnt = 0, lCnt = 0, dCnt = 0;
             TrackedTarget snap[10];
             tracker_->copy_snapshot(snap, 10, &tcnt);
             for (uint32_t ti = 0; ti < tcnt; ++ti) {
                 switch (snap[ti].state) {
-                case TrackState::Confirmed: ++confCnt; break;
-                case TrackState::Tentative: ++tentCnt; break;
-                case TrackState::Coasting:  ++coastCnt; break;
+                case TrackState::FusionTracking:  ++fCnt; break;
+                case TrackState::PureRadarTracking: ++pCnt; break;
+                case TrackState::Tentative: ++dCnt; break;
+                case TrackState::Lost:  ++lCnt; break;
                 default: break;
                 }
             }
-            uint32_t detCnt = tracker_->get_detection_count();
-            fprintf(stderr, "[Fusion] #%lu yolo=%s bbox=%u det=%u pts=%u track=%u(C:%u T:%u K:%u)\n",
+            fprintf(stderr, "[Fusion] #%lu yolo=%s bbox=%u det=%u pts=%u track=%u(F:%u P:%u L:%u T:%u)\n",
                     (unsigned long)iterationCount,
-                    hasYolo ? "Y" : "N", yoloBboxCount, detCnt,
+                    hasYolo ? "Y" : "N", yoloBboxCount,
+                    tracker_->get_detection_count(),
                     frame.pointsCount,
-                    tcnt, confCnt, tentCnt, coastCnt);
+                    tcnt, fCnt, pCnt, lCnt, dCnt);
             for (uint32_t ti = 0; ti < tcnt; ++ti) {
                 fprintf(stderr, "  #%u st=%d pos(%.2f,%.2f) dist=%.2fm hits=%u miss=%u age=%u\n",
                         snap[ti].id,
@@ -306,9 +321,10 @@ void LidarCameraFusion::fusion_thread_()
                 for (uint32_t ti = 0; ti < tcount; ++ti) {
                     const char* stateStr = "?";
                     switch (snapshot[ti].state) {
-                    case TrackState::Tentative: stateStr = "Tentative"; break;
-                    case TrackState::Confirmed: stateStr = "Confirmed"; break;
-                    case TrackState::Coasting:  stateStr = "Coasting";  break;
+                    case TrackState::Tentative: stateStr = "T"; break;
+                    case TrackState::FusionTracking: stateStr = "F"; break;
+                    case TrackState::PureRadarTracking: stateStr = "P"; break;
+                    case TrackState::Lost:  stateStr = "L";  break;
                     case TrackState::Deleted:   stateStr = "Deleted";   break;
                     default: break;
                     }

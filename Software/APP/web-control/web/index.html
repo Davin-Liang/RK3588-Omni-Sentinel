@@ -22,9 +22,17 @@
   --bg:#28517F;--bg2:#1E3E60;--card:#C7E1FA;--card2:#D8EAFC;
   --accent:#7AB8E0;--text:#1A2A3A;--text2:#2A4055;
 }
+[data-theme="gray"]{
+  --bg:#536878;--bg2:#3D4F5C;--card:#EAE0C8;--card2:#F0EBD8;
+  --accent:#8A9BA8;--text:#2D3535;--text2:#4A5555;
+}
+[data-theme="violet"]{
+  --bg:#563C5C;--bg2:#3E2A44;--card:#D8BFD8;--card2:#E5D3E5;
+  --accent:#9966AA;--text:#2A1A2E;--text2:#4A3A4E;
+}
 *{margin:0;padding:0;box-sizing:border-box}
 body{
-  background:var(--bg);
+  background:var(--bg);font-size:15px;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
   color:var(--text);min-height:100vh;padding:var(--gap);
 }
@@ -35,7 +43,7 @@ body{
   padding:10px 20px;display:flex;align-items:center;gap:18px;margin-bottom:var(--gap);
 }
 #logo{font-size:20px;font-weight:700;color:var(--accent);white-space:nowrap}
-#hwStats{font-size:12px;color:var(--text2);display:flex;gap:18px;flex-wrap:wrap;flex:1}
+#hwStats{font-size:14px;color:var(--text2);display:flex;gap:18px;flex-wrap:wrap;flex:1}
 #hwStats span{white-space:nowrap}
 #hwStats .val{color:var(--text);font-weight:600}
 #clock{font-size:13px;color:var(--text);white-space:nowrap}
@@ -54,21 +62,21 @@ body{
 .cam-dot.on{background:var(--green2)}
 .cam-dot.off{background:var(--gray)}
 .cam-name{font-size:15px;font-weight:600}
-.cam-info{font-size:12px;color:var(--text2);margin-left:8px}
+.cam-info{font-size:14px;color:var(--text2);margin-left:8px}
 .cam-video{background:#000;position:relative;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
 .cam-video img{width:100%;height:100%;object-fit:contain}
-.cam-placeholder{color:var(--gray2);font-size:14px;position:absolute}
+.cam-placeholder{color:rgba(255,255,255,0.3);font-size:30px;position:absolute}
 .cam-controls{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid rgba(48,54,61,0.15);flex-wrap:wrap}
-.cam-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:12px;color:var(--text2)}
+.cam-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:14px;color:var(--text2)}
 .cam-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 
 /* Buttons */
 .btn{font-size:13px;font-weight:600;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;white-space:nowrap;transition:filter 0.15s;min-width:80px;text-align:center}
 .btn:hover{filter:brightness(1.15)}
 .btn:active{filter:brightness(0.9)}
-.btn-on{background:var(--red);color:var(--textL)}
-.btn-off{background:var(--green);color:var(--textL)}
-.btn-blue{background:var(--blue);color:var(--textL)}
+.btn-on{background:var(--accent);color:#fff}
+.btn-off{background:var(--bg2);color:var(--textL)}
+.btn-blue{background:var(--accent);color:#fff}
 .btn-yellow{background:var(--yellow);color:#1a1a1a}
 .btn-cream{background:var(--card2);color:var(--text);border:1px solid var(--gray2)}
 .btn-red{background:var(--red);color:var(--textL)}
@@ -84,7 +92,7 @@ body{
   border-bottom:1px solid rgba(48,54,61,0.15);
 }
 .fusion-title{font-size:15px;font-weight:600}
-.fusion-status{font-size:12px;color:var(--text2)}
+.fusion-status{font-size:14px;color:var(--text2)}
 .fusion-body{display:flex;min-height:380px}
 .fusion-canvas-wrap{
   flex:1;background:var(--dark);display:flex;align-items:center;justify-content:center;
@@ -92,32 +100,28 @@ body{
 }
 .fusion-params{
   width:280px;padding:10px;overflow-y:auto;
-  border-left:1px solid rgba(48,54,61,0.15);font-size:11px;
+  border-left:1px solid rgba(48,54,61,0.15);font-size:13px;
 }
-.param-title{font-size:12px;font-weight:600;color:var(--accent);padding:6px 0 3px 0}
-.param-row{display:flex;align-items:center;gap:4px;margin:3px 0}
-.param-name{color:var(--text2);min-width:78px;font-size:11px;white-space:nowrap}
-.param-input{font-size:11px;color:var(--text);background:var(--card2);border:1px solid var(--gray2);border-radius:4px;padding:2px 4px;width:64px;height:22px;text-align:right}
-.param-unit{color:var(--text2);width:16px;font-size:10px}
-.param-help{font-size:9px;font-weight:700;color:var(--accent);background:var(--card2);border:1px solid var(--accent);border-radius:9px;width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;line-height:1}
-.param-desc{font-size:10px;color:var(--text);background:#e8f0fe;border:1px solid var(--accent);border-radius:4px;padding:4px 6px;margin:2px 0 2px 82px}
+.param-title{font-size:15px;font-weight:600;color:var(--accent);padding:6px 0 3px 0}
+.param-row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.param-name{color:var(--text2);min-width:90px;font-size:13px;white-space:nowrap}
+.param-input{font-size:13px;color:var(--text);background:var(--card2);border:1px solid var(--gray2);border-radius:4px;padding:3px 5px;width:72px;height:24px;text-align:right}
+.param-unit{color:var(--text2);width:20px;font-size:12px}
+.param-help{font-size:11px;font-weight:700;color:var(--accent);background:var(--card2);border:1px solid var(--accent);border-radius:9px;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;line-height:1}
+.param-desc{font-size:12px;color:var(--text);background:#e8f0fe;border:1px solid var(--accent);border-radius:4px;padding:5px 8px;margin:2px 0 2px 90px}
 
 /* ===== Bottom: Fusion + System/Videos ===== */
 #bottomRow{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);margin-bottom:var(--gap)}
 #bottomLeft{display:flex;flex-direction:column}
 #bottomRight{display:flex;flex-direction:column;gap:var(--gap)}
-#sysBacktrackRow{flex:0 0 auto;display:flex;gap:var(--gap)}
-#bottomRight>.video-card{flex:1}
+.right-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;display:flex;gap:8px;overflow:hidden}
+#bottomRow2{display:flex;gap:var(--gap)}
 .sys-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:10px}
 .sys-title{font-size:15px;font-weight:600}
 .sys-row{display:flex;align-items:center;gap:8px}
-.sys-label{font-size:12px;color:var(--text2)}
-.video-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column}
-.video-header{display:flex;align-items:center;gap:12px;padding:8px 16px;border-bottom:1px solid rgba(48,54,61,0.15)}
-.video-title{font-size:15px;font-weight:600}
-.video-body{flex:1;overflow-y:auto;padding:4px}
-.video-table{width:100%;border-collapse:collapse;font-size:11px}
-.btn-play{font-size:10px;color:var(--accent);background:transparent;border:1px solid var(--accent);border-radius:4px;padding:1px 8px;cursor:pointer;margin-right:4px}
+.sys-label{font-size:14px;color:var(--text2)}
+.video-table{width:100%;border-collapse:collapse;font-size:13px}
+.btn-play{font-size:13px;color:var(--accent);background:transparent;border:1px solid var(--accent);border-radius:4px;padding:3px 10px;cursor:pointer;margin-right:4px}
 #playerOverlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;flex-direction:column;align-items:center;justify-content:center}
 #playerOverlay.show{display:flex}
 #playerOverlay video{max-width:90%;max-height:80%}
@@ -125,11 +129,9 @@ body{
 .video-table th{background:var(--card2);font-weight:600;padding:5px 6px;text-align:left;position:sticky;top:0;border-bottom:2px solid var(--border)}
 .video-table td{padding:4px 6px;border-bottom:1px solid rgba(48,54,61,0.1)}
 .video-table tr:hover td{background:rgba(88,166,255,0.08)}
-.btn-del{font-size:10px;color:var(--red);background:transparent;border:1px solid var(--red);border-radius:4px;padding:1px 8px;cursor:pointer}
+.btn-del{font-size:13px;color:var(--red);background:transparent;border:1px solid var(--red);border-radius:4px;padding:3px 10px;cursor:pointer}
 
 /* Status Bar */
-#statusBar2{background:rgba(0,0,0,0.25);border-radius:8px;padding:8px 16px;display:flex;align-items:center;gap:16px;font-size:12px;color:var(--textL);margin:var(--gap) 0}
-#recLabel{color:var(--red2);font-weight:600}
 #sysStatus{flex:1;text-align:right}
 
 select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:4px 8px}
@@ -165,7 +167,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <span class="cam-name">相机 1</span>
       <span class="cam-info" id="camInfo0">1920×1080</span>
     </div>
-    <div class="cam-video" id="camVideo0"><span class="cam-placeholder" id="camPlaceholder0">推流未开启</span></div>
+    <div class="cam-video" id="camVideo0"><span class="cam-placeholder" id="camPlaceholder0">推流待启动</span></div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview0">开启预览</button>
       <button class="btn btn-off" id="btnStream0">开始推流</button>
@@ -174,7 +176,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-off" id="btnOsd0">框叠加</button>
       <button class="btn btn-off" id="btnEis0">防抖关</button>
       <button class="btn btn-off" id="btnLidarOsd0">点云投影关</button>
-      <span style="font-size:12px;color:var(--text2)" id="camFps0"></span>
+      <span style="font-size:14px;color:var(--text2)" id="camFps0"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot0"></div>
         <span id="statusText0">待机</span>
@@ -188,7 +190,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <span class="cam-name">相机 2</span>
       <span class="cam-info" id="camInfo1">1280×720</span>
     </div>
-    <div class="cam-video" id="camVideo1"><span class="cam-placeholder" id="camPlaceholder1">推流未开启</span></div>
+    <div class="cam-video" id="camVideo1"><span class="cam-placeholder" id="camPlaceholder1">推流待启动</span></div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview1">开启预览</button>
       <button class="btn btn-off" id="btnStream1">开始推流</button>
@@ -197,19 +199,13 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-off" id="btnOsd1">框叠加</button>
       <button class="btn btn-off" id="btnEis1">防抖关</button>
       <button class="btn btn-off" id="btnLidarOsd1">点云投影关</button>
-      <span style="font-size:12px;color:var(--text2)" id="camFps1"></span>
+      <span style="font-size:14px;color:var(--text2)" id="camFps1"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot1"></div>
         <span id="statusText1">待机</span>
       </div>
     </div>
   </div>
-</div>
-
-<!-- Status Bar (between cameras and bottom) -->
-<div id="statusBar2">
-  <span id="recLabel"></span>
-  <span id="sysStatus">就绪</span>
 </div>
 
 <!-- Bottom Row: Fusion (left) | System+Videos (right) -->
@@ -221,7 +217,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
         <span class="fusion-title">融合目标跟踪</span>
         <span class="fusion-status" id="fusionHdrStatus">关闭</span>
         <span class="spacer"></span>
-        <button class="btn" id="btnFusionToggle" style="font-size:12px;padding:5px 14px">启用融合</button>
+        <button class="btn" id="btnFusionToggle" style="padding:5px 14px">启用融合</button>
       </div>
       <div class="fusion-body" style="flex:1">
         <div class="fusion-canvas-wrap" id="fusionCanvasWrap"><canvas id="fusionCanvas"></canvas></div>
@@ -231,58 +227,23 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
   </div>
   <!-- Right: System+Backtrack (top) + Videos (bottom) -->
   <div id="bottomRight">
-    <div id="sysBacktrackRow">
-      <div class="sys-card" style="flex:1">
-        <div class="sys-title">系统控制</div>
-        <div class="sys-row">
-          <span class="sys-label">相机1 录像</span>
-          <select id="resSelect0" onchange="changeRes(0)"><option value="1080">1080p</option><option value="720">720p</option></select>
+    <div id="bottomRow2" style="flex:1;min-height:0">
+      <div style="display:flex;flex-direction:column;gap:var(--gap);flex:1">
+        <div class="right-card" style="flex-direction:column;height:280px">
+          <div style="display:flex;align-items:center;justify-content:space-between"><div class="sys-title">数据回溯</div><div style="display:flex;gap:6px"><button class="btn btn-accent" id="btnBacktrack" style="padding:4px 10px">回溯</button><button class="btn btn-cream" id="btnRefrBacktrack" style="padding:4px 10px">刷新</button></div></div>
+          <div class="sys-row"><span class="sys-label" style="min-width:60px">秒数</span><input type="number" id="backtrackSecs" value="5.0" step="0.5" min="0.1" max="30" style="flex:1;font-size:13px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px"><span class="sys-label" style="min-width:50px">相机</span><select id="backtrackCam" style="flex:1;font-size:13px"><option value="-1">全部</option><option value="0">相机1</option><option value="1">相机2</option></select></div>
+          <div style="flex:1;overflow-y:auto;min-height:0;margin-top:4px"><table class="video-table"><thead><tr><th>文件名</th><th>时长</th><th>大小</th><th>操作</th></tr></thead><tbody id="backtrackBody"><tr><td colspan="4" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr></tbody></table></div>
         </div>
-        <div class="sys-row">
-          <span class="sys-label">相机2 录像</span>
-          <select id="resSelect1" onchange="changeRes(1)"><option value="1080">1080p</option><option value="720">720p</option></select>
-        </div>
-        <div class="sys-row">
-          <button class="btn btn-red" id="btnSystem" style="flex:1">关闭系统</button>
-          <button class="btn btn-blue" id="btnReboot" style="flex:1;font-size:12px;padding:7px">重启应用</button>
+        <div class="right-card" style="flex-direction:column">
+          <div class="sys-title">系统控制</div>
+          <div class="sys-row"><button class="btn btn-red" id="btnSystem" style="flex:1">关闭系统</button><button class="btn btn-blue" id="btnReboot" style="flex:1;padding:7px">重启应用</button></div>
         </div>
       </div>
-      <div class="sys-card" id="backtrackCard" style="flex:1;overflow:hidden">
-        <div class="sys-title">数据回溯</div>
-        <div class="sys-row">
-          <span class="sys-label">回溯秒数</span>
-          <input type="number" id="backtrackSecs" value="5.0" step="0.5" min="0.1" max="30"
-                 style="width:60px;font-size:12px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px">
-        </div>
-        <div class="sys-row">
-          <span class="sys-label">摄像头</span>
-          <select id="backtrackCam" style="font-size:12px">
-            <option value="-1">全部</option>
-            <option value="0">相机1</option>
-            <option value="1">相机2</option>
-          </select>
-        </div>
-        <div class="sys-row">
-          <button class="btn btn-accent" id="btnBacktrack" style="flex:1;font-size:12px;padding:5px">回溯</button>
-          <button class="btn btn-cream" id="btnRefrBacktrack" style="flex:1;font-size:11px;padding:5px">刷新</button>
-        </div>
-        <div style="flex:1;overflow-y:auto;min-height:0;margin-top:4px">
-          <table class="video-table">
-            <thead><tr><th>文件名</th><th>时长</th><th>大小</th><th>操作</th></tr></thead>
-            <tbody id="backtrackBody"><tr><td colspan="4" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-    <div class="video-card">
-      <div class="video-header">
-        <span class="video-title">录像文件</span>
-        <span class="spacer"></span>
-        <button class="btn btn-cream" onclick="loadVideos()" style="font-size:11px;padding:4px 10px">刷新</button>
-      </div>
-      <div class="video-body">
-        <table class="video-table"><thead><tr><th>文件名</th><th>分辨率</th><th>时长</th><th>操作</th></tr></thead><tbody id="videoBody"></tbody></table>
-      </div>
+      <div style="flex:1"><div class="right-card" style="flex-direction:column;height:280px">
+        <div style="display:flex;align-items:center;justify-content:space-between"><div class="sys-title">录像管理</div><button class="btn btn-cream" onclick="loadVideos()" style="padding:4px 10px">刷新</button></div>
+        <div class="sys-row"><span class="sys-label" style="min-width:50px">相机1</span><select id="resSelect0" onchange="changeRes(0)" style="flex:1"><option value="1080">1080p</option><option value="720">720p</option></select><span class="sys-label" style="min-width:50px">相机2</span><select id="resSelect1" onchange="changeRes(1)" style="flex:1"><option value="1080">1080p</option><option value="720">720p</option></select></div>
+        <div style="flex:1;overflow-y:auto;min-height:0;margin-top:4px"><table class="video-table"><thead><tr><th>文件名</th><th>分辨率</th><th>时长</th><th>操作</th></tr></thead><tbody id="videoBody"></tbody></table></div>
+      </div></div>
     </div>
   </div>
 </div>
@@ -298,7 +259,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 <script>
 // ===== Theme =====
 (function(){
-  const themes=['default','red','blue'];
+  const themes=['default','red','blue','gray','violet'];
   const saved=localStorage.getItem('theme')||'default';
   if(saved!=='default') document.documentElement.setAttribute('data-theme',saved);
   document.getElementById('themeBtn').addEventListener('click',function(){
@@ -314,7 +275,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
 let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
-let trackingTargets=[],hlsPlayer=[null,null],hlsInstance=[null,null];
+let trackingTargets=[],trackingClusters=[],radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
 function connectWS(){
@@ -325,7 +286,7 @@ function handleWS(msg){switch(msg.type){case'status':updateUI(msg.data);break;ca
 
 // ===== REST =====
 async function api(m,p,b){try{const r=await fetch('/api/v1'+p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):m==='GET'?undefined:'{}'});const j=await r.json();if(!j.ok)toast(j.error||'操作失败');return j}catch(e){toast('网络错误');return{ok:!1}}}
-function toast(msg){if(!msg)return;const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500)}
+function toast(msg){if(!msg)return;const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),4000)}
 
 // ===== UI Update =====
 function updateUI(data){
@@ -352,27 +313,25 @@ function updateUI(data){
     const sd=document.getElementById('statusDot'+i);
     const st=document.getElementById('statusText'+i);
     if(cam[i].paused){sd.className='cam-status-dot';sd.style.background='var(--yellow)';st.textContent='已暂停'}
-    else if(cam[i].recording){sd.className='cam-status-dot on';st.textContent='录像中'}
+    else if(cam[i].recording){sd.className='cam-status-dot on';const e=cam[i].recordingElapsedSec;st.textContent='● REC '+cam[i].recordResolution+'p '+String(Math.floor(e/3600)).padStart(2,'0')+':'+String(Math.floor(e%3600/60)).padStart(2,'0')+':'+String(e%60).padStart(2,'0')}
     else if(cam[i].streaming){sd.className='cam-status-dot on';st.textContent='推流中'}
     else if(cam[i].previewActive){sd.className='cam-status-dot on';st.textContent='运行中'}
     else{sd.className='cam-status-dot off';st.textContent='待机'}
 
-    // Video
     if(cam[i].streaming&&!hlsPlayer[i])startHls(i);
     if(!cam[i].streaming&&hlsPlayer[i])stopHls(i);
-
-    // Recording label
-    if(cam[i].recording){const e=cam[i].recordingElapsedSec;document.getElementById('recLabel').textContent='● REC 相机'+(i+1)+' '+cam[i].recordResolution+'p  '+String(Math.floor(e/3600)).padStart(2,'0')+':'+String(Math.floor(e%3600/60)).padStart(2,'0')+':'+String(e%60).padStart(2,'0')}
   }
-  if(!cam[0].recording&&!cam[1].recording)document.getElementById('recLabel').textContent='';
 
   // System button
   const anyActive=cam[0].previewActive||cam[1].previewActive;
   const btnSys=document.getElementById('btnSystem');btnSys.textContent=anyActive?'关闭系统':'启动系统';btnSys.className=anyActive?'btn btn-red':'btn btn-off';
 
   // Fusion
-  if(data.fusionEnabled!==undefined){fusionEnabled=data.fusionEnabled;const bf=document.getElementById('btnFusionToggle');bf.textContent=fusionEnabled?'停止融合':'启用融合';bf.className='btn '+(fusionEnabled?'btn-on':'btn-off');bf.style.fontSize='12px';bf.style.padding='5px 14px';document.getElementById('fusionHdrStatus').textContent=fusionEnabled?'运行中':'关闭'}
-  if(data.trackingTargets){trackingTargets=data.trackingTargets;updateFusionStatus();drawRadar()}
+  if(data.fusionEnabled!==undefined){fusionEnabled=data.fusionEnabled;const bf=document.getElementById('btnFusionToggle');bf.textContent=fusionEnabled?'停止融合':'启用融合';bf.className='btn '+(fusionEnabled?'btn-on':'btn-off');bf.style.padding='5px 14px';document.getElementById('fusionHdrStatus').textContent=fusionEnabled?'运行中':'关闭'}
+  if(data.radarRangeMeters!==undefined){radarRange=data.radarRangeMeters;const el=document.getElementById('fp_radarRangeMeters');if(el)el.value=data.radarRangeMeters}
+  if(data.trackingTargets){trackingTargets=data.trackingTargets;updateFusionStatus()}
+  if(data.clusters&&data.clusters.length>0){trackingClusters=data.clusters}
+  if(data.trackingTargets||data.clusters)drawRadar()
 
   // Backtrack state (Qt → Web sync, only when web user hasn't touched inputs)
   if(data.backtrack && !btrDirty){
@@ -391,7 +350,7 @@ function updateUI(data){
     loadFusionConfig();
   }
 }
-function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus();drawRadar()}}
+function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus()}if(data.clusters&&data.clusters.length>0){trackingClusters=data.clusters}drawRadar()}
 function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''}
 
 // ===== Buttons =====
@@ -410,53 +369,57 @@ async function toggleLidarOsd(i){await api('POST','/cam/'+i+'/lidar-osd/'+(cam[i
 function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('camVideo'+i),ph=document.getElementById('camPlaceholder'+i);const iframe=document.createElement('iframe');iframe.src='http://'+location.hostname+':8889/live/cam'+i+'/';iframe.allow='autoplay';iframe.style.width='100%';iframe.style.height='100%';iframe.style.border='none';pane.appendChild(iframe);hlsPlayer[i]=iframe;if(ph)ph.style.display='none'}function stopHls(i){if(hlsPlayer[i]){hlsPlayer[i].remove();hlsPlayer[i]=null}document.getElementById('camPlaceholder'+i).style.display=''}
 
 // ===== Fusion =====
-document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop')}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
-function updateFusionStatus(){const c=trackingTargets.filter(t=>t.state==='Confirmed').length,w=trackingTargets.filter(t=>t.warningActive).length;document.getElementById('fusionHdrStatus').textContent='目标:'+trackingTargets.length+' 确认:'+c+' 告警:'+w+' | '+(fusionEnabled?'运行中':'关闭')}
+document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop');fusionEnabled=!1;trackingTargets=[];trackingClusters=[];updateFusionStatus();drawRadar()}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
+function updateFusionStatus(){const f=trackingTargets.filter(t=>t.state==='FusionTracking').length,p=trackingTargets.filter(t=>t.state==='PureRadarTracking').length,l=trackingTargets.filter(t=>t.state==='Lost').length,w=trackingTargets.filter(t=>t.warningActive).length;document.getElementById('fusionHdrStatus').textContent='目标:'+trackingTargets.length+' 融合:'+f+' 纯雷达:'+p+' 丢失:'+l+' 告警:'+w+' | '+(fusionEnabled?'运行中':'关闭')}
 
 // ===== Radar =====
-function initCanvas(){const wrap=document.getElementById('fusionCanvasWrap'),canvas=document.getElementById('fusionCanvas'),w=wrap.clientWidth,h=wrap.clientHeight,size=Math.min(w,h)-20;canvas.width=Math.max(size,400);canvas.height=Math.max(size,400);canvas.style.width=size+'px';canvas.style.height=size+'px'}
+function initCanvas(){const wrap=document.getElementById('fusionCanvasWrap'),canvas=document.getElementById('fusionCanvas'),w=wrap.clientWidth,h=wrap.clientHeight,size=Math.min(w,h)-20;canvas.width=Math.max(size,400);canvas.height=Math.max(size,400);canvas.style.width=size+'px';canvas.style.height=size+'px';drawRadar()}
 function drawRadar(){
   const canvas=document.getElementById('fusionCanvas');if(!canvas)return;
-  const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,range=10,scale=Math.min(cx,cy)/range;
+  const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,range=radarRange||10,scale=Math.min(cx,cy)/range;
   ctx.clearRect(0,0,w,h);
+  if(!fusionEnabled){ctx.fillStyle='rgba(255,255,255,0.3)';ctx.font='30px Arial';ctx.textAlign='center';ctx.fillText('融合待启动',cx,cy);ctx.textAlign='start';return}
   ctx.imageSmoothingEnabled=!0;
   // Grid
-  [1,2,5,10,15,20].forEach(r=>{const rpx=r*scale;if(rpx>cx)return;ctx.beginPath();ctx.arc(cx,cy,rpx,0,Math.PI*2);ctx.strokeStyle='#2a2a4a';ctx.lineWidth=1;ctx.stroke();ctx.fillStyle='#4a4a6a';ctx.font='12px Arial';ctx.fillText(r+'m',cx+rpx-18,cy+4)});
+  let gridSteps=range<=5?[1,2,3,4,5]:range<=10?[2,4,6,8,10]:range<=20?[5,10,15,20]:[10,20,30,40];
+  gridSteps.forEach(r=>{const rpx=r*scale;if(rpx>cx-10)return;ctx.beginPath();ctx.arc(cx,cy,rpx,0,Math.PI*2);ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;ctx.stroke();ctx.fillStyle='rgba(255,255,255,0.4)';ctx.font='13px Arial';ctx.fillText(r+'m',cx+rpx-18,cy+4)});
   // Crosshair
   ctx.strokeStyle='#3a3a5a';ctx.setLineDash([4,8]);ctx.beginPath();ctx.moveTo(cx,0);ctx.lineTo(cx,h);ctx.stroke();ctx.beginPath();ctx.moveTo(0,cy);ctx.lineTo(w,cy);ctx.stroke();ctx.setLineDash([]);
   // Targets
-  trackingTargets.forEach(t=>{const px=cx+t.posY*scale,py=cy-t.posX*scale;if(px<0||px>w||py<0||py>h)return;let fill,border;switch(t.state){case'Confirmed':fill='#3fb950';border='#2ea043';break;case'Tentative':fill='#d29922';border='#b08800';break;default:fill='#8b949e';border='#6e7681'}if(t.warningActive){ctx.beginPath();ctx.arc(px,py,12+4*Math.sin(Date.now()/200),0,Math.PI*2);ctx.strokeStyle='rgba(218,54,51,0.6)';ctx.lineWidth=2;ctx.stroke()}ctx.beginPath();ctx.arc(px,py,7,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=border;ctx.lineWidth=1.5;ctx.stroke();if(Math.abs(t.velX)>0.01||Math.abs(t.velY)>0.01){const speed=Math.sqrt(t.velX*t.velX+t.velY*t.velY),len=Math.min(speed*8,22),vx=-t.velY/speed*len,vy=-t.velX/speed*len,ex=px+vx,ey=py+vy;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(ex,ey);ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.stroke();const a=Math.atan2(vy,vx);ctx.beginPath();ctx.moveTo(ex,ey);ctx.lineTo(ex-6*Math.cos(a-0.5),ey-6*Math.sin(a-0.5));ctx.lineTo(ex-6*Math.cos(a+0.5),ey-6*Math.sin(a+0.5));ctx.closePath();ctx.fillStyle='rgba(255,255,255,0.8)';ctx.fill()}ctx.fillStyle='#fff';ctx.font='bold 12px Arial';ctx.fillText(t.id,px+9,py-4);ctx.fillText(t.distanceMeters.toFixed(1)+'m',px+9,py+8)});
+  trackingTargets.forEach(t=>{const px=cx+t.posY*scale,py=cy-t.posX*scale;if(px<0||px>w||py<0||py>h)return;let fill,border;switch(t.state){case'FusionTracking':fill='#3fb950';border='#2ea043';break;case'PureRadarTracking':fill='#d29922';border='#b08800';break;case'Tentative':fill='#4493f8';border='#3572c8';break;case'Lost':fill='#da3633';border='#b02624';break;default:fill='#8b949e';border='#6e7681'}if(t.warningActive){ctx.beginPath();ctx.arc(px,py,12+4*Math.sin(Date.now()/200),0,Math.PI*2);ctx.strokeStyle='rgba(218,54,51,0.6)';ctx.lineWidth=2;ctx.stroke()}ctx.beginPath();ctx.arc(px,py,7,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=border;ctx.lineWidth=1.5;ctx.stroke();if(Math.abs(t.velX)>0.01||Math.abs(t.velY)>0.01){const speed=Math.sqrt(t.velX*t.velX+t.velY*t.velY),len=Math.min(speed*8,22),vx=-t.velY/speed*len,vy=-t.velX/speed*len,ex=px+vx,ey=py+vy;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(ex,ey);ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.stroke();const a=Math.atan2(vy,vx);ctx.beginPath();ctx.moveTo(ex,ey);ctx.lineTo(ex-6*Math.cos(a-0.5),ey-6*Math.sin(a-0.5));ctx.lineTo(ex-6*Math.cos(a+0.5),ey-6*Math.sin(a+0.5));ctx.closePath();ctx.fillStyle='rgba(255,255,255,0.8)';ctx.fill()}ctx.fillStyle='#fff';ctx.font='bold 13px Arial';ctx.fillText(t.id,px+9,py-4);ctx.fillText(t.distanceMeters.toFixed(1)+'m',px+9,py+8)});
+  // Cluster circles
+  if(trackingClusters&&trackingClusters.length>0){trackingClusters.forEach(c=>{const cpx=cx+c.cy*scale,cpy=cy-c.cx*scale,cr=c.radius*scale;if(cpx<0||cpx>w||cpy<0||cpy>h)return;const a=0.25;if(c.isOrphan){ctx.fillStyle='rgba(68,147,248,'+a+')';ctx.strokeStyle='rgba(68,147,248,0.5)'}else{ctx.fillStyle='rgba(63,185,80,'+a+')';ctx.strokeStyle='rgba(63,185,80,0.5)'}ctx.beginPath();ctx.arc(cpx,cpy,Math.min(cr,60),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='rgba(255,255,255,0.6)';ctx.font='11px Arial';ctx.fillText(c.pointCount,cpx+cr+2,cpy+3)})}
   // Legend
-  const lx=w-125,ly=h-65;ctx.fillStyle='rgba(26,26,46,0.88)';ctx.beginPath();ctx.roundRect(lx-5,ly-5,130,70,6);ctx.fill();[['已确认','#3fb950'],['待确认','#d29922'],['滑行中','#8b949e'],['告警','#da3633']].forEach(([l,c],i)=>{const y=ly+i*16;ctx.beginPath();ctx.arc(lx+4,y+4,4,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();ctx.fillStyle='#e6edf3';ctx.font='12px Arial';ctx.fillText(l,lx+14,y+7)})
+  const lx=w-125,ly=h-65;ctx.fillStyle='rgba(26,26,46,0.88)';ctx.beginPath();ctx.roundRect(lx-5,ly-5,130,70,6);ctx.fill();[['视觉雷达融合','#3fb950'],['纯雷达跟踪','#d29922'],['待确认','#4493f8'],['跟踪丢失中','#da3633']].forEach(([l,c],i)=>{const y=ly+i*16;ctx.beginPath();ctx.arc(lx+4,y+4,4,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();ctx.fillStyle='#e6edf3';ctx.font='13px Arial';ctx.fillText(l,lx+14,y+7)})
 }
 
 // ===== Fusion Params =====
 function buildFusionParams(){
   const c=document.getElementById('fusionParams');
-  const trackerParams=[['clusterEpsMeters','聚类半径','m','DBSCAN 聚类算法的邻域半径'],['alpha','Alpha','','alpha-beta 滤波器的位置增益'],['beta','Beta','','alpha-beta 滤波器的速度增益'],['maxAssociationDistMeters','关联距离','m','数据关联的最大门限距离'],['minHitsToConfirm','确认命中','','航迹从待确认转为已确认所需最小连续命中帧数'],['maxCoastingFrames','滑行帧数','','目标丢失后保持预测的最大帧数'],['maxTracks','最大航迹','','同时跟踪的最大目标数'],['warningEnterDistMeters','告警进入','m','目标进入此距离范围触发告警'],['warningExitDistMeters','告警退出','m','目标退出此距离范围解除告警']];
+  const trackerParams=[['dbscanEpsMeters','DBSCAN半径','m','DBSCAN聚类算法的邻域半径'],['dbscanMinPoints','最小点数','','DBSCAN聚类所需的最小点数'],['maxClusterDistanceMeters','最大距离','m','簇质心到LiDAR原点的最大距离'],['clusterPersistenceFrames','持久帧数','','簇需连续出现几帧后才输出为detection'],['bboxClaimMaxPixelDist','bbox认领像素','px','簇投影离bbox边缘的最大像素距离'],['minBboxClaimPoints','认领最小点数','','bbox只认领点数>=此值的簇'],['alpha','Alpha','','alpha-beta滤波器的位置增益'],['beta','Beta','','alpha-beta滤波器的速度增益'],['bboxAssocMaxDistMeters','关联门限','m','检测与航迹关联的硬门限'],['orphanAssocMaxDistMeters','孤儿门限','m','孤儿检测关联硬门限'],['minHitsToConfirm','确认帧数','','Tentative→FusionTracking所需连续命中帧数'],['maxLostFrames','丢失帧数','','Lost状态最大存活帧数'],['maxTracks','最大航迹','','同时跟踪的最大目标数'],['warningEnterDistMeters','告警进入','m','目标进入此距离触发告警'],['warningExitDistMeters','告警退出','m','目标退出此距离解除告警'],['radarRangeMeters','雷达范围','m','俯视图显示范围']];
   let h='<div class="param-title">跟踪器参数</div>';
   trackerParams.forEach(([k,n,u,desc])=>{h+='<div class="param-row"><span class="param-name">'+n+'</span><input class="param-input" id="fp_'+k+'" type="number" step="any"><span class="param-unit">'+u+'</span><span class="param-help" onclick="toggleHelp(\'h_'+k+'\')">?</span></div><div class="param-desc" id="h_'+k+'" style="display:none">'+desc+'</div>'});
   [0,1].forEach(i=>{h+='<div class="param-title">相机'+(i+1)+' 内参</div>';['fx','fy','cx','cy'].forEach(f=>{h+='<div class="param-row"><span class="param-name">'+f.toUpperCase()+'</span><input class="param-input" id="fp_cam'+i+'_'+f+'" type="number" step="any"></div>'})});
-  h+='<button class="btn btn-accent" onclick="saveFusionConfig()" style="width:100%;margin-top:8px;font-size:11px;padding:5px">保存参数</button>';
-  h+='<button class="btn btn-cream" onclick="alert(\'● 已确认 — 目标连续命中达到确认帧数，跟踪稳定可靠\\n\\n● 待确认 — 目标刚出现或命中帧数不足，处于试探性跟踪阶段\\n\\n● 滑行中 — 目标短暂丢失后靠速度预测维持，未观测到新数据\\n\\n● 告警 — 目标进入设定的告警距离范围，触发碰撞预警\')" style="width:100%;margin-top:4px;font-size:11px;padding:4px">? 图例说明</button>';
+  h+='<button class="btn btn-accent" onclick="saveFusionConfig()" style="width:100%;margin-top:8px;padding:5px">保存参数</button>';
+  h+='<button class="btn btn-cream" onclick="toast(\'● 视觉雷达融合(绿)=YOLO+LiDAR共同确认 ● 纯雷达跟踪(黄)=YOLO丢失LiDAR续命 ● 待确认(蓝)=命中帧数不足 ● 跟踪丢失中(红)=仅靠预测维持\')" style="width:100%;margin-top:4px;padding:4px">? 图例说明</button>';
   c.innerHTML=h
 }
 let helpTimer=null;
 function toggleHelp(id){const el=document.getElementById(id);if(!el)return;if(helpTimer)clearTimeout(helpTimer);if(el.style.display==='none'||!el.style.display){el.style.display='block';helpTimer=setTimeout(()=>{el.style.display='none'},4000)}else{el.style.display='none'}}
 async function loadFusionConfig(){
   const d=await api('GET','/fusion/config');if(!d||!d.ok)return;
-  ['clusterEpsMeters','alpha','beta','maxAssociationDistMeters','minHitsToConfirm','maxCoastingFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters'].forEach(k=>{const el=document.getElementById('fp_'+k);if(el&&d[k]!==undefined)el.value=Number(d[k]).toFixed(3)});
+  ['dbscanEpsMeters','dbscanMinPoints','maxClusterDistanceMeters','clusterPersistenceFrames','bboxClaimMaxPixelDist','minBboxClaimPoints','alpha','beta','bboxAssocMaxDistMeters','orphanAssocMaxDistMeters','minHitsToConfirm','maxLostFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters','radarRangeMeters'].forEach(k=>{const el=document.getElementById('fp_'+k);if(el&&d[k]!==undefined){el.value=Number(d[k]).toFixed(3)}});
   for(let i=0;i<2;i++){const cd=d['cam'+i];if(!cd)continue;['fx','fy','cx','cy'].forEach(f=>{const el=document.getElementById('fp_cam'+i+'_'+f);if(el&&cd[f]!==undefined)el.value=Number(cd[f]).toFixed(1)})}
 }
 async function saveFusionConfig(){
   fusionCfgDirty=true;
-  const cfg={};['clusterEpsMeters','alpha','beta','maxAssociationDistMeters','minHitsToConfirm','maxCoastingFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters'].forEach(k=>{const el=document.getElementById('fp_'+k);if(el)cfg[k]=parseFloat(el.value)||0});await api('POST','/fusion/config',cfg);
+  const cfg={};['dbscanEpsMeters','dbscanMinPoints','maxClusterDistanceMeters','clusterPersistenceFrames','bboxClaimMaxPixelDist','minBboxClaimPoints','alpha','beta','bboxAssocMaxDistMeters','orphanAssocMaxDistMeters','minHitsToConfirm','maxLostFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters','radarRangeMeters'].forEach(k=>{const el=document.getElementById('fp_'+k);if(el){cfg[k]=parseFloat(el.value)||0}});await api('POST','/fusion/config',cfg);
   for(let i=0;i<2;i++){const intr={};['fx','fy','cx','cy'].forEach(f=>{const el=document.getElementById('fp_cam'+i+'_'+f);if(el)intr[f]=parseFloat(el.value)||0});await api('POST','/fusion/camera/'+i+'/intrinsics',intr)};toast('参数已保存');
   fusionCfgDirty=false;
 }
 
 // ===== Videos =====
-async function loadVideos(){const d=await api('GET','/videos');const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
+async function loadVideos(){const d=await api('GET','/videos');const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.slice(-30).forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
 function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
 function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.pause();video.src='';overlay.classList.remove('show')}
 async function delVideo(p){if(confirm('确认删除?')){await api('DELETE','/videos',{path:decodeURIComponent(p)});loadVideos()}}
@@ -481,7 +444,7 @@ async function loadBacktrackFiles() {
         tb.innerHTML = '<tr><td colspan="4" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr>';
         return;
     }
-    d.files.forEach(v => {
+    d.files.slice(-30).forEach(v => {
         const tr = document.createElement('tr');
         const sizeKB = v.size ? (v.size / 1024).toFixed(1) + ' KB' : '--';
         const dur = v.duration || '--:--';
