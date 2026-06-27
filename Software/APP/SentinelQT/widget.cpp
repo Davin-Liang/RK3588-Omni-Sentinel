@@ -213,9 +213,6 @@ Widget::Widget(QWidget *parent)
     , virtualKeyboard_(nullptr)
     , fusionCamCount_(1)
     , eisReader_(nullptr), eisStabilizer_(nullptr)
-    , eisFocalX_{1200.0f, 1200.0f}, eisFocalY_{1200.0f, 1200.0f}
-    , eisAxisSignX_{1.0f, 1.0f}, eisAxisSignY_{1.0f, 1.0f}
-    , eisMaxOffsetPixel_(200), eisHalfWindowMs_(20)
 {
     instance_ = this;
     ui->setupUi(this);
@@ -491,22 +488,26 @@ void Widget::load_config_()
     backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
     nvmeDevicePath_ = config_.value("Backtrack/nvmeDevice", "/dev/nvme0n1").toString();
 
-    // EIS 防抖配置
+    // EIS 防抖配置（参数化版本：每路相机独立 EisCameraConfig）
     {
         bool eisCfgEnabled = config_.value("EIS/enabled", false).toBool();
-        float eisSampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
-        int eisGyroRange = config_.value("EIS/gyroRange", 0).toInt();
-        int eisAccelRange = config_.value("EIS/accelRange", 0).toInt();
-        eisHalfWindowMs_ = config_.value("EIS/halfWindowMs", 20).toUInt();
-        eisMaxOffsetPixel_ = config_.value("EIS/maxOffsetPixel", 200).toInt();
-        eisFocalX_[0] = config_.value("EIS/Cam0FocalX", 1200.0f).toFloat();
-        eisFocalY_[0] = config_.value("EIS/Cam0FocalY", 1200.0f).toFloat();
-        eisAxisSignX_[0] = config_.value("EIS/Cam0AxisSignX", 1.0f).toFloat();
-        eisAxisSignY_[0] = config_.value("EIS/Cam0AxisSignY", 1.0f).toFloat();
-        eisFocalX_[1] = config_.value("EIS/Cam1FocalX", 1200.0f).toFloat();
-        eisFocalY_[1] = config_.value("EIS/Cam1FocalY", 1200.0f).toFloat();
-        eisAxisSignX_[1] = config_.value("EIS/Cam1AxisSignX", 1.0f).toFloat();
-        eisAxisSignY_[1] = config_.value("EIS/Cam1AxisSignY", 1.0f).toFloat();
+
+        for (int c = 0; c < 2; ++c) {
+            QString prefix = QString("EIS/Cam%1").arg(c);
+            eisCamCfg_[c].camId = c;
+            eisCamCfg_[c].focalX = config_.value(prefix + "FocalX", 1200.0f).toFloat();
+            eisCamCfg_[c].focalY = config_.value(prefix + "FocalY", 1200.0f).toFloat();
+            eisCamCfg_[c].signX = config_.value(prefix + "AxisSignX", -1.0f).toFloat();
+            eisCamCfg_[c].signY = config_.value(prefix + "AxisSignY", 1.0f).toFloat();
+            eisCamCfg_[c].swapXY = config_.value(prefix + "SwapXY", false).toBool();
+            eisCamCfg_[c].timeOffsetMs = config_.value(prefix + "TimeOffsetMs", 0.0f).toFloat();
+            eisCamCfg_[c].frameRate = config_.value(prefix + "FrameRate", 30.0f).toFloat();
+            eisCamCfg_[c].halfWindowMs = config_.value(prefix + "HalfWindowMs", 20).toUInt();
+            eisCamCfg_[c].maxOffsetPixel = config_.value(prefix + "MaxOffsetPixel", 200).toInt();
+            eisCamCfg_[c].enableSmoothing = config_.value(prefix + "EnableSmoothing", true).toBool();
+            eisCamCfg_[c].smoothingAlpha = config_.value(prefix + "SmoothAlpha", 0.4f).toFloat();
+        }
+
         if (eisCfgEnabled) {
             init_eis_();
         }
@@ -2207,9 +2208,14 @@ void Widget::init_eis_()
 
     std::string devPath = config_.value("EIS/device",
         "/dev/icm45686").toString().toStdString();
-    float sampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
-    int gyroRange = config_.value("EIS/gyroRange", 0).toInt();
-    int accelRange = config_.value("EIS/accelRange", 0).toInt();
+
+    // 构建 ImuConfig
+    ImuConfig imuCfg;
+    imuCfg.sampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
+    imuCfg.gyroRange = static_cast<uint8_t>(config_.value("EIS/gyroRange", 0).toInt());
+    imuCfg.accelRange = static_cast<uint8_t>(config_.value("EIS/accelRange", 0).toInt());
+    imuCfg.biasCalibMs = config_.value("EIS/biasCalibMs", 1000).toUInt();
+    imuCfg.enableGyroBiasCalib = config_.value("EIS/enableGyroBiasCalib", false).toBool();
 
     eisReader_ = new Icm45686Reader(512);
     if (!eisReader_->openDevice(devPath)) {
@@ -2220,10 +2226,20 @@ void Widget::init_eis_()
         return;
     }
 
-    eisReader_->setAccelRange(static_cast<uint8_t>(accelRange));
-    eisReader_->setGyroRange(static_cast<uint8_t>(gyroRange));
+    if (imuCfg.enableGyroBiasCalib) {
+        fprintf(stderr, "[SentinelQT] EIS: gyro bias calibrating for %u ms...\n",
+                imuCfg.biasCalibMs);
+    }
+    if (!eisReader_->configure(imuCfg)) {
+        fprintf(stderr, "[SentinelQT] EIS: IMU configure failed\n");
+        eisReader_->closeDevice();
+        delete eisReader_;
+        eisReader_ = nullptr;
+        set_status_("EIS IMU配置失败!", "#f85149");
+        return;
+    }
 
-    if (!eisReader_->start(sampleHz)) {
+    if (!eisReader_->start()) {
         fprintf(stderr, "[SentinelQT] EIS: IMU reader thread start failed\n");
         eisReader_->closeDevice();
         delete eisReader_;
@@ -2234,28 +2250,25 @@ void Widget::init_eis_()
 
     eisStabilizer_ = new EisStabilizer();
     eisStabilizer_->bindReader(eisReader_);
-    eisStabilizer_->setAxisSign(1.0f, 1.0f);
-    eisStabilizer_->setMaxOffset(eisMaxOffsetPixel_);
 
     visioner_->set_eis_offset_callback(
         [this](uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY) -> bool {
             return eis_offset_callback_(timestampUs, camNum, offsetX, offsetY);
         });
 
-    // 配置 EIS 参数（从 config.ini [EIS] 节读取）
+    // 配置 streamer EIS 裁切边距 + 禁用 visioner 侧 EMA（平滑已移至 Stabilizer 内部）
     {
         int streamerMargin = config_.value("EIS/streamerMargin", 32).toInt();
-        float smoothAlpha = config_.value("EIS/smoothAlpha", 0.7f).toFloat();
         for (int c = 0; c < 2; ++c) {
             streamer_->set_eis_params(c, streamerMargin);
         }
-        visioner_->set_eis_smooth_alpha(smoothAlpha);
-        fprintf(stderr, "[SentinelQT] EIS params: margin=%d smoothAlpha=%.2f\n",
-                streamerMargin, static_cast<double>(smoothAlpha));
+        visioner_->set_eis_smooth_alpha(1.0f);
+        fprintf(stderr, "[SentinelQT] EIS params: margin=%d (visioner EMA disabled, handled by Stabilizer)\n",
+                streamerMargin);
     }
 
     fprintf(stderr, "[SentinelQT] EIS initialized: %s @ %.0f Hz\n",
-            devPath.c_str(), (double)sampleHz);
+            devPath.c_str(), static_cast<double>(imuCfg.sampleHz));
 }
 
 void Widget::deinit_eis_()
@@ -2300,13 +2313,17 @@ bool Widget::eis_offset_callback_(uint64_t timestampUs, int camNum,
     uint64_t timestampNs = timestampUs * 1000ULL;
 
     bool ok = eisStabilizer_->calculate_eis_offset(
-        eisFocalX_[camNum], eisFocalY_[camNum],
-        timestampNs, eisHalfWindowMs_,
-        offsetX, offsetY);
+        eisCamCfg_[camNum], timestampNs, offsetX, offsetY);
 
-    if (ok) {
-        offsetX = static_cast<int32_t>(offsetX * eisAxisSignX_[camNum]);
-        offsetY = static_cast<int32_t>(offsetY * eisAxisSignY_[camNum]);
+    // 每 30 帧打印一次 offset，方便确认 EIS 是否生效
+    {
+        static int cnt[2] = {0, 0};
+        if (++cnt[camNum] % 30 == 0) {
+            fprintf(stderr, "[EIS] cam%d offset=(%d,%d) ok=%d used=%zu cost=%.3fms\n",
+                    camNum, offsetX, offsetY, ok ? 1 : 0,
+                    eisStabilizer_->lastUsedSamples(),
+                    eisStabilizer_->lastCostMs());
+        }
     }
 
     return ok;
@@ -2327,6 +2344,7 @@ void Widget::on_btn_eis_(int camNum)
     eisEnabled_[camNum] = !eisEnabled_[camNum];
 
     if (eisEnabled_[camNum]) {
+        eisStabilizer_->resetSmoothing(camNum);
         btn->setText(QString::fromUtf8("防抖开"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "

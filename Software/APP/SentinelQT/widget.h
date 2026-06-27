@@ -12,8 +12,8 @@
 
 #include "lidar_camera_fusion.h"
 
-class Icm45686Reader;
-class EisStabilizer;
+#include "imu_eis.hpp"
+
 class SentinelVisioner;
 class SentinelStreamer;
 class SentinelLslidarer;
@@ -144,12 +144,7 @@ private:
     // ---- EIS ----
     Icm45686Reader*     eisReader_ = nullptr;
     EisStabilizer*      eisStabilizer_ = nullptr;
-    float               eisFocalX_[2];
-    float               eisFocalY_[2];
-    float               eisAxisSignX_[2];
-    float               eisAxisSignY_[2];
-    int32_t             eisMaxOffsetPixel_;
-    uint32_t            eisHalfWindowMs_;
+    EisCameraConfig     eisCamCfg_[2];
 
     void load_config_();
     void init_eis_();
