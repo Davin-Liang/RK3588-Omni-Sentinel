@@ -111,6 +111,19 @@ bool SentinelLslidarer::get_closest_frame(uint64_t cameraTsNs, LidarFrame& outFr
     return true;
 }
 
+bool SentinelLslidarer::get_latest_frame(LidarFrame& outFrame) {
+    if (!ringBuffer_) return false;
+
+    uint32_t writeIdx = ringBuffer_->write_index();
+    if (writeIdx == 0) return false;
+
+    uint32_t validCount = std::min(writeIdx, ringBuffer_->capacity());
+    if (validCount == 0) return false;
+
+    ringBuffer_->copy_slot(validCount - 1, outFrame);
+    return true;
+}
+
 uint32_t SentinelLslidarer::available_frames() const {
     if (!ringBuffer_) return 0;
     uint32_t writeIdx = ringBuffer_->write_index();

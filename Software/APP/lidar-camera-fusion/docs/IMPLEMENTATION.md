@@ -1,10 +1,14 @@
-# LidarCameraFusion — 技术实现文档
+# LidarCameraFusion — 技术实现文档 (v2)
 
 ## 1. 概述
 
-`LidarCameraFusion` 负责将 N10Plus 单线激光雷达点云与 YOLO 2D 检测框进行空间对齐（融合），并对融合后的目标进行多帧跟踪。融合阶段外参变换+内参投影将 LiDAR 点映射到相机图像平面，按 bbox 分类归属点。跟踪阶段对归属点做扫描顺序 CDC 聚类，通过 Alpha-Beta 滤波器估计位置/速度，贪心最近邻关联维持航迹 ID。
+`LidarCameraFusion` 负责将 N10Plus 单线激光雷达点云与 YOLO 2D 检测框进行空间对齐（融合），并对融合后的目标进行多帧跟踪。
+
+**v2 架构（当前）**: 融合阶段外参变换+内参投影将 LiDAR 点映射到相机图像平面。跟踪阶段对全点云做 **DBSCAN 2D 空间聚类** → **时间证据累积（帧间持久化确认）** → **评分制 bbox 认领** → Alpha-Beta 滤波 → **评分制贪心最近邻关联** → **5 状态生命周期管理**。
 
 YOLO 检测结果通过 `DetectionProvider` 回调（`std::function`）从外部注入，融合模块不直接依赖 NPU 推理组件。未设置回调时回退到内部假检测（测试用）。
+
+v2 相比 v1（CDC 角度链聚类 + 4 状态 + bboxIdx 门控）的关键升级见 `FUSION_PIPELINE.md`。
 
 ---
 

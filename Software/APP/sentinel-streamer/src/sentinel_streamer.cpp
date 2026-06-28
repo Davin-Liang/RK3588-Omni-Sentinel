@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <string>
 #include <thread>
 #include <atomic>
 
@@ -80,6 +81,11 @@ struct StreamerContext {
     // EIS 防抖参数
     int eisMargin;           ///< 裁切边距（像素），默认 32
 
+    // EIS 录制调试双输出
+    bool eisRecordDebug;                     ///< 默认 false
+    AVCodecContext* recordEncCtxNoEis;       ///< 第二路编码器（无防抖）
+    AVFormatContext* mp4CtxNoEis;            ///< 第二路 MP4（无防抖，_raw 后缀）
+
     StreamerContext()
         : camNum(-1)
         , visioner(nullptr)
@@ -99,6 +105,9 @@ struct StreamerContext {
         , mp4Ctx(nullptr)
         , recordPool(nullptr)
         , eisMargin(32)
+        , eisRecordDebug(false)
+        , recordEncCtxNoEis(nullptr)
+        , mp4CtxNoEis(nullptr)
     {
         streamUrl[0] = '\0';
     }
@@ -384,6 +393,27 @@ static void stream_thread_func_(StreamerContext* ctx)
         }
 
         // ----------------------------------------------------------------
+        // 步骤 2b: EIS 录制调试 — 第二路无 EIS 的 RGA 缩放（在 origBuf release 前完成）
+        // ----------------------------------------------------------------
+        DmaBuffer_t* scaleBufNoEis = nullptr;
+        bool needNoEisScale = ctx->eisRecordDebug &&
+                              ctx->recordEnabled.load(std::memory_order_acquire) &&
+                              ctx->recordResolution == RecordResolution::RES_720P &&
+                              !(origBuf->width == 1280 && origBuf->height == 720);
+
+        if (needNoEisScale) {
+            scaleBufNoEis = ctx->scale720pPool->get_buffer();
+            if (scaleBufNoEis) {
+                if (!rga_scale_nv12_to_720p(origBuf->dmaFd, origBuf->width, origBuf->height,
+                                             scaleBufNoEis->dmaFd,
+                                             0, 0, false, 0)) {  // eisActive=false
+                    ctx->scale720pPool->release_buffer(scaleBufNoEis);
+                    scaleBufNoEis = nullptr;
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------
         // 步骤 3: 录像 PTS 基准（首帧初始化，确保录像从 0 开始）
         // ----------------------------------------------------------------
         int64_t recPts = pts;
@@ -456,6 +486,19 @@ static void stream_thread_func_(StreamerContext* ctx)
                            scaleBuf->virtAddr, 1280, 720,
                            recPts,
                            nullptr, ctx->mp4Ctx);
+        }
+
+        // ----------------------------------------------------------------
+        // 步骤 5c: EIS 录制调试 — 无防抖第二路编码
+        // ----------------------------------------------------------------
+        if (scaleBufNoEis && ctx->recordEncCtxNoEis && ctx->mp4CtxNoEis) {
+            encode_and_mux(ctx->recordEncCtxNoEis,
+                           scaleBufNoEis->virtAddr, 1280, 720,
+                           recPts, nullptr, ctx->mp4CtxNoEis);
+        }
+
+        if (scaleBufNoEis) {
+            ctx->scale720pPool->release_buffer(scaleBufNoEis);
         }
 
         if (scaleBuf) {
@@ -761,6 +804,16 @@ void SentinelStreamer::set_eis_params(int camNum, int margin)
     fprintf(stderr, "[SentinelStreamer] cam=%d EIS margin=%d\n", camNum, margin);
 }
 
+void SentinelStreamer::set_eis_record_debug(int camNum, bool enabled)
+{
+    if (camNum < 0 || camNum > 1 || !contexts_[camNum]) return;
+
+    contexts_[camNum]->eisRecordDebug = enabled;
+
+    fprintf(stderr, "[SentinelStreamer] cam=%d EIS record debug: %s\n",
+            camNum, enabled ? "enabled (output _raw.mp4)" : "disabled");
+}
+
 // ---------------------------------------------------------------------------
 // 录像
 // ---------------------------------------------------------------------------
@@ -815,6 +868,26 @@ bool SentinelStreamer::start_record(int camNum, const char* filePath,
         return false;
     }
 
+    // EIS 录制调试：同时创建无防抖的第二路编码器和 MP4（文件名加 _raw 后缀）
+    if (resolution == RecordResolution::RES_720P && ctx->eisRecordDebug) {
+        std::string rawPathStr(filePath);
+        size_t dot = rawPathStr.rfind('.');
+        if (dot != std::string::npos)
+            rawPathStr.insert(dot, "_raw");
+        else
+            rawPathStr += "_raw";
+
+        if (!mpp_encoder_open(&ctx->recordEncCtxNoEis, recWidth, recHeight, recBitRate)) {
+            fprintf(stderr, "[SentinelStreamer] eis debug: second encoder failed\n");
+        } else if (!mp4_output_open(&ctx->mp4CtxNoEis, ctx->recordEncCtxNoEis,
+                                     rawPathStr.c_str())) {
+            mpp_encoder_close(&ctx->recordEncCtxNoEis);
+        } else {
+            fprintf(stderr, "[SentinelStreamer] eis debug: raw output → %s\n",
+                    rawPathStr.c_str());
+        }
+    }
+
     ctx->recordEnabled.store(true, std::memory_order_release);
     ctx->recordBaseSet = false;  // 由 stream 线程用首帧时间戳初始化
 
@@ -855,13 +928,17 @@ bool SentinelStreamer::stop_record(int camNum)
         }
         fprintf(stderr, "[SentinelStreamer] DEBUG: closing MP4...\n");
         mp4_output_close(&ctx->mp4Ctx);
+        mp4_output_close(&ctx->mp4CtxNoEis);
         mpp_encoder_close(&ctx->streamEncCtx);
         mpp_encoder_close(&ctx->recordEncCtx);
+        mpp_encoder_close(&ctx->recordEncCtxNoEis);
     } else {
         // 推流还在跑：只关录像的 MP4 和编码器，线程继续跑推流
         fprintf(stderr, "[SentinelStreamer] DEBUG: closing record MP4...\n");
         mp4_output_close(&ctx->mp4Ctx);
+        mp4_output_close(&ctx->mp4CtxNoEis);
         mpp_encoder_close(&ctx->recordEncCtx);
+        mpp_encoder_close(&ctx->recordEncCtxNoEis);
     }
 
     fprintf(stderr, "[SentinelStreamer] cam=%d recording stopped\n", camNum);

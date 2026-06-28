@@ -7,22 +7,12 @@
 #include "lidar_tracking_types.h"
 #include "lidar_camera_fusion.h"
 
-/**
- * @class LidarTargetTracker
- * @brief 多目标跟踪器（内部辅助类，由 LidarCameraFusion 持有）。
- *
- * 流水线：聚类 → Alpha-Beta 预测 → 贪心最近邻关联 → 校正 → 生命周期管理 → 告警检查。
- * 所有缓冲区在构造时预分配，运行时无堆分配。
- *
- * 线程安全：内部双缓冲（workingTracks_ + snapshotTracks_），
- *          update() 结束后加锁拷贝到 snapshotTracks_，
- *          copy_snapshot() 加锁从 snapshotTracks_ 读取。
- */
 class LidarTargetTracker {
 public:
     static constexpr uint32_t kMaxTracks      = 50;
     static constexpr uint32_t kMaxDetections  = 200;
     static constexpr uint32_t kMaxLidarPoints = 540;
+    static constexpr uint32_t kMaxClusters    = 32;
 
     LidarTargetTracker();
     ~LidarTargetTracker();
@@ -30,25 +20,10 @@ public:
     LidarTargetTracker(const LidarTargetTracker&) = delete;
     LidarTargetTracker& operator=(const LidarTargetTracker&) = delete;
 
-    /**
-     * @brief 配置跟踪器参数。
-     * @return true 参数合法并已应用，false 参数非法（保留旧配置）
-     */
     bool configure(const TrackerConfig& config);
-
-    /**
-     * @brief 重置所有跟踪状态（航迹清零，ID 重置）。
-     */
     void reset();
-
-    /**
-     * @brief 注册告警回调。
-     */
     void register_callback(TrackingCallback cb, void* userData);
 
-    /**
-     * @brief 执行一次跟踪更新。
-     */
     bool update(const FusionResult& fusionResult,
                 const LidarPoint* lidarPoints,
                 uint32_t pointCount,
@@ -56,13 +31,19 @@ public:
                 uint32_t bboxCount,
                 uint64_t timestampNs);
 
-    /**
-     * @brief 拷贝当前跟踪目标快照（线程安全）。
-     * @param outCount 输出实际拷贝数量
-     * @return true 成功
-     */
     bool copy_snapshot(TrackedTarget* out, uint32_t maxCount,
                        uint32_t* outCount) const;
+
+    /** @brief 拷贝聚类可视化数据（线程安全） */
+    bool copy_cluster_vis(ClusterVisData* out, uint32_t maxCount,
+                          uint32_t* outCount) const;
+
+    uint32_t get_detection_count() const { return detectionCount_; }
+
+    bool get_bbox_detection_centroid(uint32_t globalBboxIdx,
+                                     float& outX, float& outY) const;
+
+    void set_camera_configs(const CameraConfig* configs, uint32_t count);
 
 private:
     // ---- 内部结构 ----
@@ -73,13 +54,20 @@ private:
         float    avgIntensity;
         uint32_t pointCount;
         uint32_t bboxIdx;
-        bool     isOrphan;    ///< 来自 LiDAR 孤儿点聚类（非 bbox 归属）
+        bool     isOrphan;
     };
 
     struct ClusterInfo {
         uint32_t startIdx;
         uint32_t count;
         float    sumX, sumY, sumI;
+    };
+
+    struct ClusterRecord {
+        float    cx, cy, radius;
+        uint32_t pointCount;
+        uint32_t consecutiveFrames;
+        uint64_t lastLidarTs;
     };
 
     // ---- 配置与回调 ----
@@ -105,12 +93,35 @@ private:
     DetectionCandidate detections_[kMaxDetections];
     uint32_t           detectionCount_{0};
 
-    // ---- 聚类缓冲区 ----
+    // ---- DBSCAN 聚类缓冲区 ----
     float    clusterPointsX_[kMaxLidarPoints];
     float    clusterPointsY_[kMaxLidarPoints];
     uint32_t clusterPointIndices_[kMaxLidarPoints];
     int32_t  clusterAssignments_[kMaxLidarPoints];
-    bool     pointAssigned_[kMaxLidarPoints];     // 标记已被 bbox 认领的点
+    int32_t  seedStack_[kMaxLidarPoints];
+
+    // ---- 聚类中间数据 ----
+    float    clusterCentroidX_[kMaxClusters];
+    float    clusterCentroidY_[kMaxClusters];
+    float    clusterRadii_[kMaxClusters];
+    uint32_t clusterPointCounts_[kMaxClusters];
+    int32_t  clusterBboxMatch_[kMaxClusters];
+    float    clusterScore_[kMaxClusters];
+    bool     claimedByBbox_[kMaxClusters];
+    uint32_t bboxCluster_[50];
+    uint32_t rawClusterCount_{0};
+
+    // ---- 时间证据累积 ----
+    ClusterRecord clusterHistory_[kMaxClusters];
+    uint32_t      clusterHistoryCount_{0};
+
+    // ---- 聚类可视化 ----
+    ClusterVisData clusterVisBuf_[kMaxClusters];
+    uint32_t       clusterVisCount_{0};
+    mutable std::mutex clusterVisMutex_;
+
+    // ---- LiDAR 去重 ----
+    uint64_t lastLidarTimestampNs_{0};
 
     // ---- 关联缓冲区 ----
     int32_t trackMatches_[kMaxTracks];
@@ -118,19 +129,25 @@ private:
     bool    trackAssigned_[kMaxTracks];
     bool    detAssigned_[kMaxDetections];
 
+    // ---- 相机配置 ----
+    CameraConfig camCfg_[2];
+    uint32_t     camCfgCount_{0};
+
     // ---- 配置校验 ----
     bool validate_config_(const TrackerConfig& cfg) const;
 
-    // ---- 聚类 ----
-    void cluster_bbox_points_(const FusionResult& fusionResult,
-                              const LidarPoint* lidarPoints,
-                              uint32_t pointCount,
-                              const YoloBBox* bboxes,
-                              uint32_t bboxCount);
+    // ---- DBSCAN 聚类 ----
+    void dbscan_cluster_(const LidarPoint* lidarPoints,
+                         uint32_t pointCount,
+                         const YoloBBox* bboxes,
+                         uint32_t bboxCount);
 
-    void cluster_orphan_points_(const FusionResult& fusionResult,
-                                 const LidarPoint* lidarPoints,
-                                 uint32_t pointCount);
+    // ---- 时间证据累积 ----
+    void persist_clusters_();
+
+    // ---- Bbox 认领评分 ----
+    void bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount, uint32_t nc,
+                     ClusterInfo* clusters);
 
     // ---- 预测 ----
     void predict_tracks_(uint64_t timestampNs);

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libicm45686_eis_lib.a CMakeFiles/icm45686_eis_lib.dir/src/imu_eis.cpp.o
+/usr/bin/ranlib libicm45686_eis_lib.a

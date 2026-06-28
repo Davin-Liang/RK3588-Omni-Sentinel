@@ -2,6 +2,7 @@
 #include "lidar_target_tracker.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 // ============================================================================
@@ -30,6 +31,7 @@ bool LidarCameraFusion::start(SentinelLslidarer* lidar,
     for (uint32_t i = 0; i < camCount; ++i) {
         camConfigs_[i] = camConfigs[i];
     }
+    if (tracker_) tracker_->set_camera_configs(camConfigs_, camCount);
 
     running_ = true;
     fusionThread_ = std::thread(&LidarCameraFusion::fusion_thread_, this);
@@ -53,44 +55,103 @@ void LidarCameraFusion::fusion_thread_()
 
     uint64_t iterationCount = 0;
 
+    uint64_t lastLidarTs = 0;
+
     while (running_) {
-        // ---- 步骤 1：获取 YOLO 检测结果 ----
+        // ---- 步骤 1：先取雷达帧做去重检查 ----
+        LidarFrame frame;
+        frame.points = lidarPointsBuf_;
+        if (!lidar_->get_latest_frame(frame)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        if (frame.timestampNs == lastLidarTs) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        lastLidarTs = frame.timestampNs;
+
+        // ---- 步骤 2：新雷达帧到达，drain YOLO 队列取最新 ----
         for (uint32_t c = 0; c < camCount_; ++c) {
             if (detectionProvider_) {
-                if (!detectionProvider_(c, fakeDetections_[c], 33))
-                    fakeDetections_[c].clear();
+                std::vector<YoloBBox> latest;
+                std::vector<YoloBBox> tmp;
+                bool got = false;
+                while (detectionProvider_(c, tmp, 0)) {
+                    latest = std::move(tmp);
+                    tmp.clear();
+                    got = true;
+                }
+                if (got) fakeDetections_[c] = std::move(latest);
+                else fakeDetections_[c].clear();
             } else {
                 generate_fake_detections_(c);
             }
-            // 过滤：只保留 person (classId=0) 且置信度 >= 0.60
             auto& dets = fakeDetections_[c];
             dets.erase(std::remove_if(dets.begin(), dets.end(),
                 [](const YoloBBox& b) { return b.classId != 0 || b.confidence < 0.60f; }),
                 dets.end());
         }
 
-        // ---- 步骤 2：从检测结果中提取时间戳 ----
-        // 取第一个有数据的相机的首帧时间戳
+        // ---- 步骤 3：YOLO 时间对齐 ----
+        bool hasYolo = false;
+        uint32_t yoloBboxCount = 0;
         uint64_t tsNs = 0;
-        bool gotTs = false;
         for (uint32_t c = 0; c < camCount_; ++c) {
             if (!fakeDetections_[c].empty()) {
                 tsNs = fakeDetections_[c][0].timestampNs;
-                gotTs = true;
-                break;
+                hasYolo = true;
             }
+            yoloBboxCount += static_cast<uint32_t>(fakeDetections_[c].size());
         }
-        if (!gotTs) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
+        if (hasYolo) {
+            lidar_->get_closest_frame(tsNs, frame);
         }
 
-        // ---- 步骤 3：取最近雷达帧 ----
-        LidarFrame frame;
-        frame.points = lidarPointsBuf_;
-        if (!lidar_->get_closest_frame(tsNs, frame)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
+        // [LidarCalib] 点云投射打印（调试用）
+        if (true) {
+            fprintf(stderr, "[LidarCalib] all points (every 2nd):\n");
+            uint32_t statBoth = 0, statCam0 = 0, statCam1 = 0, statOut = 0;
+            for (uint32_t i = 0; i < frame.pointsCount; i += 2) {
+                bool in0 = false, in1 = false;
+                float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+
+                for (uint32_t cc = 0; cc < camCount_; ++cc) {
+                    float cx, cy, cz;
+                    transform_point_(lidarPointsBuf_[i].x, lidarPointsBuf_[i].y,
+                                      camConfigs_[cc].tLidarToCam, cx, cy, cz);
+                    if (cz <= 0.0f) continue;
+                    float u, v;
+                    project_point_(cx, cy, cz, camConfigs_[cc], u, v);
+                    bool in = (u >= 0 && u < camConfigs_[cc].imgWidth
+                               && v >= 0 && v < camConfigs_[cc].imgHeight);
+                    if (in && cc == 0) { in0 = true; u0 = u; v0 = v; }
+                    if (in && cc == 1) { in1 = true; u1 = u; v1 = v; }
+                }
+
+                float dist = std::sqrt(lidarPointsBuf_[i].x * lidarPointsBuf_[i].x
+                                     + lidarPointsBuf_[i].y * lidarPointsBuf_[i].y);
+
+                if (in0 && in1) {
+                    fprintf(stderr, "  [%u] lidar(%.3f,%.3f,%.2fm) cam0(%.0f,%.0f) cam1(%.0f,%.0f)\n",
+                            i, lidarPointsBuf_[i].x, lidarPointsBuf_[i].y, dist, u0, v0, u1, v1);
+                    ++statBoth;
+                } else if (in0) {
+                    fprintf(stderr, "  [%u] lidar(%.3f,%.3f,%.2fm) cam0(%.0f,%.0f) cam1(--,--)\n",
+                            i, lidarPointsBuf_[i].x, lidarPointsBuf_[i].y, dist, u0, v0);
+                    ++statCam0;
+                } else if (in1) {
+                    fprintf(stderr, "  [%u] lidar(%.3f,%.3f,%.2fm) cam0(--,--) cam1(%.0f,%.0f)\n",
+                            i, lidarPointsBuf_[i].x, lidarPointsBuf_[i].y, dist, u1, v1);
+                    ++statCam1;
+                } else {
+                    fprintf(stderr, "  [%u] lidar(%.3f,%.3f,%.2fm) OUT\n",
+                            i, lidarPointsBuf_[i].x, lidarPointsBuf_[i].y, dist);
+                    ++statOut;
+                }
+            }
+            fprintf(stderr, "[LidarCalib] both:%u cam0_only:%u cam1_only:%u out:%u\n",
+                    statBoth, statCam0, statCam1, statOut);
         }
 
         // ---- 步骤 4：累积融合 + 同步记录 bbox ----
@@ -111,7 +172,45 @@ void LidarCameraFusion::fusion_thread_()
             }
         }
 
-        // ---- 步骤 4.5：构建 LiDAR OSD 快照 ----
+        // ---- 步骤 4.5：目标跟踪 ----
+        if (trackingEnabled_ && tracker_) {
+            tracker_->update(result_, lidarPointsBuf_, frame.pointsCount,
+                             allBboxes, totalBboxes, frame.timestampNs);
+        }
+
+        // ---- 跟踪状态日志 ----
+        if (iterationCount % 5 == 0 && trackingEnabled_ && tracker_) {
+            uint32_t tcnt = 0, fCnt = 0, pCnt = 0, lCnt = 0, dCnt = 0;
+            TrackedTarget snap[10];
+            tracker_->copy_snapshot(snap, 10, &tcnt);
+            for (uint32_t ti = 0; ti < tcnt; ++ti) {
+                switch (snap[ti].state) {
+                case TrackState::FusionTracking:  ++fCnt; break;
+                case TrackState::PureRadarTracking: ++pCnt; break;
+                case TrackState::Tentative: ++dCnt; break;
+                case TrackState::Lost:  ++lCnt; break;
+                default: break;
+                }
+            }
+            fprintf(stderr, "[Fusion] #%lu yolo=%s bbox=%u det=%u pts=%u track=%u(F:%u P:%u L:%u T:%u)\n",
+                    (unsigned long)iterationCount,
+                    hasYolo ? "Y" : "N", yoloBboxCount,
+                    tracker_->get_detection_count(),
+                    frame.pointsCount,
+                    tcnt, fCnt, pCnt, lCnt, dCnt);
+            for (uint32_t ti = 0; ti < tcnt; ++ti) {
+                fprintf(stderr, "  #%u st=%d pos(%.2f,%.2f) dist=%.2fm hits=%u miss=%u age=%u\n",
+                        snap[ti].id,
+                        static_cast<int>(snap[ti].state),
+                        snap[ti].posX, snap[ti].posY,
+                        snap[ti].distanceMeters,
+                        snap[ti].consecutiveHits,
+                        snap[ti].consecutiveMisses,
+                        snap[ti].age);
+            }
+        }
+
+        // ---- 步骤 5：构建 LiDAR OSD 快照（含 tracker 聚类距离） ----
         for (uint32_t i = 0; i < frame.pointsCount; ++i) {
             lidarPointXBuf_[i] = lidarPointsBuf_[i].x;
             lidarPointYBuf_[i] = lidarPointsBuf_[i].y;
@@ -146,6 +245,14 @@ void LidarCameraFusion::fusion_thread_()
             cam.bboxPointCounts.assign(&bboxPointCountsBuf[globalBboxIdx],
                                         &bboxPointCountsBuf[globalBboxIdx + camBboxCount]);
 
+            if (iterationCount % 10 == 0) {
+                for (uint32_t b = 0; b < camBboxCount; ++b) {
+                    fprintf(stderr, "[OSD_pts] cam%u bbox[%u] %u points conf=%.2f\n",
+                            c, b, bboxPointCountsBuf[globalBboxIdx + b],
+                            fakeDetections_[c][b].confidence);
+                }
+            }
+
             uint32_t pointStart = bboxOffsets[globalBboxIdx];
             uint32_t pointEnd   = (globalBboxIdx + camBboxCount < result_.bboxCount)
                                     ? bboxOffsets[globalBboxIdx + camBboxCount]
@@ -162,18 +269,24 @@ void LidarCameraFusion::fusion_thread_()
             cam.lidarPointX.assign(lidarPointXBuf_, lidarPointXBuf_ + frame.pointsCount);
             cam.lidarPointY.assign(lidarPointYBuf_, lidarPointYBuf_ + frame.pointsCount);
 
+            // 复用 tracker 聚类质心距离
+            cam.bboxClusterDistMeters.resize(camBboxCount, 0.0f);
+            for (uint32_t b = 0; b < camBboxCount; ++b) {
+                float cx = 0, cy = 0;
+                bool ok = (trackingEnabled_ && tracker_
+                    && tracker_->get_bbox_detection_centroid(globalBboxIdx + b, cx, cy));
+                if (ok) {
+                    cam.bboxClusterDistMeters[b] = std::sqrt(cx * cx + cy * cy);
+                }
+                // [LidarOSD] 已注释
+            }
+
             globalBboxIdx += camBboxCount;
         }
 
         {
             std::lock_guard<std::mutex> lock(osdSnapshotMutex_);
             latestOsdSnapshot_ = std::move(snap);
-        }
-
-        // ---- 步骤 5：目标跟踪 ----
-        if (trackingEnabled_ && tracker_) {
-            tracker_->update(result_, lidarPointsBuf_, frame.pointsCount,
-                             allBboxes, totalBboxes, frame.timestampNs);
         }
 
         // ---- 步骤 6：输出结果 ----
@@ -208,9 +321,10 @@ void LidarCameraFusion::fusion_thread_()
                 for (uint32_t ti = 0; ti < tcount; ++ti) {
                     const char* stateStr = "?";
                     switch (snapshot[ti].state) {
-                    case TrackState::Tentative: stateStr = "Tentative"; break;
-                    case TrackState::Confirmed: stateStr = "Confirmed"; break;
-                    case TrackState::Coasting:  stateStr = "Coasting";  break;
+                    case TrackState::Tentative: stateStr = "T"; break;
+                    case TrackState::FusionTracking: stateStr = "F"; break;
+                    case TrackState::PureRadarTracking: stateStr = "P"; break;
+                    case TrackState::Lost:  stateStr = "L";  break;
                     case TrackState::Deleted:   stateStr = "Deleted";   break;
                     default: break;
                     }

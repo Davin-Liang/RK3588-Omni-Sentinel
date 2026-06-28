@@ -101,7 +101,7 @@ static void test_stationary_target(LidarCameraFusion& fusion, LidarPoint* points
 
     if (count >= 1) {
         const TrackedTarget& t = snapshot[0];
-        check(t.state == TrackState::Confirmed, "target confirmed");
+        check(t.state == TrackState::FusionTracking, "target confirmed");
         check(std::fabs(t.posX - 2.0f) < 0.3f, "posX near 2.0");
         check(std::fabs(t.posY - 5.0f) < 0.3f, "posY near 5.0");
         check(std::fabs(t.velX) < 0.5f, "velX near 0");
@@ -169,7 +169,7 @@ static void test_constant_velocity(LidarCameraFusion& fusion, LidarPoint* points
 
     if (count >= 1) {
         const TrackedTarget& t = snapshot[0];
-        check(t.state == TrackState::Confirmed, "target confirmed");
+        check(t.state == TrackState::FusionTracking, "target confirmed");
         check(std::fabs(t.velY - (-5.0f)) < 2.0f, "velY near -5.0 m/s");
         printf("  final pos=(%.3f, %.3f) vel=(%.3f, %.3f)\n",
                t.posX, t.posY, t.velX, t.velY);
@@ -663,7 +663,7 @@ static void test_orphan_coasting(LidarCameraFusion& fusion, LidarPoint* points)
         fusion.copy_tracked_targets(snapshot, 10, &count);
         check(count >= 1, "phase 1: track created");
         if (count >= 1) {
-            check(snapshot[0].state == TrackState::Confirmed,
+            check(snapshot[0].state == TrackState::FusionTracking,
                   "phase 1: track confirmed");
             printf("  phase 1 track: pos=(%.2f,%.2f) state=%d\n",
                    snapshot[0].posX, snapshot[0].posY,
@@ -752,7 +752,7 @@ static void test_orphan_coasting(LidarCameraFusion& fusion, LidarPoint* points)
         fusion.copy_tracked_targets(snapshot, 10, &count);
         check(count >= 1, "phase 3: track recovered");
         if (count >= 1) {
-            check(snapshot[0].state == TrackState::Confirmed,
+            check(snapshot[0].state == TrackState::FusionTracking,
                   "phase 3: track back to Confirmed");
             printf("  phase 3 track: pos=(%.2f,%.2f) state=%d\n",
                    snapshot[0].posX, snapshot[0].posY,

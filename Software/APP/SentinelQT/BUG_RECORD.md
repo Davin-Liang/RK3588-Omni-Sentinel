@@ -287,3 +287,16 @@
 **原因**: `NvmeWorker` 持有 `SentinelStreamer*` 裸指针并调用 `try_get_record_frame()`，该函数访问 streamer 内部的 `RecordBufferPool`。析构顺序中 `streamer_->remove_camera()` 会销毁 `RecordBufferPool`。若 NvmeWorker 在 `remove_camera()` 之后才停止，worker 线程可能访问已释放的池内存。
 
 **解决**: 析构顺序严格保证 `deinit_nvme_()`（stop worker + join thread + delete）在 `streamer_->remove_camera()` 之前执行。NvmeWorker::stop() 设置 `running_ = false`，线程在下一轮循环检查标志后退出，`QThread::wait(3000)` 确保线程完全结束。
+
+---
+
+## 30. Web 防抖控制卡片 visibility — `!undefined` 误判导致卡片异常隐藏
+
+**现象**: `config.ini` 中 `showEisControl=true`，但网页端防抖控制卡片"显示一会就消失"。同时后端 `curl /api/v1/status` 确认 JSON 中无 `showEisControl` 字段，前端 HTTP GET 拿到的 `j.showEisControl` 为 `undefined`。
+
+**原因**: JS 端 `!j.showEisControl` 判断将 `undefined`（字段缺失/旧二进制未返回该字段）视为 falsy，等同于 `false`，触发 `card.style.display = 'none'`。后端虽然源码正确（`j["showEisControl"] = showEisControl_` 在 `get_status_json_()` 第 2945 行），但板端运行的是未重新交叉编译的旧二进制。部署流程缺乏验证手段，导致反复误判为"代码有 bug"。
+
+**解决**: 
+1. JS 端改用 `=== false` 精确比较，仅显式 `false` 时隐藏，`undefined`/`true` 均显示
+2. 新增专用端点 `GET /api/v1/eis/visible` 返回 `{"visible":true/false}`，不走复杂的 status JSON，接口极简便于 curl 直接验证
+3. 卡片默认显示（无 `display:none`），仅在后端明确返回 `visible:false` 时才隐藏，安全默认
