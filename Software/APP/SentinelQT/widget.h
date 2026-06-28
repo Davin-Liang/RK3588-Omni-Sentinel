@@ -142,6 +142,7 @@ private:
     uint32_t            fusionCamCount_;
 
     // ---- EIS ----
+    bool                showEisControl_ = false;
     Icm45686Reader*     eisReader_ = nullptr;
     EisStabilizer*      eisStabilizer_ = nullptr;
     EisCameraConfig     eisCamCfg_[2];
@@ -189,6 +190,8 @@ private:
     std::string web_fusion_stop_();
     std::string web_fusion_config_(const std::string& body);
     std::string web_fusion_intrinsics_(int camNum, const std::string& body);
+    std::string web_eis_config_(const std::string& body);
+    std::string get_eis_config_json_() const;
     std::string web_backtrack_query_(const std::string& body);
     std::string web_delete_backtrack_(const std::string& body);
     std::string get_backtrack_files_json_() const;

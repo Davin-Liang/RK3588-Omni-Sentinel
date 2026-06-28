@@ -508,6 +508,13 @@ void Widget::load_config_()
             eisCamCfg_[c].smoothingAlpha = config_.value(prefix + "SmoothAlpha", 0.4f).toFloat();
         }
 
+        showEisControl_ = config_.value("EIS/showEisControl", true).toBool();
+
+        bool eisDebug = config_.value("EIS/eisRecordDebug", false).toBool();
+        for (int c = 0; c < 2; ++c) {
+            streamer_->set_eis_record_debug(c, eisDebug);
+        }
+
         if (eisCfgEnabled) {
             init_eis_();
         }
@@ -1918,6 +1925,8 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/status/hw")     return get_hw_json_();
         if (path == "/api/v1/videos")        return get_videos_json_();
         if (path == "/api/v1/fusion/config") return get_fusion_config_json_();
+        if (path == "/api/v1/eis/config")    return get_eis_config_json_();
+        if (path == "/api/v1/eis/visible")   return showEisControl_ ? R"({"visible":true})" : R"({"visible":false})";
         if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
         return R"({"ok":false,"error":"unknown GET path"})";
     }
@@ -1959,6 +1968,7 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/fusion/start")         return web_fusion_start_();
         if (path == "/api/v1/fusion/stop")          return web_fusion_stop_();
         if (path == "/api/v1/fusion/config")        return web_fusion_config_(body);
+        if (path == "/api/v1/eis/config")           return web_eis_config_(body);
         if (path == "/api/v1/fusion/camera/0/intrinsics") return web_fusion_intrinsics_(0, body);
         if (path == "/api/v1/fusion/camera/1/intrinsics") return web_fusion_intrinsics_(1, body);
         if (path == "/api/v1/backtrack/query")  return web_backtrack_query_(body);
@@ -2256,15 +2266,17 @@ void Widget::init_eis_()
             return eis_offset_callback_(timestampUs, camNum, offsetX, offsetY);
         });
 
-    // 配置 streamer EIS 裁切边距 + 禁用 visioner 侧 EMA（平滑已移至 Stabilizer 内部）
+    // 配置 streamer EIS 裁切边距 + 录制调试双输出 + 禁用 visioner 侧 EMA
     {
         int streamerMargin = config_.value("EIS/streamerMargin", 32).toInt();
+        bool eisDebug = config_.value("EIS/eisRecordDebug", false).toBool();
         for (int c = 0; c < 2; ++c) {
             streamer_->set_eis_params(c, streamerMargin);
+            streamer_->set_eis_record_debug(c, eisDebug);
         }
         visioner_->set_eis_smooth_alpha(1.0f);
-        fprintf(stderr, "[SentinelQT] EIS params: margin=%d (visioner EMA disabled, handled by Stabilizer)\n",
-                streamerMargin);
+        fprintf(stderr, "[SentinelQT] EIS params: margin=%d debugRecord=%d\n",
+                streamerMargin, eisDebug ? 1 : 0);
     }
 
     fprintf(stderr, "[SentinelQT] EIS initialized: %s @ %.0f Hz\n",
@@ -2931,8 +2943,63 @@ std::string Widget::get_fusion_config_json_() const
 
     j["fusionEnabled"] = fusionEnabled_;
     j["camCount"] = fusionCamCount_;
+    j["showEisControl"] = showEisControl_;
+
     j["ok"] = true;
     return j.dump();
+}
+
+std::string Widget::get_eis_config_json_() const
+{
+    nlohmann::json j;
+
+    for (int i = 0; i < 2; ++i) {
+        nlohmann::json cam;
+        cam["focalX"]         = eisCamCfg_[i].focalX;
+        cam["focalY"]         = eisCamCfg_[i].focalY;
+        cam["halfWindowMs"]   = eisCamCfg_[i].halfWindowMs;
+        cam["maxOffsetPixel"] = eisCamCfg_[i].maxOffsetPixel;
+        cam["signX"]          = eisCamCfg_[i].signX;
+        cam["signY"]          = eisCamCfg_[i].signY;
+        cam["swapXY"]         = eisCamCfg_[i].swapXY;
+        cam["timeOffsetMs"]   = eisCamCfg_[i].timeOffsetMs;
+        cam["frameRate"]      = eisCamCfg_[i].frameRate;
+        cam["enableSmoothing"] = eisCamCfg_[i].enableSmoothing;
+        cam["smoothingAlpha"] = eisCamCfg_[i].smoothingAlpha;
+        j[QString("cam%1").arg(i).toStdString()] = cam;
+    }
+
+    j["ok"] = true;
+    return j.dump();
+}
+
+std::string Widget::web_eis_config_(const std::string& body)
+{
+    try {
+        auto j = nlohmann::json::parse(body);
+
+        for (int i = 0; i < 2; ++i) {
+            std::string key = QString("cam%1").arg(i).toStdString();
+            if (!j.contains(key)) continue;
+
+            auto& cam = j[key];
+            if (cam.contains("focalX"))         eisCamCfg_[i].focalX = cam["focalX"];
+            if (cam.contains("focalY"))         eisCamCfg_[i].focalY = cam["focalY"];
+            if (cam.contains("halfWindowMs"))   eisCamCfg_[i].halfWindowMs = cam["halfWindowMs"];
+            if (cam.contains("maxOffsetPixel")) eisCamCfg_[i].maxOffsetPixel = cam["maxOffsetPixel"];
+            if (cam.contains("signX"))          eisCamCfg_[i].signX = cam["signX"];
+            if (cam.contains("signY"))          eisCamCfg_[i].signY = cam["signY"];
+            if (cam.contains("swapXY"))         eisCamCfg_[i].swapXY = cam["swapXY"];
+            if (cam.contains("timeOffsetMs"))   eisCamCfg_[i].timeOffsetMs = cam["timeOffsetMs"];
+            if (cam.contains("frameRate"))      eisCamCfg_[i].frameRate = cam["frameRate"];
+            if (cam.contains("enableSmoothing")) eisCamCfg_[i].enableSmoothing = cam["enableSmoothing"];
+            if (cam.contains("smoothingAlpha")) eisCamCfg_[i].smoothingAlpha = cam["smoothingAlpha"];
+        }
+
+        return R"({"ok":true})";
+    } catch (...) {
+        return R"({"ok":false,"error":"invalid JSON"})";
+    }
 }
 
 // ============================================================================

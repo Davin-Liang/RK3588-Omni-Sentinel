@@ -108,8 +108,8 @@ void LidarCameraFusion::fusion_thread_()
             lidar_->get_closest_frame(tsNs, frame);
         }
 
-        // [LidarCalib] 已注释
-        if (false) {
+        // [LidarCalib] 点云投射打印（调试用）
+        if (true) {
             fprintf(stderr, "[LidarCalib] all points (every 2nd):\n");
             uint32_t statBoth = 0, statCam0 = 0, statCam1 = 0, statOut = 0;
             for (uint32_t i = 0; i < frame.pointsCount; i += 2) {

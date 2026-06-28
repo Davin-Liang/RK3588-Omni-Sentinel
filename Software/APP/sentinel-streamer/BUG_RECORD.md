@@ -273,3 +273,13 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 **原因**: 推流和录像共用 `baselineTsUs`。`start_record()` 虽然会更新它，但 stream 线程可能在更新前已用旧值计算了若干帧的 PTS。
 
 **解决**: 新增独立 `recordBaseTsUs`，首帧时间戳自动初始化，确保每次录像 PTS 从 0 开始。推流和录像 PTS 完全解耦。
+
+---
+
+## 27. EIS 调试双输出 — 无防抖 RGA scale 必须在 origBuf release 之前
+
+**现象**: 计划在 worker 循环尾部（step 5c）做无防抖的第二路 RGA scale，但 origBuf 在 step 4 结束时已 release。虽 RGA 同步模式 + buffer 复用概率极低，理论上存在 dmaFd 被 visioner 线程覆写的竞态窗口。
+
+**原因**: 原有代码将 `release_orig_copy_buffer()` 放在 step 4（录制原始帧编码之后），而非所有 RGA 操作之后。新增的无防抖 scale 需要读取 origBuf->dmaFd，理应在 release 前完成。
+
+**解决**: 将无防抖 RGA scale 移到 step 2 区域，紧跟 EIS scale 之后、origBuf release 之前。两个 RGA 调用完成后才释放 origBuf。无防抖 scale 的 scaleBufNoEis 保持到 step 5c 再进行编码，编码完成后释放。
