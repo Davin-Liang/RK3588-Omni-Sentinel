@@ -73,7 +73,7 @@ endif()
 
 # ICM45686 EIS 防抖
 if(NOT TARGET icm45686_eis_lib)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app-parameterized ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
 endif()
 
 # NVMe SSD 回溯存储
@@ -110,7 +110,7 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app-parameterized/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../NVMe-SSD/include
     ${LIBRGA_INCLUDES}
 )

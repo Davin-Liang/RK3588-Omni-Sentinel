@@ -13,6 +13,7 @@
 #include "lidar_camera_fusion.h"
 
 #include "imu_eis.hpp"
+#include "vision_eis.hpp"
 
 class SentinelVisioner;
 class SentinelStreamer;
@@ -143,15 +144,19 @@ private:
 
     // ---- EIS ----
     bool                showEisControl_ = false;
+    // ---- Visual EIS + IMU assist ----
+    // 当前方案中，视觉侧负责估计画面运动并输出 offset；
+    // ICM45686 只提供 gyroRms / vibrationLevel 等辅助状态，
+    // 不再直接用 IMU 积分结果决定 offsetX / offsetY。
     Icm45686Reader*     eisReader_ = nullptr;
-    EisStabilizer*      eisStabilizer_ = nullptr;
-    EisCameraConfig     eisCamCfg_[2];
+    VisionEisConfig     visualEisCfg_[2];
+    uint32_t            imuAssistWindowMs_ = 200;
 
     void load_config_();
     void init_eis_();
     void deinit_eis_();
     void setup_lidar_osd_provider_();
-    bool eis_offset_callback_(uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY);
+    bool imu_assist_callback_(uint64_t timestampUs, int camNum, VisionImuAssistState& state);
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
     void stop_preview_(int camNum);

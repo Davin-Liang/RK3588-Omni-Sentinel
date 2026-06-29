@@ -10,6 +10,7 @@
 #include "top_down_view.h"
 #include "virtual_keyboard.h"
 #include "imu_eis.hpp"
+#include "vision_eis.hpp"
 #include "nvme_worker.h"
 #include "NVMeDataManager.h"
 
@@ -212,7 +213,7 @@ Widget::Widget(QWidget *parent)
     , topDownView_(nullptr)
     , virtualKeyboard_(nullptr)
     , fusionCamCount_(1)
-    , eisReader_(nullptr), eisStabilizer_(nullptr)
+    , eisReader_(nullptr)
 {
     instance_ = this;
     ui->setupUi(this);
@@ -488,24 +489,33 @@ void Widget::load_config_()
     backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
     nvmeDevicePath_ = config_.value("Backtrack/nvmeDevice", "/dev/nvme0n1").toString();
 
-    // EIS 防抖配置（参数化版本：每路相机独立 EisCameraConfig）
+    // EIS 防抖配置：视觉为主 + IMU 辅助。
+    // 视觉 EIS 由 sentinel-visioner 在采集线程内对实时相机帧做 LK 光流估计；
+    // ICM45686 只提供 gyroRms / vibrationLevel 作为辅助，不再直接输出 offset。
     {
         bool eisCfgEnabled = config_.value("EIS/enabled", false).toBool();
+        imuAssistWindowMs_ = config_.value("EIS/imuAssistWindowMs", 200).toUInt();
 
         for (int c = 0; c < 2; ++c) {
             QString prefix = QString("EIS/Cam%1").arg(c);
-            eisCamCfg_[c].camId = c;
-            eisCamCfg_[c].focalX = config_.value(prefix + "FocalX", 1200.0f).toFloat();
-            eisCamCfg_[c].focalY = config_.value(prefix + "FocalY", 1200.0f).toFloat();
-            eisCamCfg_[c].signX = config_.value(prefix + "AxisSignX", -1.0f).toFloat();
-            eisCamCfg_[c].signY = config_.value(prefix + "AxisSignY", 1.0f).toFloat();
-            eisCamCfg_[c].swapXY = config_.value(prefix + "SwapXY", false).toBool();
-            eisCamCfg_[c].timeOffsetMs = config_.value(prefix + "TimeOffsetMs", 0.0f).toFloat();
-            eisCamCfg_[c].frameRate = config_.value(prefix + "FrameRate", 30.0f).toFloat();
-            eisCamCfg_[c].halfWindowMs = config_.value(prefix + "HalfWindowMs", 20).toUInt();
-            eisCamCfg_[c].maxOffsetPixel = config_.value(prefix + "MaxOffsetPixel", 200).toInt();
-            eisCamCfg_[c].enableSmoothing = config_.value(prefix + "EnableSmoothing", true).toBool();
-            eisCamCfg_[c].smoothingAlpha = config_.value(prefix + "SmoothAlpha", 0.4f).toFloat();
+            visualEisCfg_[c].camId = c;
+            visualEisCfg_[c].inputWidth  = camWidth_[c];
+            visualEisCfg_[c].inputHeight = camHeight_[c];
+            visualEisCfg_[c].processWidth  = config_.value(prefix + "ProcessWidth", 640).toInt();
+            visualEisCfg_[c].processHeight = config_.value(prefix + "ProcessHeight", 360).toInt();
+            visualEisCfg_[c].maxCorners = config_.value(prefix + "MaxCorners", 500).toInt();
+            visualEisCfg_[c].qualityLevel = config_.value(prefix + "QualityLevel", 0.01).toDouble();
+            visualEisCfg_[c].minDistance = config_.value(prefix + "MinDistance", 10.0).toDouble();
+            visualEisCfg_[c].minTrackedPoints = config_.value(prefix + "MinTrackedPoints", 30).toInt();
+            visualEisCfg_[c].minInliers = config_.value(prefix + "MinInliers", 20).toInt();
+            visualEisCfg_[c].ransacThreshold = config_.value(prefix + "RansacThreshold", 3.0).toDouble();
+            visualEisCfg_[c].maxOpticalFlow = config_.value(prefix + "MaxOpticalFlow", 80.0).toDouble();
+            visualEisCfg_[c].maxOffsetPixel = config_.value(prefix + "MaxOffsetPixel", 80).toInt();
+            visualEisCfg_[c].enableImuAdaptiveAlpha = config_.value(prefix + "EnableImuAdaptiveAlpha", true).toBool();
+            visualEisCfg_[c].alphaLowVibration = config_.value(prefix + "AlphaLow", 0.30f).toFloat();
+            visualEisCfg_[c].alphaMidVibration = config_.value(prefix + "AlphaMid", 0.20f).toFloat();
+            visualEisCfg_[c].alphaHighVibration = config_.value(prefix + "AlphaHigh", 0.12f).toFloat();
+            visualEisCfg_[c].enableRotationEstimate = config_.value(prefix + "EnableRotationEstimate", true).toBool();
         }
 
         showEisControl_ = config_.value("EIS/showEisControl", true).toBool();
@@ -516,6 +526,7 @@ void Widget::load_config_()
         }
 
         if (eisCfgEnabled) {
+            // 只初始化 IMU 辅助线程和回调；真正启用视觉 EIS 在每路相机按钮/配置处完成。
             init_eis_();
         }
     }
@@ -533,6 +544,12 @@ bool Widget::init_camera_(int camNum)
         fprintf(stderr, "[SentinelQT] visioner add_camera cam%d 失败\n", camNum);
         return false;
     }
+
+    // 给 sentinel-visioner 配置该路相机的实时视觉 EIS 参数。
+    // 注意：视觉 EIS 的上一帧、轨迹、offset 状态在 SentinelVisioner 内部每路独立维护。
+    visualEisCfg_[camNum].inputWidth = camWidth_[camNum];
+    visualEisCfg_[camNum].inputHeight = camHeight_[camNum];
+    visioner_->set_visual_eis_config(camNum, visualEisCfg_[camNum]);
 
     if (!streamer_->add_camera(camNum, visioner_)) {
         fprintf(stderr, "[SentinelQT] streamer add_camera cam%d 失败\n", camNum);
@@ -2209,7 +2226,7 @@ std::string Widget::web_osd_stop_(int camNum)
 }
 
 // ============================================================================
-// EIS 防抖
+// EIS 防抖：视觉为主 + IMU 辅助
 // ============================================================================
 
 void Widget::init_eis_()
@@ -2219,78 +2236,65 @@ void Widget::init_eis_()
     std::string devPath = config_.value("EIS/device",
         "/dev/icm45686").toString().toStdString();
 
-    // 构建 ImuConfig
-    ImuConfig imuCfg;
-    imuCfg.sampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
-    imuCfg.gyroRange = static_cast<uint8_t>(config_.value("EIS/gyroRange", 0).toInt());
-    imuCfg.accelRange = static_cast<uint8_t>(config_.value("EIS/accelRange", 0).toInt());
-    imuCfg.biasCalibMs = config_.value("EIS/biasCalibMs", 1000).toUInt();
-    imuCfg.enableGyroBiasCalib = config_.value("EIS/enableGyroBiasCalib", false).toBool();
+    float sampleHz = config_.value("EIS/sampleHz", 100.0f).toFloat();
 
     eisReader_ = new Icm45686Reader(512);
     if (!eisReader_->openDevice(devPath)) {
-        fprintf(stderr, "[SentinelQT] EIS: failed to open %s\n", devPath.c_str());
+        // 视觉 EIS 可以在没有 IMU 的情况下独立运行。
+        // 这里不再让 IMU 打开失败阻断整个防抖功能，而是降级为纯视觉 EIS。
+        fprintf(stderr, "[SentinelQT] Visual EIS: IMU device %s open failed, run visual-only EIS.\n",
+                devPath.c_str());
         delete eisReader_;
         eisReader_ = nullptr;
-        set_status_("EIS IMU设备打开失败!", "#f85149");
+        visioner_->set_imu_assist_callback(nullptr);
+        set_status_("EIS IMU不可用，已降级为纯视觉防抖", "#d29922");
         return;
     }
 
-    if (imuCfg.enableGyroBiasCalib) {
-        fprintf(stderr, "[SentinelQT] EIS: gyro bias calibrating for %u ms...\n",
-                imuCfg.biasCalibMs);
-    }
-    if (!eisReader_->configure(imuCfg)) {
-        fprintf(stderr, "[SentinelQT] EIS: IMU configure failed\n");
+    uint8_t gyroRange = static_cast<uint8_t>(config_.value("EIS/gyroRange", 0).toInt());
+    uint8_t accelRange = static_cast<uint8_t>(config_.value("EIS/accelRange", 0).toInt());
+    eisReader_->setGyroRange(gyroRange);
+    eisReader_->setAccelRange(accelRange);
+
+    if (!eisReader_->start(sampleHz)) {
+        fprintf(stderr, "[SentinelQT] Visual EIS: IMU reader thread start failed\n");
         eisReader_->closeDevice();
         delete eisReader_;
         eisReader_ = nullptr;
-        set_status_("EIS IMU配置失败!", "#f85149");
+        visioner_->set_imu_assist_callback(nullptr);
+        set_status_("EIS IMU读取线程启动失败，已降级为纯视觉防抖", "#d29922");
         return;
     }
 
-    if (!eisReader_->start()) {
-        fprintf(stderr, "[SentinelQT] EIS: IMU reader thread start failed\n");
-        eisReader_->closeDevice();
-        delete eisReader_;
-        eisReader_ = nullptr;
-        set_status_("EIS IMU读取线程启动失败!", "#f85149");
-        return;
-    }
-
-    eisStabilizer_ = new EisStabilizer();
-    eisStabilizer_->bindReader(eisReader_);
-
-    visioner_->set_eis_offset_callback(
-        [this](uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY) -> bool {
-            return eis_offset_callback_(timestampUs, camNum, offsetX, offsetY);
+    // 给 SentinelVisioner 注册 IMU 辅助状态回调。
+    // SentinelVisioner 内部的视觉 EIS 会在每帧处理时取 gyroRms / vibrationLevel，
+    // 用于动态选择轨迹平滑 alpha；IMU 不再直接给 offsetX/offsetY。
+    visioner_->set_imu_assist_callback(
+        [this](uint64_t timestampUs, int camNum, VisionImuAssistState& state) -> bool {
+            return imu_assist_callback_(timestampUs, camNum, state);
         });
 
-    // 配置 streamer EIS 裁切边距 + 录制调试双输出 + 禁用 visioner 侧 EMA
-    {
-        int streamerMargin = config_.value("EIS/streamerMargin", 32).toInt();
-        bool eisDebug = config_.value("EIS/eisRecordDebug", false).toBool();
-        for (int c = 0; c < 2; ++c) {
-            streamer_->set_eis_params(c, streamerMargin);
-            streamer_->set_eis_record_debug(c, eisDebug);
-        }
-        visioner_->set_eis_smooth_alpha(1.0f);
-        fprintf(stderr, "[SentinelQT] EIS params: margin=%d debugRecord=%d\n",
-                streamerMargin, eisDebug ? 1 : 0);
+    int streamerMargin = config_.value("EIS/streamerMargin", 32).toInt();
+    bool eisDebug = config_.value("EIS/eisRecordDebug", false).toBool();
+    for (int c = 0; c < 2; ++c) {
+        streamer_->set_eis_params(c, streamerMargin);
+        streamer_->set_eis_record_debug(c, eisDebug);
     }
 
-    fprintf(stderr, "[SentinelQT] EIS initialized: %s @ %.0f Hz\n",
-            devPath.c_str(), static_cast<double>(imuCfg.sampleHz));
+    fprintf(stderr, "[SentinelQT] Visual EIS IMU assist initialized: %s @ %.0f Hz\n",
+            devPath.c_str(), static_cast<double>(sampleHz));
 }
 
 void Widget::deinit_eis_()
 {
-    visioner_->set_eis_offset_callback(nullptr);
-
-    if (eisStabilizer_) {
-        delete eisStabilizer_;
-        eisStabilizer_ = nullptr;
+    // 关闭 IMU 辅助回调，同时关闭每路视觉 EIS。
+    visioner_->set_imu_assist_callback(nullptr);
+    for (int i = 0; i < 2; ++i) {
+        if (visioner_) {
+            visioner_->enable_visual_eis(i, false);
+        }
     }
+
     if (eisReader_) {
         eisReader_->stop();
         eisReader_->closeDevice();
@@ -2310,68 +2314,74 @@ void Widget::deinit_eis_()
         }
     }
 
-    fprintf(stderr, "[SentinelQT] EIS deinitialized\n");
+    fprintf(stderr, "[SentinelQT] Visual EIS deinitialized\n");
 }
 
-bool Widget::eis_offset_callback_(uint64_t timestampUs, int camNum,
-                                   int32_t& offsetX, int32_t& offsetY)
+bool Widget::imu_assist_callback_(uint64_t /*timestampUs*/, int /*camNum*/,
+                                  VisionImuAssistState& state)
 {
-    if (!eisStabilizer_ || !eisEnabled_[camNum]) {
-        offsetX = 0;
-        offsetY = 0;
+    if (!eisReader_) {
         return false;
     }
 
-    uint64_t timestampNs = timestampUs * 1000ULL;
-
-    bool ok = eisStabilizer_->calculate_eis_offset(
-        eisCamCfg_[camNum], timestampNs, offsetX, offsetY);
-
-    // 每 30 帧打印一次 offset，方便确认 EIS 是否生效
-    {
-        static int cnt[2] = {0, 0};
-        if (++cnt[camNum] % 30 == 0) {
-            fprintf(stderr, "[EIS] cam%d offset=(%d,%d) ok=%d used=%zu cost=%.3fms\n",
-                    camNum, offsetX, offsetY, ok ? 1 : 0,
-                    eisStabilizer_->lastUsedSamples(),
-                    eisStabilizer_->lastCostMs());
-        }
+    ImuAssistState imu;
+    if (!eisReader_->getAssistState(imu, imuAssistWindowMs_)) {
+        return false;
     }
 
-    return ok;
+    state.timestampNs = imu.timestampNs;
+    state.accelX = imu.accelX;
+    state.accelY = imu.accelY;
+    state.accelZ = imu.accelZ;
+    state.gyroX = imu.gyroX;
+    state.gyroY = imu.gyroY;
+    state.gyroZ = imu.gyroZ;
+    state.accelNorm = imu.accelNorm;
+    state.gyroNorm = imu.gyroNorm;
+    state.gyroRms = imu.gyroRms;
+    state.vibrationLevel = imu.vibrationLevel;
+
+    return true;
 }
 
 void Widget::on_btn_eis_(int camNum)
 {
     QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
 
-    if (!eisReader_) {
-        init_eis_();
+    if (!eisEnabled_[camNum]) {
+        // 先尝试启动 IMU 辅助；即便 IMU 打不开，SentinelVisioner 仍可执行纯视觉 EIS。
         if (!eisReader_) {
-            set_status_(QString("相机%1 EIS初始化失败").arg(camNum + 1), "#f85149");
+            init_eis_();
+        }
+
+        visioner_->set_visual_eis_config(camNum, visualEisCfg_[camNum]);
+        if (!visioner_->enable_visual_eis(camNum, true)) {
+            set_status_(QString("相机%1 视觉EIS启动失败").arg(camNum + 1), "#f85149");
             return;
         }
-    }
 
-    eisEnabled_[camNum] = !eisEnabled_[camNum];
-
-    if (eisEnabled_[camNum]) {
-        eisStabilizer_->resetSmoothing(camNum);
+        eisEnabled_[camNum] = true;
         btn->setText(QString::fromUtf8("防抖开"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
             "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
-        set_status_(QString("相机%1 EIS已启用").arg(camNum + 1), "#3fb950");
+        set_status_(QString("相机%1 视觉EIS已启用").arg(camNum + 1), "#3fb950");
     } else {
+        visioner_->enable_visual_eis(camNum, false);
+        eisEnabled_[camNum] = false;
         btn->setText(QString::fromUtf8("防抖关"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; "
             "color: #e6edf3; background-color: #6e7681; "
             "border: 1px solid #8b949e; border-radius: 8px; }");
-        set_status_(QString("相机%1 EIS已禁用").arg(camNum + 1), "#ffffff");
+        set_status_(QString("相机%1 视觉EIS已禁用").arg(camNum + 1), "#ffffff");
+
+        if (!eisEnabled_[0] && !eisEnabled_[1]) {
+            deinit_eis_();
+        }
     }
 
-    fprintf(stderr, "[SentinelQT] cam %d EIS %s\n", camNum,
+    fprintf(stderr, "[SentinelQT] cam %d Visual EIS %s\n", camNum,
             eisEnabled_[camNum] ? "enabled" : "disabled");
 }
 
@@ -2380,7 +2390,10 @@ std::string Widget::web_eis_start_(int camNum)
     if (eisEnabled_[camNum]) return R"({"ok":true})";
     if (!eisReader_) {
         init_eis_();
-        if (!eisReader_) return R"({"ok":false,"error":"EIS init failed"})";
+    }
+    visioner_->set_visual_eis_config(camNum, visualEisCfg_[camNum]);
+    if (!visioner_->enable_visual_eis(camNum, true)) {
+        return R"({"ok":false,"error":"Visual EIS enable failed"})";
     }
     eisEnabled_[camNum] = true;
     update_camera_button_states_(camNum);
@@ -2390,6 +2403,7 @@ std::string Widget::web_eis_start_(int camNum)
 std::string Widget::web_eis_stop_(int camNum)
 {
     if (!eisEnabled_[camNum]) return R"({"ok":true})";
+    visioner_->enable_visual_eis(camNum, false);
     eisEnabled_[camNum] = false;
     update_camera_button_states_(camNum);
     if (!eisEnabled_[0] && !eisEnabled_[1]) {
@@ -2952,20 +2966,28 @@ std::string Widget::get_fusion_config_json_() const
 std::string Widget::get_eis_config_json_() const
 {
     nlohmann::json j;
+    j["mode"] = "visual-primary-imu-assist";
+    j["imuAssistWindowMs"] = imuAssistWindowMs_;
 
     for (int i = 0; i < 2; ++i) {
         nlohmann::json cam;
-        cam["focalX"]         = eisCamCfg_[i].focalX;
-        cam["focalY"]         = eisCamCfg_[i].focalY;
-        cam["halfWindowMs"]   = eisCamCfg_[i].halfWindowMs;
-        cam["maxOffsetPixel"] = eisCamCfg_[i].maxOffsetPixel;
-        cam["signX"]          = eisCamCfg_[i].signX;
-        cam["signY"]          = eisCamCfg_[i].signY;
-        cam["swapXY"]         = eisCamCfg_[i].swapXY;
-        cam["timeOffsetMs"]   = eisCamCfg_[i].timeOffsetMs;
-        cam["frameRate"]      = eisCamCfg_[i].frameRate;
-        cam["enableSmoothing"] = eisCamCfg_[i].enableSmoothing;
-        cam["smoothingAlpha"] = eisCamCfg_[i].smoothingAlpha;
+        cam["inputWidth"] = visualEisCfg_[i].inputWidth;
+        cam["inputHeight"] = visualEisCfg_[i].inputHeight;
+        cam["processWidth"] = visualEisCfg_[i].processWidth;
+        cam["processHeight"] = visualEisCfg_[i].processHeight;
+        cam["maxCorners"] = visualEisCfg_[i].maxCorners;
+        cam["qualityLevel"] = visualEisCfg_[i].qualityLevel;
+        cam["minDistance"] = visualEisCfg_[i].minDistance;
+        cam["minTrackedPoints"] = visualEisCfg_[i].minTrackedPoints;
+        cam["minInliers"] = visualEisCfg_[i].minInliers;
+        cam["ransacThreshold"] = visualEisCfg_[i].ransacThreshold;
+        cam["maxOpticalFlow"] = visualEisCfg_[i].maxOpticalFlow;
+        cam["maxOffsetPixel"] = visualEisCfg_[i].maxOffsetPixel;
+        cam["enableImuAdaptiveAlpha"] = visualEisCfg_[i].enableImuAdaptiveAlpha;
+        cam["alphaLow"] = visualEisCfg_[i].alphaLowVibration;
+        cam["alphaMid"] = visualEisCfg_[i].alphaMidVibration;
+        cam["alphaHigh"] = visualEisCfg_[i].alphaHighVibration;
+        cam["enableRotationEstimate"] = visualEisCfg_[i].enableRotationEstimate;
         j[QString("cam%1").arg(i).toStdString()] = cam;
     }
 
@@ -2978,22 +3000,36 @@ std::string Widget::web_eis_config_(const std::string& body)
     try {
         auto j = nlohmann::json::parse(body);
 
+        if (j.contains("imuAssistWindowMs")) {
+            imuAssistWindowMs_ = j["imuAssistWindowMs"];
+        }
+
         for (int i = 0; i < 2; ++i) {
             std::string key = QString("cam%1").arg(i).toStdString();
             if (!j.contains(key)) continue;
 
             auto& cam = j[key];
-            if (cam.contains("focalX"))         eisCamCfg_[i].focalX = cam["focalX"];
-            if (cam.contains("focalY"))         eisCamCfg_[i].focalY = cam["focalY"];
-            if (cam.contains("halfWindowMs"))   eisCamCfg_[i].halfWindowMs = cam["halfWindowMs"];
-            if (cam.contains("maxOffsetPixel")) eisCamCfg_[i].maxOffsetPixel = cam["maxOffsetPixel"];
-            if (cam.contains("signX"))          eisCamCfg_[i].signX = cam["signX"];
-            if (cam.contains("signY"))          eisCamCfg_[i].signY = cam["signY"];
-            if (cam.contains("swapXY"))         eisCamCfg_[i].swapXY = cam["swapXY"];
-            if (cam.contains("timeOffsetMs"))   eisCamCfg_[i].timeOffsetMs = cam["timeOffsetMs"];
-            if (cam.contains("frameRate"))      eisCamCfg_[i].frameRate = cam["frameRate"];
-            if (cam.contains("enableSmoothing")) eisCamCfg_[i].enableSmoothing = cam["enableSmoothing"];
-            if (cam.contains("smoothingAlpha")) eisCamCfg_[i].smoothingAlpha = cam["smoothingAlpha"];
+            if (cam.contains("processWidth")) visualEisCfg_[i].processWidth = cam["processWidth"];
+            if (cam.contains("processHeight")) visualEisCfg_[i].processHeight = cam["processHeight"];
+            if (cam.contains("maxCorners")) visualEisCfg_[i].maxCorners = cam["maxCorners"];
+            if (cam.contains("qualityLevel")) visualEisCfg_[i].qualityLevel = cam["qualityLevel"];
+            if (cam.contains("minDistance")) visualEisCfg_[i].minDistance = cam["minDistance"];
+            if (cam.contains("minTrackedPoints")) visualEisCfg_[i].minTrackedPoints = cam["minTrackedPoints"];
+            if (cam.contains("minInliers")) visualEisCfg_[i].minInliers = cam["minInliers"];
+            if (cam.contains("ransacThreshold")) visualEisCfg_[i].ransacThreshold = cam["ransacThreshold"];
+            if (cam.contains("maxOpticalFlow")) visualEisCfg_[i].maxOpticalFlow = cam["maxOpticalFlow"];
+            if (cam.contains("maxOffsetPixel")) visualEisCfg_[i].maxOffsetPixel = cam["maxOffsetPixel"];
+            if (cam.contains("enableImuAdaptiveAlpha")) visualEisCfg_[i].enableImuAdaptiveAlpha = cam["enableImuAdaptiveAlpha"];
+            if (cam.contains("alphaLow")) visualEisCfg_[i].alphaLowVibration = cam["alphaLow"];
+            if (cam.contains("alphaMid")) visualEisCfg_[i].alphaMidVibration = cam["alphaMid"];
+            if (cam.contains("alphaHigh")) visualEisCfg_[i].alphaHighVibration = cam["alphaHigh"];
+            if (cam.contains("enableRotationEstimate")) visualEisCfg_[i].enableRotationEstimate = cam["enableRotationEstimate"];
+
+            visualEisCfg_[i].inputWidth = camWidth_[i];
+            visualEisCfg_[i].inputHeight = camHeight_[i];
+            if (visioner_) {
+                visioner_->set_visual_eis_config(i, visualEisCfg_[i]);
+            }
         }
 
         return R"({"ok":true})";

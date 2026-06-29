@@ -11,6 +11,7 @@
 
 #include "dma-buffer-pool.h"
 #include "ThreadSafeQueue.h"
+#include "vision_eis.hpp"
 
 #include "im2d.h"
 #include "drmrga.h"
@@ -64,17 +65,27 @@ struct CameraContext {
     ThreadSafeQueue<DmaBuffer_t*> previewTaskQueue;   ///< 供预览消费者消费的 RGB888 图像队列
     ThreadSafeQueue<DmaBuffer_t*> processTaskQueue;  ///< 供推流/录像等后处理消费的原图队列
 
-    // EIS 低通滤波状态（每路独立）
+    // 旧版外部 EIS offset 回调的低通滤波状态（每路独立）
     float eisSmoothAlpha;
     int32_t prevEisOffsetX;
     int32_t prevEisOffsetY;
     bool eisPrevValid;
 
+    // 新版“视觉为主 + IMU辅助”EIS 状态。
+    // 捕获线程使用上一帧视觉估计得到的 offset 处理当前帧，
+    // 然后利用当前 raw preview 更新下一帧 offset，形成一帧延迟的实时闭环。
+    std::unique_ptr<VisionEisStabilizer> visualEis;
+    std::atomic<bool> visualEisEnabled;
+    std::atomic<int32_t> visualEisOffsetX;
+    std::atomic<int32_t> visualEisOffsetY;
+    std::atomic<bool> visualEisOffsetValid;
+
     CameraContext() : camFd(-1), epollFd(-1), isStreaming(false), isThreadRunning(false),
         isPaused(false), camType(CameraType::ISP_CAM),
         v4l2BufType(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE),
         actualPixelFormat(V4L2_PIX_FMT_NV12), srcBytesPerLine(0),
-        eisSmoothAlpha(0.7f), prevEisOffsetX(0), prevEisOffsetY(0), eisPrevValid(false) {}
+        eisSmoothAlpha(0.7f), prevEisOffsetX(0), prevEisOffsetY(0), eisPrevValid(false),
+        visualEisEnabled(false), visualEisOffsetX(0), visualEisOffsetY(0), visualEisOffsetValid(false) {}
 };
 
 class SentinelVisioner {
@@ -176,6 +187,24 @@ public:
      */
     void set_eis_smooth_alpha(float alpha);
 
+    /**
+     * @brief: 配置某路相机的视觉 EIS 参数。
+     * @note : 一个相机一份 VisionEisConfig，15FPS/30FPS 或左右相机不要共用状态。
+     */
+    bool set_visual_eis_config(int camNum, const VisionEisConfig& config);
+
+    /**
+     * @brief: 开启或关闭某路相机的视觉为主 EIS。
+     */
+    bool enable_visual_eis(int camNum, bool enable);
+
+    /**
+     * @brief: 设置 IMU 辅助状态回调。
+     * @note : 视觉 EIS 可以不设置该回调独立运行；设置后可根据 vibrationLevel 动态调节平滑强度。
+     */
+    void set_imu_assist_callback(std::function<bool(uint64_t, int,
+                                 VisionImuAssistState&)> callback);
+
 private:
     std::unordered_map<int, std::unique_ptr<CameraContext>> _cameraContextMap;
 
@@ -197,4 +226,5 @@ private:
                                DmaBuffer_t* dstBuf);
 
     std::function<bool(uint64_t, int, int32_t&, int32_t&)> eis_offset_callback_;
+    std::function<bool(uint64_t, int, VisionImuAssistState&)> imu_assist_callback_;
 };

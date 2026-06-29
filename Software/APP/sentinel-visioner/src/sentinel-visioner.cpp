@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <linux/dma-buf.h>
 #include <sys/mman.h>
+#include <cmath>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -291,6 +292,23 @@ bool SentinelVisioner::add_camera(std::string& deviceName, int width, int height
         return false;
     }
 
+    // 初始化视觉为主 EIS，默认关闭。
+    // processHeight 按实际相机比例设置，避免视觉运动估计因缩放比例错误导致 dx/dy 失真。
+    {
+        VisionEisConfig vcfg;
+        vcfg.camId = camNum;
+        vcfg.inputWidth = ctx->width;
+        vcfg.inputHeight = ctx->height;
+        vcfg.processWidth = 640;
+        vcfg.processHeight = std::max(1, (int)((double)vcfg.processWidth * ctx->height / ctx->width + 0.5));
+        vcfg.maxOffsetPixel = 80;
+        ctx->visualEis.reset(new VisionEisStabilizer(vcfg));
+        ctx->visualEisEnabled.store(false);
+        ctx->visualEisOffsetX.store(0);
+        ctx->visualEisOffsetY.store(0);
+        ctx->visualEisOffsetValid.store(false);
+    }
+
     // 保存上下文并移交所有权
     _cameraContextMap[camNum] = std::move(ctx);
     std::cout << "Camera " << camNum << " (" << deviceName << ") added successfully." << std::endl;
@@ -538,31 +556,39 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
 
                 auto start_time = std::chrono::high_resolution_clock::now();
 
-                // EIS 防抖偏移（每帧计算，不依赖 NPU buffer）
+                // EIS 防抖偏移。
+                // 新方案优先使用“视觉为主 + IMU辅助”模块上一帧估计得到的 offset；
+                // 如果未开启视觉 EIS，则兼容旧版外部 offset 回调。
+                // 这里使用上一帧 offset 处理当前帧，是实时系统中常见的一帧延迟闭环方案。
                 int currentHorizOffset = 0;
                 int currentVertOffset  = 0;
                 bool eisActive = false;
 
-                if (eis_offset_callback_) {
+                if (ctx->visualEisEnabled.load() && ctx->visualEisOffsetValid.load()) {
+                    currentHorizOffset = ctx->visualEisOffsetX.load();
+                    currentVertOffset  = ctx->visualEisOffsetY.load();
+                    eisActive = true;
+                } else if (eis_offset_callback_) {
                     int32_t eisX = 0, eisY = 0;
                     eisActive = eis_offset_callback_(timestampUs, camNum, eisX, eisY);
                     if (eisActive) {
                         currentHorizOffset = static_cast<int>(eisX);
                         currentVertOffset  = static_cast<int>(eisY);
                     }
-                }
 
-                // EIS 低通滤波：平滑帧间偏移，消除 IMU 噪声引起的微颤
-                if (eisActive && ctx->eisPrevValid) {
-                    float a = ctx->eisSmoothAlpha;
-                    int sx = static_cast<int>(a * currentHorizOffset + (1.0f - a) * ctx->prevEisOffsetX);
-                    int sy = static_cast<int>(a * currentVertOffset  + (1.0f - a) * ctx->prevEisOffsetY);
-                    currentHorizOffset = sx;
-                    currentVertOffset  = sy;
+                    // 仅旧版 IMU offset 回调使用这里的低通滤波。
+                    // 新版视觉 EIS 已经在轨迹平滑阶段完成平滑，避免重复滤波造成滞后。
+                    if (eisActive && ctx->eisPrevValid) {
+                        float a = ctx->eisSmoothAlpha;
+                        int sx = static_cast<int>(a * currentHorizOffset + (1.0f - a) * ctx->prevEisOffsetX);
+                        int sy = static_cast<int>(a * currentVertOffset  + (1.0f - a) * ctx->prevEisOffsetY);
+                        currentHorizOffset = sx;
+                        currentVertOffset  = sy;
+                    }
+                    ctx->prevEisOffsetX = static_cast<int32_t>(currentHorizOffset);
+                    ctx->prevEisOffsetY = static_cast<int32_t>(currentVertOffset);
+                    ctx->eisPrevValid = eisActive;
                 }
-                ctx->prevEisOffsetX = static_cast<int32_t>(currentHorizOffset);
-                ctx->prevEisOffsetY = static_cast<int32_t>(currentVertOffset);
-                ctx->eisPrevValid = eisActive;
 
                 // NPU 处理：有 buffer 就做，池空就跳过，不影响预览
                 if (targetNpuBuf != nullptr) {
@@ -582,13 +608,58 @@ void SentinelVisioner::capture_thread_func_(int camNum) {
                     }
                 }
 
-                // 预览处理：有 buffer 就做，池空就跳过，不影响 NPU
+                // 预览处理：有 buffer 就做，池空就跳过，不影响 NPU。
+                // 新版视觉 EIS 的预览输出也会真正使用防抖后的画面，
+                // 这样 SentinelQT 最终界面上按下“防抖开”后能直接看到稳定效果。
                 if (targetPreviewBuf != nullptr) {
                     targetPreviewBuf->timestampUs = timestampUs;
 
+                    // 第一步：先生成 raw RGB 预览，供 LK 光流估计当前帧运动。
                     bool previewOk = rga_convert_to_rgb_full_(nv12DmaFd, ctx->width, ctx->height,
                                                               nv12Stride, targetPreviewBuf);
                     if (previewOk) {
+                        // 第二步：视觉为主 EIS 使用 raw preview 估计画面运动，并更新下一帧 offset。
+                        // 这里估计的是“当前 raw 帧相对上一 raw 帧”的真实画面运动，不依赖 IMU 坐标系映射。
+                        if (ctx->visualEisEnabled.load() && ctx->visualEis && targetPreviewBuf->virtAddr) {
+                            cv::Mat previewMat(targetPreviewBuf->height, targetPreviewBuf->width,
+                                               CV_8UC3, targetPreviewBuf->virtAddr);
+
+                            VisionImuAssistState imuState;
+                            VisionImuAssistState* imuPtr = nullptr;
+                            if (imu_assist_callback_ && imu_assist_callback_(timestampUs, camNum, imuState)) {
+                                imuPtr = &imuState;
+                            }
+
+                            VisionEisResult vres;
+                            ctx->visualEis->processFrame(previewMat, timestampUs * 1000ULL, imuPtr, vres);
+                            ctx->visualEisOffsetX.store(vres.offsetX);
+                            ctx->visualEisOffsetY.store(vres.offsetY);
+                            ctx->visualEisOffsetValid.store(vres.visualReliable || vres.usedFallback);
+
+                            static thread_local int visualLogCount = 0;
+                            if (++visualLogCount % 60 == 0) {
+                                std::cout << "[Visual EIS Cam " << camNum << "] "
+                                          << "reliable=" << vres.visualReliable
+                                          << " offset=(" << vres.offsetX << "," << vres.offsetY << ")"
+                                          << " dxdy=(" << vres.dx << "," << vres.dy << ")"
+                                          << " pts=" << vres.trackedPoints
+                                          << " inliers=" << vres.inliers
+                                          << " alpha=" << vres.usedAlpha
+                                          << " cost=" << vres.costMs << "ms" << std::endl;
+                            }
+                        }
+
+                        // 第三步：如果 EIS 当前帧有可用 offset，则用上一帧估计出的 offset 重新生成防抖预览。
+                        // targetPreviewBuf 会被覆盖成稳定后的 RGB 图像，随后推给 SentinelQT UI。
+                        if (eisActive) {
+                            bool stablePreviewOk = rga_process_to_rgb_(nv12DmaFd, ctx->width, ctx->height,
+                                                                        nv12Stride, targetPreviewBuf,
+                                                                        currentHorizOffset, currentVertOffset);
+                            if (!stablePreviewOk) {
+                                std::cerr << "[RGA Error] EIS preview conversion failed, fallback to raw preview." << std::endl;
+                            }
+                        }
+
                         ctx->previewTaskQueue.push(targetPreviewBuf);
                     } else {
                         std::cerr << "[RGA Error] 预览转换失败，归还内存." << std::endl;
@@ -802,6 +873,74 @@ void SentinelVisioner::set_eis_smooth_alpha(float alpha) {
     }
 }
 
+
+bool SentinelVisioner::set_visual_eis_config(int camNum, const VisionEisConfig& config) {
+    auto it = _cameraContextMap.find(camNum);
+    if (it == _cameraContextMap.end()) {
+        std::cerr << "Camera number " << camNum << " not found!" << std::endl;
+        return false;
+    }
+
+    VisionEisConfig cfg = config;
+    cfg.camId = camNum;
+    if (cfg.inputWidth <= 0) cfg.inputWidth = it->second->width;
+    if (cfg.inputHeight <= 0) cfg.inputHeight = it->second->height;
+    if (cfg.processWidth <= 0) cfg.processWidth = 640;
+    if (cfg.processHeight <= 0) {
+        cfg.processHeight = std::max(1, (int)((double)cfg.processWidth * cfg.inputHeight / cfg.inputWidth + 0.5));
+    }
+
+    if (!it->second->visualEis) {
+        it->second->visualEis.reset(new VisionEisStabilizer(cfg));
+    } else {
+        it->second->visualEis->setConfig(cfg);
+    }
+
+    it->second->visualEisOffsetX.store(0);
+    it->second->visualEisOffsetY.store(0);
+    it->second->visualEisOffsetValid.store(false);
+
+    std::cout << "[Visual EIS] Camera " << camNum << " config updated: "
+              << cfg.inputWidth << "x" << cfg.inputHeight
+              << " process=" << cfg.processWidth << "x" << cfg.processHeight
+              << " maxOffset=" << cfg.maxOffsetPixel << std::endl;
+    return true;
+}
+
+bool SentinelVisioner::enable_visual_eis(int camNum, bool enable) {
+    auto it = _cameraContextMap.find(camNum);
+    if (it == _cameraContextMap.end()) {
+        std::cerr << "Camera number " << camNum << " not found!" << std::endl;
+        return false;
+    }
+
+    if (enable && !it->second->visualEis) {
+        VisionEisConfig cfg;
+        cfg.camId = camNum;
+        cfg.inputWidth = it->second->width;
+        cfg.inputHeight = it->second->height;
+        cfg.processWidth = 640;
+        cfg.processHeight = std::max(1, (int)((double)cfg.processWidth * cfg.inputHeight / cfg.inputWidth + 0.5));
+        it->second->visualEis.reset(new VisionEisStabilizer(cfg));
+    }
+
+    if (it->second->visualEis) {
+        it->second->visualEis->reset();
+    }
+    it->second->visualEisOffsetX.store(0);
+    it->second->visualEisOffsetY.store(0);
+    it->second->visualEisOffsetValid.store(false);
+    it->second->visualEisEnabled.store(enable);
+
+    std::cout << "[Visual EIS] Camera " << camNum << (enable ? " enabled." : " disabled.") << std::endl;
+    return true;
+}
+
+void SentinelVisioner::set_imu_assist_callback(
+    std::function<bool(uint64_t, int, VisionImuAssistState&)> callback) {
+    imu_assist_callback_ = std::move(callback);
+}
+
 bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight,
                                            int srcStride,
                                            DmaBuffer_t* dstBuf, int horizontalOffset, int verticalOffset) {
@@ -836,24 +975,44 @@ bool SentinelVisioner::rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeigh
     rga_buffer_t rga_buf_src = wrapbuffer_handle(rga_handle_src, srcStride, srcHeight, srcFmt, srcStride, srcHeight);
     rga_buffer_t rga_buf_dst = wrapbuffer_handle(rga_handle_dst, dstBuf->width, dstBuf->height, dstFmt, dstBuf->width, dstBuf->height);
 
-    // 3. 计算 Letterbox 参数
-    float scale = std::min((float)dstBuf->width / srcWidth, (float)dstBuf->height / srcHeight);
-    int scaled_w = srcWidth * scale;
-    int scaled_h = srcHeight * scale;
-
-    // EIS 偏移钳位：防止 drect 超出目标 buffer 边界
-    int maxOffX = (dstBuf->width  - scaled_w) / 2;
-    int maxOffY = (dstBuf->height - scaled_h) / 2;
-    if (horizontalOffset < -maxOffX) horizontalOffset = -maxOffX;
-    if (horizontalOffset >  maxOffX) horizontalOffset =  maxOffX;
-    if (verticalOffset   < -maxOffY) verticalOffset   = -maxOffY;
-    if (verticalOffset   >  maxOffY) verticalOffset   =  maxOffY;
-
-    // 【核心防抖逻辑】：在默认居中的基础上，叠加有符号的外部补偿量
-    int offset_x = (dstBuf->width - scaled_w) / 2 + horizontalOffset;
-    int offset_y = (dstBuf->height - scaled_h) / 2 + verticalOffset;
-
+    // 3. 计算 Letterbox / EIS 参数。
+    // 旧逻辑是移动 drect，但当 16:9 输入缩放到 640x640 时，scaled_w==dst_w，
+    // 水平方向没有 padding，horizontalOffset 会被夹成 0，导致水平防抖无法生效。
+    // 新逻辑在 EIS 激活时改为“源图裁剪窗口平移 + 轻微 zoom”，这样 X/Y 两个方向都有补偿空间，
+    // 正式项目中也更接近电子防抖常用的“保留边缘裁剪余量”做法。
     im_rect srect = {0, 0, srcWidth, srcHeight};
+
+    if (horizontalOffset != 0 || verticalOffset != 0) {
+        const float zoom = 1.10f;  // 约保留 9% 裁剪余量；可后续改成配置项
+        int cropW = static_cast<int>(srcWidth / zoom);
+        int cropH = static_cast<int>(srcHeight / zoom);
+        if (cropW < 16) cropW = srcWidth;
+        if (cropH < 16) cropH = srcHeight;
+
+        float cropScale = std::min((float)dstBuf->width / cropW, (float)dstBuf->height / cropH);
+
+        // offset 的语义：希望输出画面向 offset 方向补偿。
+        // 对源图裁剪来说，需要反向移动裁剪窗口，因此这里使用负号。
+        int shiftSrcX = static_cast<int>(std::round(-horizontalOffset / cropScale));
+        int shiftSrcY = static_cast<int>(std::round(-verticalOffset / cropScale));
+
+        int cropX = (srcWidth - cropW) / 2 + shiftSrcX;
+        int cropY = (srcHeight - cropH) / 2 + shiftSrcY;
+        if (cropX < 0) cropX = 0;
+        if (cropY < 0) cropY = 0;
+        if (cropX + cropW > srcWidth) cropX = srcWidth - cropW;
+        if (cropY + cropH > srcHeight) cropY = srcHeight - cropH;
+
+        srect = {cropX, cropY, cropW, cropH};
+    }
+
+    float scale = std::min((float)dstBuf->width / srect.width, (float)dstBuf->height / srect.height);
+    int scaled_w = static_cast<int>(srect.width * scale);
+    int scaled_h = static_cast<int>(srect.height * scale);
+
+    int offset_x = (dstBuf->width - scaled_w) / 2;
+    int offset_y = (dstBuf->height - scaled_h) / 2;
+
     im_rect drect = {offset_x, offset_y, scaled_w, scaled_h};
 
     // 4. 背景填充 (Padding)

@@ -178,3 +178,36 @@ int main() {
 3. **驱动日志拦截** ：若发生 `[RGA Error] Invalid DMA fd` 报错，通常意味着底层视频流启动失败或捕获了坏帧。程序已内置防雪崩机制，会立刻切断后续处理并归还错乱内存，请优先排查硬件接线与 V4L2 `VIDIOC_S_FMT` 协商结果。
 4. **暂停与恢复**：若需临时停止预览或推理但不希望重建 V4L2 管线，请使用 `camera_pause(camNum, true)` 暂停 RGA 处理，而非 `camera_stream_ctrl(false)`。后者会执行 STREAMOFF，在 RK3588 ISP 驱动上可能导致无法恢复。
 5. **超时拉取**：对于需要周期性检查退出条件的消费者（如 QT 子线程），建议使用 `try_get_preview(camNum, 200)` 而非 `wait_get_preview()`。后者内部使用无限阻塞的 `pop()`，在无帧到达时会永久挂起线程，导致退出死锁。
+
+## 视觉为主 + IMU 辅助 EIS 更新
+
+本版本新增视觉为主的电子防抖模块：
+
+- `include/vision_eis.hpp`
+- `src/vision_eis.cpp`
+- `docs/VISUAL-IMU-EIS-INTEGRATION.md`
+
+核心思路：通过 LK 光流 + RANSAC 直接估计画面帧间运动，IMU 只提供 `gyroRms / vibrationLevel` 辅助调节轨迹平滑强度。这样可以避免纯 IMU offset 方案中 `signX/signY/swapXY` 难调的问题。
+
+单路相机开启视觉 EIS：
+
+```bash
+./sentinel_visioner_demo1 /dev/video11 60 1
+```
+
+双路相机开启视觉 EIS：
+
+```bash
+./sentinel_visioner_demo3 /dev/video11 /dev/video21 60 1
+```
+
+## Visual-Primary + IMU-Assisted EIS
+
+本版本在 `sentinel-visioner` 内部新增实时视觉 EIS：
+
+- `include/vision_eis.hpp`
+- `src/vision_eis.cpp`
+
+核心算法为 LK 光流 + RANSAC 全局运动估计 + 轨迹平滑。IMU 不再直接输出 offset，而是通过 `set_imu_assist_callback()` 提供 `gyroRms / vibrationLevel`，用于动态调整轨迹平滑强度。
+
+`SentinelQT` 通过 `enable_visual_eis(camNum, true)` 启用该功能，最终界面预览会显示防抖后的画面。
