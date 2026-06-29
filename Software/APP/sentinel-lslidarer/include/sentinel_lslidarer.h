@@ -275,6 +275,13 @@ public:
     bool get_closest_frame(uint64_t cameraTsNs, LidarFrame& outFrame);
 
     /**
+     * @brief 获取最新的帧（无需时间戳匹配）
+     * @param outFrame 输出帧，调用者需预分配 outFrame.points 缓冲区
+     * @return true 成功，false 环形缓冲区为空
+     */
+    bool get_latest_frame(LidarFrame& outFrame);
+
+    /**
      * @brief 返回环形缓冲区中当前可用的帧数
      * @return 可用帧数量（0 ~ ringBufferSize）
      */

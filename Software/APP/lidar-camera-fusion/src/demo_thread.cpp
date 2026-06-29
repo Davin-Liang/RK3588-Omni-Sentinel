@@ -48,7 +48,7 @@ int main()
     LidarCameraFusion fusion;
 
     TrackerConfig trackerCfg;
-    trackerCfg.maxAssociationDistMeters = 3.0f; // 关联门限 3m
+    trackerCfg.bboxAssocMaxDistMeters = 3.0f; // 关联门限 3m
     trackerCfg.warningEnterDistMeters = 0.5f;   // 0.5 米内告警
     trackerCfg.warningExitDistMeters  = 0.8f;
     trackerCfg.warningCooldownNs      = 3000000000ULL; // 3 秒冷却
@@ -99,8 +99,9 @@ int main()
         const char* stateStr = "?";
         switch (t.state) {
         case TrackState::Tentative: stateStr = "Tentative"; break;
-        case TrackState::Confirmed: stateStr = "Confirmed"; break;
-        case TrackState::Coasting:  stateStr = "Coasting";  break;
+        case TrackState::FusionTracking:  stateStr = "FusionTracking"; break;
+        case TrackState::PureRadarTracking: stateStr = "PureRadarTracking"; break;
+        case TrackState::Lost:  stateStr = "Lost";  break;
         case TrackState::Deleted:   stateStr = "Deleted";   break;
         default: break;
         }

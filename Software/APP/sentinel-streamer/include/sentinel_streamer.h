@@ -266,6 +266,13 @@ public:
      */
     void set_eis_params(int camNum, int margin);
 
+    /**
+     * @brief 设置 EIS 录制调试双输出（开关）
+     * @param camNum  摄像头编号
+     * @param enabled true 同时输出 _raw.mp4（无防抖对照），false 仅正常输出
+     */
+    void set_eis_record_debug(int camNum, bool enabled);
+
 private:
     StreamerContext* contexts_[2];  ///< 最多支持 2 路摄像头，不透明实现
 };

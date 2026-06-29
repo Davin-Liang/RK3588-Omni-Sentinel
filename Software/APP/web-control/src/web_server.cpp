@@ -130,6 +130,8 @@ bool WebServer::start()
     impl_->httpServer_.Get(R"(/api/v1/status/hw)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/videos)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/fusion/config)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/eis/config)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/eis/visible)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/backtrack/files)", wrap_get);
 
     // MJPEG snapshots
@@ -183,6 +185,7 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/fusion/start)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/config)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/eis/config)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/0/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/1/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/backtrack/query)", wrap_post);

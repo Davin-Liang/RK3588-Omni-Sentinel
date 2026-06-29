@@ -82,6 +82,7 @@ struct PerCameraLidarOsd {
     std::vector<float>    lidarPointX;
     std::vector<float>    lidarPointY;
     std::vector<uint32_t> bboxPointIndices;
+    std::vector<float>    bboxClusterDistMeters;
 };
 
 /**
@@ -274,6 +275,9 @@ public:
      */
     bool copy_tracked_targets(TrackedTarget* out, uint32_t maxCount,
                               uint32_t* outCount) const;
+
+    bool copy_cluster_vis(ClusterVisData* out, uint32_t maxCount,
+                          uint32_t* outCount) const;
 
 private:
     // ---- 数学辅助 ----

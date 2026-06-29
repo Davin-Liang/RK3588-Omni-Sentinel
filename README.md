@@ -61,7 +61,7 @@
 | **LidarCameraFusion** | `Software/APP/lidar-camera-fusion/` | 视觉-雷达数据融合，Alpha-Beta 多目标跟踪，四态生命周期管理 | sentinel-lslidarer (仅头文件) |
 | **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像 + OSD 叠加，MPP 硬件编码 H.264，双编码器独立架构 | sentinel-visioner, librga, ffmpeg |
 | **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 推流/录像/暂停/OSD 控制 + 融合管理 | sentinel-visioner, sentinel-streamer, sentinel-yolo-infer, Qt5 |
-| **icm45686-eis-app** | `Software/APP/icm45686-eis-app/` | ICM45686 电子防抖，陀螺仪积分 → 像素偏移，回调注入 sentinel-visioner NPU 路径 | 仅 libpthread + libm |
+| **icm45686-eis-app-parameterized** | `Software/APP/icm45686-eis-app-parameterized/` | ICM45686 电子防抖（参数化版），ImuConfig/EisCameraConfig 双相机独立配置，平滑内置 Stabilizer，Web 热修改参数，录制双输出（防抖/未防抖对照） | 仅 libpthread + libm |
 | **DmaBufferPool** | `Software/APP/dma-buffer-pool/` | DMA 内存池，O(1) 空闲链表分配/归还 | librga, libdrm |
 
 每个组件目录下均有独立的 `README.md` 和完整文档，详见各组件的 `docs/` 目录。

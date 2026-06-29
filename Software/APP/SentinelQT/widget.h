@@ -12,8 +12,9 @@
 
 #include "lidar_camera_fusion.h"
 
-class Icm45686Reader;
-class EisStabilizer;
+#include "imu_eis.hpp"
+#include "vision_eis.hpp"
+
 class SentinelVisioner;
 class SentinelStreamer;
 class SentinelLslidarer;
@@ -142,20 +143,20 @@ private:
     uint32_t            fusionCamCount_;
 
     // ---- EIS ----
+    bool                showEisControl_ = false;
+    // ---- Visual EIS + IMU assist ----
+    // 当前方案中，视觉侧负责估计画面运动并输出 offset；
+    // ICM45686 只提供 gyroRms / vibrationLevel 等辅助状态，
+    // 不再直接用 IMU 积分结果决定 offsetX / offsetY。
     Icm45686Reader*     eisReader_ = nullptr;
-    EisStabilizer*      eisStabilizer_ = nullptr;
-    float               eisFocalX_[2];
-    float               eisFocalY_[2];
-    float               eisAxisSignX_[2];
-    float               eisAxisSignY_[2];
-    int32_t             eisMaxOffsetPixel_;
-    uint32_t            eisHalfWindowMs_;
+    VisionEisConfig     visualEisCfg_[2];
+    uint32_t            imuAssistWindowMs_ = 200;
 
     void load_config_();
     void init_eis_();
     void deinit_eis_();
     void setup_lidar_osd_provider_();
-    bool eis_offset_callback_(uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY);
+    bool imu_assist_callback_(uint64_t timestampUs, int camNum, VisionImuAssistState& state);
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
     void stop_preview_(int camNum);
@@ -194,6 +195,8 @@ private:
     std::string web_fusion_stop_();
     std::string web_fusion_config_(const std::string& body);
     std::string web_fusion_intrinsics_(int camNum, const std::string& body);
+    std::string web_eis_config_(const std::string& body);
+    std::string get_eis_config_json_() const;
     std::string web_backtrack_query_(const std::string& body);
     std::string web_delete_backtrack_(const std::string& body);
     std::string get_backtrack_files_json_() const;
