@@ -57,6 +57,7 @@ struct CameraContext {
     std::unique_ptr<DmaBufferPool> npuRgbPool;      ///< NPU RGB888 内存池
     std::unique_ptr<DmaBufferPool> origCopyPool;    ///< 原始大图(NV12) 拷贝池
     std::unique_ptr<DmaBufferPool> previewPool;      ///< 1080P RGB888 预览图像内存池
+    std::unique_ptr<DmaBufferPool> visualEisPool;    ///< 视觉 EIS 内部分析图像池，不依赖 Qt 预览是否开启
     std::unique_ptr<DmaBufferPool> usbConvertPool;  ///< USB YUYV→NV12 中间转换缓冲池
     std::unique_ptr<DmaBufferPool> usbSafePool;     ///< USB NV12 安全拷贝缓冲池（RGA 兼容性）
     std::unique_ptr<DmaBufferPool> mjpegDecodePool; ///< USB MJPG→NV12 软件解码输出池

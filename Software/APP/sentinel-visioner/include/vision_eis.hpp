@@ -63,10 +63,24 @@ struct VisionEisConfig {
 
     int maxOffsetPixel;      /* 输出 offset 限幅，避免裁剪越界 */
 
+    /*
+     * 输出补偿方向与强度。
+     * 视觉轨迹平滑得到的是“理想稳定轨迹 - 原始轨迹”的补偿量，
+     * 但不同 RGA 裁剪/写入方式对 offset 正负号的解释可能不同。
+     * 因此这里显式提供符号和增益配置，便于按实际链路标定。
+     * 本项目当前 RGA crop 链路下，默认使用 -1/-1，避免把抖动同向放大。
+     */
+    int outputSignX;         /* 1 或 -1，控制最终 offsetX 方向 */
+    int outputSignY;         /* 1 或 -1，控制最终 offsetY 方向 */
+    float offsetGainX;       /* offsetX 增益，调试阶段建议 0.6~1.0 */
+    float offsetGainY;       /* offsetY 增益，调试阶段建议 0.6~1.0 */
+    int maxOffsetStepPixel;  /* 单帧 offset 最大变化量，<=0 表示不限制 */
+    float minMotionPixel;    /* 小于该帧间运动时认为是噪声，不更新轨迹 */
+
     bool enableImuAdaptiveAlpha; /* 是否根据 IMU 震动等级调整 alpha */
     float alphaLowVibration;     /* 低震动 alpha。alpha 越大越跟手，防抖越弱 */
     float alphaMidVibration;     /* 中震动 alpha */
-    float alphaHighVibration;    /* 高震动 alpha。通常更小，防抖更强 */
+    float alphaHighVibration;    /* 高震动 alpha。实时链路建议不要过小 */
 
     bool enableRotationEstimate; /* 当前只记录 dtheta，默认不做旋转补偿 */
 
@@ -76,11 +90,14 @@ struct VisionEisConfig {
           processWidth(640), processHeight(360),
           maxCorners(500), qualityLevel(0.01), minDistance(10.0),
           minTrackedPoints(30), minInliers(20), ransacThreshold(3.0),
-          maxOpticalFlow(80.0), maxOffsetPixel(80),
-          enableImuAdaptiveAlpha(true),
-          alphaLowVibration(0.30f),
-          alphaMidVibration(0.20f),
-          alphaHighVibration(0.12f),
+          maxOpticalFlow(80.0), maxOffsetPixel(30),
+          outputSignX(-1), outputSignY(-1),
+          offsetGainX(1.0f), offsetGainY(1.0f),
+          maxOffsetStepPixel(8), minMotionPixel(0.20f),
+          enableImuAdaptiveAlpha(false),
+          alphaLowVibration(0.45f),
+          alphaMidVibration(0.45f),
+          alphaHighVibration(0.45f),
           enableRotationEstimate(true)
     {
     }
@@ -173,3 +190,4 @@ private:
 };
 
 #endif /* __VISION_EIS_HPP__ */
+

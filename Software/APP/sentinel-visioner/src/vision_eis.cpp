@@ -262,9 +262,18 @@ bool VisionEisStabilizer::processFrame(const cv::Mat& frame,
         return fallbackResult(timestampNs, result);
     }
 
-    trajectoryX_ += dx;
-    trajectoryY_ += dy;
-    trajectoryA_ += dtheta;
+    /*
+     * very small dx/dy is usually feature tracking noise.
+     * If we accumulate it forever, even a static camera can slowly drift and produce
+     * a non-zero offset.  Here we ignore tiny frame-to-frame translations but still
+     * keep the previous gray frame updated above.
+     */
+    const float motionMag = std::sqrt(dx * dx + dy * dy);
+    if (motionMag >= config_.minMotionPixel) {
+        trajectoryX_ += dx;
+        trajectoryY_ += dy;
+        trajectoryA_ += dtheta;
+    }
 
     float alpha = chooseAlpha(imuState);
     if (alpha < 0.01f) alpha = 0.01f;
@@ -282,8 +291,30 @@ bool VisionEisStabilizer::processFrame(const cv::Mat& frame,
         smoothA_ = alpha * trajectoryA_ + (1.0f - alpha) * smoothA_;
     }
 
-    int offsetX = static_cast<int>(std::round(smoothX_ - trajectoryX_));
-    int offsetY = static_cast<int>(std::round(smoothY_ - trajectoryY_));
+    /*
+     * 原始补偿量 = 平滑轨迹 - 原始轨迹。
+     * 由于后级 RGA 采用源图裁剪窗口平移，offset 的符号需要和实际裁剪语义匹配。
+     * 这里用 outputSignX/Y 做显式配置；根据当前 cam0 评估结果，默认取 -1/-1，
+     * 避免把画面运动同向放大。
+     */
+    float rawOffsetX = smoothX_ - trajectoryX_;
+    float rawOffsetY = smoothY_ - trajectoryY_;
+
+    int signX = (config_.outputSignX >= 0) ? 1 : -1;
+    int signY = (config_.outputSignY >= 0) ? 1 : -1;
+    int offsetX = static_cast<int>(std::round(signX * config_.offsetGainX * rawOffsetX));
+    int offsetY = static_cast<int>(std::round(signY * config_.offsetGainY * rawOffsetY));
+
+    /*
+     * 实时链路存在一帧延迟，offset 突变会让画面被拉扯，表现为 jitter_eval 变差。
+     * 因此限制单帧 offset 变化量，让补偿更平滑、保守。
+     */
+    if (config_.maxOffsetStepPixel > 0) {
+        int step = config_.maxOffsetStepPixel;
+        offsetX = clamp_int(offsetX, lastOffsetX_ - step, lastOffsetX_ + step);
+        offsetY = clamp_int(offsetY, lastOffsetY_ - step, lastOffsetY_ + step);
+    }
+
     offsetX = clampOffset(offsetX);
     offsetY = clampOffset(offsetY);
 
@@ -314,3 +345,4 @@ bool VisionEisStabilizer::processFrame(const cv::Mat& frame,
 
     return true;
 }
+

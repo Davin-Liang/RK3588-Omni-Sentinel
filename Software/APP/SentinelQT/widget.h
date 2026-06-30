@@ -149,7 +149,9 @@ private:
     // ICM45686 只提供 gyroRms / vibrationLevel 等辅助状态，
     // 不再直接用 IMU 积分结果决定 offsetX / offsetY。
     Icm45686Reader*     eisReader_ = nullptr;
+    EisStabilizer*      imuOnlyEis_ = nullptr;
     VisionEisConfig     visualEisCfg_[2];
+    ImuOnlyEisConfig    imuOnlyEisCfg_[2];
     uint32_t            imuAssistWindowMs_ = 200;
 
     void load_config_();
@@ -157,6 +159,8 @@ private:
     void deinit_eis_();
     void setup_lidar_osd_provider_();
     bool imu_assist_callback_(uint64_t timestampUs, int camNum, VisionImuAssistState& state);
+    bool imu_only_eis_offset_callback_(uint64_t timestampUs, int camNum,
+                                       int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
     void stop_preview_(int camNum);
@@ -229,3 +233,4 @@ private:
     bool eventFilter(QObject* obj, QEvent* event) override;
 };
 #endif // WIDGET_H
+
