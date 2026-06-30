@@ -122,3 +122,15 @@ dir=/mnt/sdcard
 | `warningEnterDistMeters` | `[Fusion]` | 告警触发距离 (m) | `3.0` |
 | `warningExitDistMeters` | `[Fusion]` | 告警解除距离 (m) | `3.5` |
 | `Cam0Fx` 等 | `[Fusion]` | 相机 0/1 内参 (px) | `400` |
+
+## Visual-Primary + IMU-Assisted EIS 集成说明
+
+当前版本的防抖不是离线工具，而是已接入最终 `SentinelQT` 主程序。运行方式仍为：
+
+```bash
+./SentinelQT -platform eglfs
+```
+
+点击界面中的“防抖”按钮后，`SentinelQT` 会调用 `SentinelVisioner::enable_visual_eis()` 开启对应相机的实时视觉 EIS。`sentinel-visioner` 在采集线程内使用 LK 光流估计相邻帧画面运动，结合 ICM45686 输出的 `gyroRms / vibrationLevel` 动态调整平滑强度，并通过 RGA 输出防抖后的预览和处理画面。
+
+详细说明见：`docs/VISUAL_IMU_EIS_RUNTIME_INTEGRATION.md`。

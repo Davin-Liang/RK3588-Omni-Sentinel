@@ -101,7 +101,7 @@ SentinelQT (QT5 嵌入式触控界面)
   ├── web-control (嵌入进程内 HTTP/WebSocket 服务器, REST API 远程控制)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
-  ├── icm45686-eis-app (IMU 电子防抖, 回调注入 sentinel-visioner NPU 路径)
+  ├── icm45686-eis-app-parameterized (IMU 电子防抖, 参数化 API, 回调注入 sentinel-visioner NPU 路径)
   ├── Qt5 Widgets (QStackedWidget 四页布局)
   └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [NVMe] 等)
 ```
@@ -110,32 +110,34 @@ SentinelQT (QT5 嵌入式触控界面)
 
 嵌入式 HTTP/WebSocket 服务器，在 SentinelQT 进程中运行，提供 REST API 远程操控板端设备，配套单文件 SPA 前端完全复刻 QT 界面风格。
 
-- **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 27+ REST 路由（含回溯）和 WebSocket 端点
+- **WebServer**: 封装 cpp-httplib HTTP 服务器，独立 `std::thread` 运行 `listen()` 阻塞循环。注册 30+ REST 路由（含回溯、EIS 参数热更新）和 WebSocket 端点
 - **线程安全模型**: REST 命令通过 `QMetaObject::invokeMethod(widget, lambda, Qt::BlockingQueuedConnection)` 同步调度到 Qt 主线程；WebSocket 推送使用 `std::queue` + `std::mutex` 消息队列（Qt 主线程非阻塞投递，广播线程消费发送）
 - **MJPEG 快照**: 预览帧由 `on_frame_ready_()` 写入 `QImage` 缓存（mutex 保护），HTTP handler 在锁内完成 JPEG 编码后返回。不直接调 `try_get_preview()` 避免跨线程竞争 DMA 缓冲区
-- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）。**三主题切换**：默认墨绿、深红+象牙白、皇家蓝+碧落，🎨 按钮切换，localStorage 持久化
-- **数据回溯面板**: 右下角系统控制+回溯并排双卡片，含秒数输入/相机选择/文件列表，通过 REST API 与 Qt 双向 dirty flag 同步
-- **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 数据，实时绘制距离网格、目标（按状态着色）、速度箭头、告警脉冲圈
+- **SPA 前端**: 单文件 `index.html`，仪表盘式单页布局。每路相机独立预览/推流/录像/暂停按钮 + 状态指示灯（录像时显示时长和分辨率）。推流视频通过 iframe 嵌入 MediaMTX WebRTC 播放器（端口 8889，延迟 <1s），录像文件支持在线播放（流式输出 + Range seek）。**五主题切换**：默认墨绿、深红+象牙白、皇家蓝+碧落、灰蓝+珍珠、紫罗兰+thistle，🎨 按钮切换，localStorage 持久化。按钮配色随主题联动（btn-on 用 accent 色，btn-off 用 bg2 色）
+- **数据回溯面板**: 左列系统控制+数据回溯，右列录像管理。回溯/刷新按钮在标题右侧，相机选择和秒数输入并排。文件列表在各卡片下方，最多显示 30 条
+- **融合跟踪**: Canvas 2D API 复刻 TopDownView 俯视图，WebSocket 推送 TrackedTarget 和 ClusterVisData，实时绘制距离网格（刻度自适应范围）、目标（蓝/绿/黄/红四色状态）、速度箭头、告警脉冲圈、DBSCAN 聚类半透明圆（YOLO认领绿/孤儿蓝）。未启动融合时显示"融合待启动"
 - **暂停保护**: 暂停时自动停止推流/录像/预览；推流/录像启动时若相机已暂停则自动恢复，避免死锁
 - **配置**: `config.ini` 中 `[WebServer]` 节（`port=8080`, `enabled=true`）
 - **SPA 热加载**: HTML 从文件系统多路径搜索加载（`web/index.html`），编辑后无需重编译
 
 唯一公共头文件: `include/web_server.h`，API 类: `WebServer`
 
-### icm45686-eis-app — ICM45686 电子防抖
+### icm45686-eis-app-parameterized — ICM45686 电子防抖（参数化版本）
 
 基于 ICM45686 SPI 内核驱动的用户态 EIS（电子防抖）组件。通过 `/dev/icm45686` 字符设备读取 IMU 数据，在用户态完成陀螺仪积分和像素偏移计算。通过回调注入模式集成到 SentinelQT 的 sentinel-visioner 管线。
 
-- **Icm45686Reader**: 后台 `std::thread` 以可配置频率（默认 100Hz）轮询 `/dev/icm45686` ioctl，推入线程安全 `ImuRingBuffer`（默认 512 样本 `std::deque` + `std::mutex`）
-- **EisStabilizer**: 梯形陀螺仪积分 → 像素偏移。核心 API `calculate_eis_offset(focalX, focalY, targetTimestampNs, halfWindowMs, offsetX, offsetY)`，目标时间窗口查询 IMU 样本，小角度近似 `offset ≈ focal × angle`，裁剪到 `maxOffsetPixel`
-- **回调注入**: SentinelVisioner 加入 `set_eis_offset_callback(std::function)`，采集线程每帧调用回调获取偏移，传入 `rga_process_to_rgb_()` 的 `horizontalOffset/verticalOffset` 参数。**仅作用于 NPU 640×640 RGB888 推理路径（不作用于预览和推流原始帧）**
-- **偏移钳位**: `rga_process_to_rgb_()` 新增 drect 边界钳位，防止 letterbox 边距为零时 EIS 偏移导致 drect 越界 RGA 崩溃（#13）。`maxOffX = (dstW - scaled_w) / 2`
-- **低通滤波**: 采集线程内 EMA 平滑：`smoothed = alpha * current + (1-alpha) * prev`，消除 IMU 噪声微颤。通过 `set_eis_smooth_alpha()` 配置（默认 0.7），`config.ini` `[EIS]` 节 `smoothAlpha` 键可调
-- **Streamer EIS**: sentinel-streamer 的 `rga_scale_nv12_to_720p()` 支持 EIS crop+scale，在 1080p→720p 缩放步骤中一次 RGA 操作完成防抖。EIS 偏移通过 DmaBuffer_t 字段（`eisOffsetX/Y`、`eisActive`）随帧传递，裁切边距通过 `set_eis_params()` 配置（默认 32px，`config.ini` `[EIS]` 节 `streamerMargin`）。EIS 关闭时走原路径无开销
-- **两路隔离**: 两路相机共用 IMU 硬件和 Reader，但各自独立 `eisEnabled_[camNum]` 开关、`focalX/Y`、`axisSignX/Y`。线程安全：`setAxisSign()` 不在回调内调用，符号在回调结果上手动乘
-- **配置**: `config.ini` 中 `[EIS]` 节：`device`、`sampleHz`、`gyroRange/accelRange`、`halfWindowMs`、`maxOffsetPixel`、`smoothAlpha`、`streamerMargin`、per-camera `focalX/Y` 和 `axisSignX/Y`
-- **API**: REST `POST /api/v1/cam/{0,1}/eis/start|stop`，WebSocket status 含 `eisEnabled` 字段
-- **依赖**: POSIX + pthread + libm + `<functional>`（回调），不依赖 ICM45686 头文件（sentinel-visioner 侧解耦）
+**参数化架构**: 参数分为两层 — `ImuConfig`（IMU 全局配置：sampleHz、gyroRange/accelRange、零偏标定）和 `EisCameraConfig`（每路相机独立配置：focalX/Y、halfWindowMs、maxOffsetPixel、signX/Y、swapXY、timeOffsetMs、smoothingAlpha、enableSmoothing）。双相机共享同一 IMU Reader，但各用独立的 EisCameraConfig。
+
+- **Icm45686Reader**: 后台 `std::thread` 以可配置频率读取 `/dev/icm45686`，推入 `ImuRingBuffer`（默认 512 样本）。新增 `configure(ImuConfig)` 统配接口（替代旧的 setAccelRange/setGyroRange 分散调用）、`start()` 无参启动（采样频率从 ImuConfig 取）、`calibrateGyroBias()` 静置零偏标定。`readSample()` 自动扣除已配置的陀螺零偏
+- **EisStabilizer**: 梯形陀螺仪积分 → 像素偏移。核心 API `calculate_eis_offset(const EisCameraConfig& config, uint64_t frameTimestampNs, offsetX, offsetY)`，所有参数封装在 config 中，sign/smoothing/maxOffset 内置应用。旧签名 `(focalX, focalY, targetTs, halfWindowMs, ...)` 保留兼容。平滑按 camId 隔离状态，通过 `resetSmoothing(camId)` 清除残留
+- **回调注入**: SentinelVisioner 加入 `set_eis_offset_callback(std::function)`，采集线程每帧调用回调获取偏移，传入 `rga_process_to_rgb_()` 的 `horizontalOffset/verticalOffset` 参数。**仅作用于 NPU 640×640 RGB888 推理路径**。visioner 侧 EMA 平滑已禁用（`set_eis_smooth_alpha(1.0f)`），平滑移至 Stabilizer 内部
+- **Streamer EIS**: `rga_scale_nv12_to_720p()` 支持 EIS crop+scale，偏移通过 DmaBuffer_t 字段随帧传递。裁切边距 `set_eis_params()`（默认 32px，`config.ini` `streamerMargin`）
+- **EIS 录制调试双输出**: sentinel-streamer 支持 `set_eis_record_debug(camNum, bool)` — 开启后 720p 录制同时输出两路 MP4：`xxx.mp4`（正常防抖）+ `xxx_raw.mp4`（无防抖对照）。第二路编码器和 MP4 muxer 在 `start_record()` 时创建，`stop_record()` 时清理。无防抖的 RGA scale 在 origBuf release 前完成，避免 dmaFd 复用竞态。`config.ini` `eisRecordDebug` 控制
+- **两路隔离**: 两路相机共享 IMU Reader，各自独立 `eisEnabled_[camNum]` 和 `EisCameraConfig eisCamCfg_[2]`
+- **Web 防抖控制卡片**: 网页端 `showEisControl=true` 时显示"防抖控制"卡片（位于系统控制下），CAM1/CAM2 标签切换，所有热修改参数可在线调整并保存。`config.ini` `showEisControl=false` 隐藏卡片。REST: `GET/POST /api/v1/eis/config`、`GET /api/v1/eis/visible`
+- **配置**: `config.ini` `[EIS]` 节：`device`、`sampleHz`、`gyroRange/accelRange`、`enableGyroBiasCalib`/`biasCalibMs`、per-camera `FocalX/Y`/`AxisSignX/Y`/`SwapXY`/`TimeOffsetMs`/`FrameRate`/`HalfWindowMs`/`MaxOffsetPixel`/`EnableSmoothing`/`SmoothAlpha`、`streamerMargin`、`showEisControl`、`eisRecordDebug`
+- **API**: REST `POST /api/v1/cam/{0,1}/eis/start|stop`、`GET /api/v1/eis/config`（查询参数）、`POST /api/v1/eis/config`（热更新）、`GET /api/v1/eis/visible`（卡片开关），WebSocket status 含 `eisEnabled`、`showEisControl` 字段
+- **依赖**: POSIX + pthread + libm + `<functional>`，不依赖 ICM45686 头文件（sentinel-visioner 侧解耦）
 
 构建: `icm45686_eis_lib` (STATIC, C++14, `src/imu_eis.cpp`) + `icm45686_user_lib` (STATIC, C99, `src/icm45686_user.c`)
 
@@ -149,27 +151,37 @@ SentinelQT (QT5 嵌入式触控界面)
 
 唯一公共头文件: `include/sentinel_lslidarer.h`，API 类: `SentinelLslidarer`
 
-### lidar-camera-fusion — 视觉-雷达数据融合
+### lidar-camera-fusion — 视觉-雷达数据融合 (v2 全局聚类)
 
-纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，输出每个检测框内的 LiDAR 点索引。
+纯算法组件，将 YOLO 2D 检测框与单线激光雷达点云进行融合，内置多目标跟踪器（`LidarTargetTracker`）。独立融合线程 `fusion_thread_()` 以 LiDAR 帧率（10Hz）驱动 DBSCAN 聚类 + Alpha-Beta 跟踪管线，融合循环仅在 LiDAR 新帧到达时执行。
 
-- **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化为 6 次乘法 + 3 次加法
-- **内参投影**: pinhole 模型 `u = fx*cx/cz + cx_principal`，过滤相机后方及画面外点
-- **2D bbox 判定**: first-hit 策略，每个 LiDAR 点归属至多一个检测框
-- **两阶段算法**: Pass 1 — 透射+投影+分类；Pass 2 — 计数排序写回候选点索引
-- **累计融合**: `reset()` → 多次 `fuse_data()` (不同相机) → `result()`，支持多相机累计
-- **预分配内存**: `new (std::nothrow)` 预分配约 12 KB 缓冲区，零运行时堆分配
-- **线程模型**: 无内部线程/锁，设计为单线程顺序调用
+- **DBSCAN 聚类** (`dbscan_cluster_`): 2D 笛卡尔空间聚类（O(n²)，540点可忽略），BFS 扩张。替代旧 CDC 角度链聚类。参数 `dbscanEpsMeters` / `dbscanMinPoints` / `maxPointDistanceMeters` / `maxClusterDistanceMeters`
+- **时间证据累积** (`persist_clusters_`): DBSCAN 输出不直接变 detection，先做帧间 cluster 匹配（质心距离 < max(eps×2.5, 1.0m)）。连续出现 ≥ `clusterPersistenceFrames`(2) 帧才输出为正式 detection。槽位满时复用失效记录或淘汰最老记录
+- **bbox 认领评分** (`bbox_claim_`): 对每个 confirmed 簇，投影质心到各相机，计算 `score = 1/(1+dist) * proximityFactor(pixelDist)`。每 bbox 选最高分簇，冲突时一个簇只能被一个 bbox 认领（赢家通吃+补选）。点数 < `minBboxClaimPoints`(10) 的簇不参与竞争
+- **Alpha-Beta 跟踪器** (`LidarTargetTracker`): 预测 → 评分制贪心最近邻关联（纯距离评分 `1/(1+d²)`，无 bboxIdx/classId 门控，不同检测类型用不同硬门限）→ 校正 → 5 状态生命周期
+- **5 状态生命周期** (`manage_lifecycle_`): Tentative(蓝) → FusionTracking(绿, YOLO+LiDAR) ⇄ PureRadarTracking(黄, 纯LiDAR) → Lost(红, 预测中) → Deleted。允许连续丢失 `maxFusionMisses`(2) 帧缓冲，单帧丢失不跳变
+- **孤儿检测**: 未被 bbox 认领的确认簇，仅匹配非 Tentative 非 Deleted 航迹续命（门限 `orphanAssocMaxDistMeters=0.5m`），不创建新 track
+- **纯雷达模式**: YOLO 无检测时全点归孤儿聚类，维持已有 track
+- **LiDAR 帧去重**: `update()` 入口检查时间戳，相同则跳过；融合循环先取雷达帧再决定是否 drain YOLO
+- **maxTracks 淘汰**: 槽位满时自动淘汰最老的 Lost track 腾出空间
+- **OSD 快照**: `fuse_data()` 投影 LiDAR 点供推流画面显示（独立于 tracker 聚类），tracker 质心供距离标签
+- **聚类可视化**: 通过 `copy_cluster_vis()` 导出 ClusterVisData（质心+半径+类型），WebSocket 推送至前端 Canvas 渲染半透明圆
+- **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化
+- **预分配内存**: 全栈数组预分配，零运行时堆分配
 
-唯一公共头文件: `include/lidar_camera_fusion.h`，API 类: `LidarCameraFusion`
+核心头文件: `include/lidar_camera_fusion.h`, `include/lidar_target_tracker.h`, `include/lidar_tracking_types.h`
 
-运行时配置 API：
-- `get_tracker_config()` — 获取当前 TrackerConfig 只读引用
-- `get_camera_config(camIndex, outCfg)` — 获取指定相机配置
-- `update_camera_intrinsics(camIndex, fx, fy, cx, cy, w, h)` — 运行时更新相机内参（保留外参矩阵）
-- `get_cam_count()` — 获取当前相机数量
-- `configure_tracker(config)` — 支持运行时热更新（已移除 `trackingEnabled_` 前置守卫）
-- `set_detection_provider(provider)` — 设置外部 YOLO 检测提供者，替换内部假检测回退
+关键调试日志: `[Fusion]` 每 5 帧输出 track 状态 F/P/L/T, `[BboxClaim]` 每帧输出 bbox 认领详情, `[TrackerTime]` 每帧输出 tracker 耗时
+
+可调参数: 见 `config.ini [Fusion]` 节 (dbscanEpsMeters, alpha, bboxAssocMaxDistMeters, maxFusionMisses 等 24 项，全部热修改)
+
+已知局限:
+- 孤儿不创建新 track (需 YOLO 首次探测)
+- 每 bbox 最多一个检测 (人数>框数时多余的人仅孤儿续命)
+- YOLO 检测到但 LiDAR 看不到的目标无法跟踪 (单线雷达扫描面有限)
+- OSD 投影与 tracker 聚类独立 (画面上有点 ≠ tracker 检测到)
+
+详细文档: `lidar-camera-fusion/docs/FUSION_PIPELINE.md`, `lidar-camera-fusion/BUG_RECORD.md`
 
 ### sentinel-yolo-infer — RKNN YOLOv8 NPU 推理
 
@@ -220,6 +232,7 @@ SentinelQT (QT5 嵌入式触控界面)
 - **RecordBufferPool 环形缓冲**: 基于 DmaBufferPool + RGA DMA 拷贝的 NV12 帧环形缓冲区，在编码前暂存历史帧供数据回溯。每路独立，槽位数可配
 - **rga_nv12_copy**: RGA IM2D `imcopy` 硬件 DMA 零拷贝，避免 CPU memcpy 开销
 - **EIS 防抖推流/录像**: `rga_scale_nv12_to_720p()` 支持 EIS 参数（`eisOffsetX/Y`、`eisActive`、`eisMargin`），EIS 激活时在 1080p→720p 缩放中一次 RGA 完成 crop+scale 防抖。偏移量通过 DmaBuffer_t 字段随帧传递，无需重复计算
+- **EIS 录制调试双输出**: `set_eis_record_debug(camNum, bool)` 开启后 720p 录制同时输出两路 MP4（正常防抖 + 无防抖对照 `_raw.mp4`）。第二路编码器/MP4 在 `start_record()` 创建、`stop_record()` 清理。无防抖 RGA scale 在 origBuf release 前完成。`config.ini` `[EIS]` `eisRecordDebug` 控制
 - **录像 PTS 独立基准**: `recordBaseTsUs` 与推流 `baselineTsUs` 解耦，每次录像从首帧时间戳自动初始化，确保 PTS 从 0 开始
 - **回溯公共 API**: `init_record_buffer(camNum, slotCount, width, height)` 初始化缓冲池，`try_get_record_frame(camNum, &data, &size, &ts)` 非阻塞 FIFO 消费帧，`release_record_frame(camNum, data)` 归还缓冲
 

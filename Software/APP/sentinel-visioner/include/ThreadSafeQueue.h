@@ -50,7 +50,20 @@ public:
         cond_.notify_one(); // 通知等待的消费者
     }
 
-    bool empty() const 
+    // 清空队列，如非空则只输出最后一个元素（用于取最新数据）
+    bool drain_latest(T& val)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) return false;
+        while (queue_.size() > 1) {
+            queue_.pop();
+        }
+        val = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    bool empty() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();

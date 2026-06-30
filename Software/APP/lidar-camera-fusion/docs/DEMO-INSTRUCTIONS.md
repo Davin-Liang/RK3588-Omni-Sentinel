@@ -91,10 +91,10 @@ chmod +x /tmp/lidar_camera_fusion_demo_thread
 
 ```cpp
 TrackerConfig trackerCfg;
-trackerCfg.maxAssociationDistMeters = 3.0f;   // 调大匹配距离
+trackerCfg.bboxAssocMaxDistMeters = 3.0f;   // 调大匹配距离
 trackerCfg.warningEnterDistMeters   = 0.5f;   // 告警阈值
-trackerCfg.maxCoastingFrames        = 20;     // 延长 coasting 记忆
-trackerCfg.clusterEpsMeters         = 1.0f;   // 放宽聚类距离
+trackerCfg.maxLostFrames        = 20;     // 延长 coasting 记忆
+trackerCfg.dbscanEpsMeters         = 1.0f;   // 放宽聚类距离
 ```
 
 ### 已知局限（虚构框阶段）
@@ -103,4 +103,4 @@ trackerCfg.clusterEpsMeters         = 1.0f;   // 放宽聚类距离
 |------|------|------|
 | 人必须站在特定区域 | 虚构 bbox 固定，人体必须在其投影范围内 | 调整 bbox 坐标或使用 `demo_tracking` x86 测试算法 |
 | 远处物体会干扰 | 工位/墙壁的雷达簇 >2.5m 被距离过滤硬编码排除 | YOLO 就绪后移除距离过滤 |
-| ID 可能跳变 | 人走到 >3m 外再回来，匹配不上旧航迹 | 调大 `maxAssociationDistMeters` |
+| ID 可能跳变 | 人走到 >3m 外再回来，匹配不上旧航迹 | 调大 `bboxAssocMaxDistMeters` |
