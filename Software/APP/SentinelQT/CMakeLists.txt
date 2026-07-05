@@ -66,6 +66,11 @@ if(NOT TARGET web_control_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../web-control ${CMAKE_CURRENT_BINARY_DIR}/webcontrol_build)
 endif()
 
+# DeepSeek AI 推理
+if(NOT TARGET deepseek_ai_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Deepseek ${CMAKE_CURRENT_BINARY_DIR}/deepseek_build)
+endif()
+
 find_package(Threads REQUIRED)
 
 set(TS_FILES SentinelQT_zh_CN.ts)
@@ -92,6 +97,7 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Deepseek/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -102,6 +108,7 @@ target_link_libraries(SentinelQT PRIVATE
     sentinel_lslidarer_lib
     lidar_camera_fusion_lib
     web_control_lib
+    deepseek_ai_lib
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib

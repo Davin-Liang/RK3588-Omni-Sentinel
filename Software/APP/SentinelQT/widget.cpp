@@ -8,7 +8,9 @@
 #include "fusion_worker.h"
 #include "top_down_view.h"
 #include "virtual_keyboard.h"
+#include "ai_report_worker.h"
 
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QThread>
@@ -24,6 +26,7 @@
 #include <QFrame>
 #include <QPainter>
 #include <QPushButton>
+#include <QTextEdit>
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <cstring>
@@ -373,6 +376,44 @@ Widget::Widget(QWidget *parent)
         }
     }
 
+    // ---- AI 分析 Worker ----
+    aiReportWorker_ = nullptr;
+    aiReportThread_ = nullptr;
+    aiReportText_   = ui->aiReportText;
+    aiReportText_->setVisible(false);  // 默认隐藏
+
+    {
+        DeepSeekInference::Config aiCfg;
+        aiCfg.modelPath = config_.value("AI/modelPath",
+            "/root/Deepseek/install/demo_Linux_aarch64/"
+            "DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm").toString().toStdString();
+        aiCfg.maxNewTokens  = config_.value("AI/maxNewTokens",  512).toInt();
+        aiCfg.maxContextLen = config_.value("AI/maxContextLen", 2048).toInt();
+        aiCfg.temperature   = config_.value("AI/temperature",   0.7f).toFloat();
+
+        aiReportWorker_ = new AIReportWorker();
+        aiReportWorker_->setConfig(aiCfg);
+        aiReportThread_ = new QThread(this);
+        aiReportWorker_->moveToThread(aiReportThread_);
+
+        connect(aiReportWorker_, &AIReportWorker::reportReady,
+                this, &Widget::on_ai_report_ready_);
+        connect(aiReportWorker_, &AIReportWorker::error,
+                this, [this](const QString& msg) {
+            aiReportText_->setVisible(true);
+            aiReportText_->setHtml(
+                QString("<html><body style='color:#f85149;'>AI 错误: %1</body></html>").arg(msg));
+        });
+        connect(aiReportThread_, &QThread::started,
+                aiReportWorker_, &AIReportWorker::start);
+
+        aiReportThread_->start();
+    }
+
+    // ---- AI 分析按钮 ----
+    connect(ui->btnAIAnalysis, &QPushButton::clicked,
+            this, &Widget::on_btn_ai_analysis_);
+
     set_status_("系统就绪", "#3fb950");
     update_button_states_();
 }
@@ -386,6 +427,19 @@ Widget::~Widget()
         webServer_->stop();
         delete webServer_;
         webServer_ = nullptr;
+    }
+
+    // 停止 AI 分析子系统
+    if (aiReportWorker_) {
+        aiReportWorker_->stop();
+        if (aiReportThread_ && aiReportThread_->isRunning()) {
+            aiReportThread_->quit();
+            aiReportThread_->wait(3000);
+        }
+        delete aiReportWorker_;
+        aiReportWorker_ = nullptr;
+        delete aiReportThread_;
+        aiReportThread_ = nullptr;
     }
 
     // 停止 fusion 子系统
@@ -808,6 +862,9 @@ void Widget::update_hw_usage_()
     if (webServer_ && webServer_->is_running()) {
         webServer_->push_status(get_status_json_());
     }
+
+    // AI 状态快照推送 (1Hz)
+    update_ai_status_snapshot_();
 }
 
 // ---- Record info ----
@@ -2422,3 +2479,131 @@ bool Widget::eventFilter(QObject* obj, QEvent* event)
     }
     return QWidget::eventFilter(obj, event);
 }
+
+// ============================================================================
+// AI 系统状态分析
+// ============================================================================
+
+void Widget::update_ai_status_snapshot_()
+{
+    if (!aiReportWorker_) return;
+
+    // 相机状态字符串
+    auto camStatusStr = [this](int i) -> QString {
+        QStringList parts;
+        parts.append(previewActive_[i]
+            ? QString::fromUtf8("预览中") : QString::fromUtf8("预览关闭"));
+
+        if (streamer_->is_streaming(i))
+            parts.append(QString::fromUtf8("推流中"));
+        if (streamer_->is_recording(i)) {
+            QString res = (recordResolution_[i] == 720) ? "720p" : "1080p";
+            parts.append(QString::fromUtf8("录像中(%1)").arg(res));
+        }
+        if (cameraPaused_[i])
+            parts.append(QString::fromUtf8("已暂停"));
+
+        return parts.join(", ");
+    };
+
+    // 激光雷达状态
+    QString lidarStatus;
+    if (lidar_) {
+        lidarStatus = lidar_->is_running()
+            ? QString::fromUtf8("运行中, 10Hz")
+            : QString::fromUtf8("未启动");
+    } else {
+        lidarStatus = QString::fromUtf8("未初始化");
+    }
+
+    // IMU 状态（当前未接入，使用占位）
+    QString imuStatus = QString::fromUtf8("未启用");
+
+    // 融合跟踪状态
+    QString fusionStatus;
+    if (fusionEnabled_) {
+        uint32_t total = static_cast<uint32_t>(lastTrackedTargets_.size());
+        uint32_t confirmed = 0;
+        uint32_t warnings = 0;
+        for (const auto& t : lastTrackedTargets_) {
+            if (t.state == TrackState::Confirmed) ++confirmed;
+            if (t.warningActive) ++warnings;
+        }
+        fusionStatus = QString::fromUtf8("目标数: %1, 已确认: %2, 告警: %3, 融合引擎: 运行中")
+                           .arg(total).arg(confirmed).arg(warnings);
+    } else {
+        fusionStatus = QString::fromUtf8("融合引擎: 关闭");
+    }
+
+    // 温度/CPU 需要重新读取（update_hw_usage_ 中的局部变量）
+    int tempC = -1;
+    FILE* fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    if (fp) { int raw; if (fscanf(fp, "%d", &raw) == 1) tempC = raw / 1000; fclose(fp); }
+
+    int cpuUsage = -1;
+    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+    fp = fopen("/proc/stat", "r");
+    if (fp) {
+        int n = fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                       &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+        fclose(fp);
+        if (n >= 4) {
+            uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
+            uint64_t totalDelta = total - prevCpuTotal_;
+            uint64_t idleDelta  = idle  - prevCpuIdle_;
+            if (prevCpuTotal_ > 0 && totalDelta > 0)
+                cpuUsage = static_cast<int>(100 - (idleDelta * 100 / totalDelta));
+        }
+    }
+
+    aiReportWorker_->updateStatus(
+        tempC, cpuUsage,
+        camStatusStr(0), camStatusStr(1),
+        lidarStatus, imuStatus, fusionStatus,
+        lastFps_[0], lastFps_[1]);
+}
+
+void Widget::on_btn_ai_analysis_()
+{
+    if (!aiReportWorker_) {
+        aiReportText_->setVisible(true);
+        aiReportText_->setHtml(
+            QString::fromUtf8("<html><body style='color:#f85149;'>AI 模块未初始化</body></html>"));
+        return;
+    }
+
+    aiReportText_->setVisible(true);
+    aiReportText_->setHtml(
+        QString::fromUtf8("<html><body style='color:#58a6ff;'>"
+        "<b>正在分析系统运行状态…</b><br>"
+        "DeepSeek-R1 1.5B 模型推理中，预计需要 20-60 秒，请耐心等待..."
+        "</body></html>"));
+    QApplication::processEvents();  // 立即刷新 UI
+
+    aiReportWorker_->requestReport();
+}
+
+void Widget::on_ai_report_ready_(const QString& report)
+{
+    if (!aiReportText_) return;
+
+    // 将报告中的换行转为 HTML，过滤 <think> 标签用灰色显示
+    QString html = report;
+    html.replace("&", "&amp;");
+    html.replace("<", "&lt;");
+    html.replace(">", "&gt;");
+    html.replace("\n", "<br>");
+
+    // 还原 <think>...</think> 标签（用灰色斜体显示思维链）
+    html.replace("&lt;think&gt;",
+                 "<span style='color:#8b949e; font-style:italic;'>[思考] ");
+    html.replace("&lt;/think&gt;", "</span>");
+
+    aiReportText_->setHtml(
+        QString("<html><body style='color:#e6edf3; font-size:12px;'>"
+                "<b style='color:#3fb950;'>AI 系统状态分析报告</b><br><br>"
+                "%1"
+                "</body></html>").arg(html));
+    set_status_("AI 分析完成", "#3fb950");
+}
+

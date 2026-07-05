@@ -13,9 +13,15 @@ QT5_CMAKE_DIR=${QT5_PREFIX:-"$TOOL_CHAIN/aarch64-buildroot-linux-gnu/sysroot/usr
 
 mkdir -p build/
 cd build/
+# DeepSeek / RKLLM Runtime SDK path (optional)
+# 指向 rkllm-runtime SDK 的 librkllm_api 目录
+# 例如: /home/elf/Linux_SDK/Deepseek/Deepseek_env/rknn-llm-main/rkllm-runtime/Linux/librkllm_api
+RKLLM_RUNTIME_PATH=${RKLLM_RUNTIME_PATH:-""}
+
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSROOT="$TOOL_CHAIN/aarch64-buildroot-linux-gnu/sysroot" \
-    -DCMAKE_PREFIX_PATH="$QT5_CMAKE_DIR"
+    -DCMAKE_PREFIX_PATH="$QT5_CMAKE_DIR" \
+    -DRKLLM_RUNTIME_PATH="$RKLLM_RUNTIME_PATH"
 make -j$(nproc)
 make install

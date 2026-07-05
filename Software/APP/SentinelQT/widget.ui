@@ -45,6 +45,16 @@
           </property>
          </widget>
         </item>
+        <item>
+         <widget class="QPushButton" name="btnAIAnalysis">
+          <property name="text"><string>AI 分析</string></property>
+          <property name="minimumSize"><size><width>64</width><height>24</height></size></property>
+          <property name="maximumSize"><size><width>64</width><height>24</height></size></property>
+          <property name="styleSheet">
+           <string notr="true">font-size: 10px; font-weight: 600; color: #e6edf3; background-color: #1f6feb; border: 1px solid #388bfd; border-radius: 6px; padding: 0 4px;</string>
+          </property>
+         </widget>
+        </item>
         <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item>
         <item>
          <widget class="QLabel" name="titleLabel">
@@ -402,6 +412,21 @@
            </widget>
           </item>
          </layout>
+        </widget>
+       </item>
+
+       <!-- AI 分析报告显示区 -->
+       <item>
+        <widget class="QTextEdit" name="aiReportText">
+         <property name="minimumSize"><size><width>0</width><height>60</height></size></property>
+         <property name="maximumSize"><size><width>16777215</width><height>120</height></size></property>
+         <property name="readOnly"><bool>true</bool></property>
+         <property name="styleSheet">
+          <string notr="true">QTextEdit { background-color: #1a1a2e; border: 1px solid #30363d; border-radius: 8px; font-size: 12px; color: #e6edf3; padding: 6px; } QScrollBar:vertical { width: 6px; }</string>
+         </property>
+         <property name="html">
+          <string notr="true">&lt;html&gt;&lt;body style="color:#8b949e;"&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
         </widget>
        </item>
 

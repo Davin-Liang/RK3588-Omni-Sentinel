@@ -20,10 +20,12 @@ class FusionWorker;
 class TopDownView;
 class VirtualKeyboard;
 class WebServer;
+class AIReportWorker;
 class QThread;
 class QTimer;
 class QTableWidget;
 class QComboBox;
+class QTextEdit;
 enum class StreamerEvent;
 
 QT_BEGIN_NAMESPACE
@@ -64,6 +66,8 @@ private slots:
     void on_btn_refresh_backtrack_();
     void on_btn_backtrack_page_();
     void on_btn_back_from_backtrack_();
+    void on_btn_ai_analysis_();
+    void on_ai_report_ready_(const QString& report);
     void update_clock_();
     void update_hw_usage_();
     void update_record_info_(int camNum);
@@ -126,6 +130,13 @@ private:
     QMap<QString, QLineEdit*> fusionParamEdits_;
     QVector<TrackedTarget>    lastTrackedTargets_;
     uint32_t            fusionCamCount_;
+
+    // ---- AI 分析 ----
+    AIReportWorker*     aiReportWorker_;
+    QThread*            aiReportThread_;
+    QTextEdit*          aiReportText_;  // widget.ui 中的 aiReportText 指针（方便直接操作）
+
+    void update_ai_status_snapshot_();
 
     void load_config_();
     bool init_camera_(int camNum);
