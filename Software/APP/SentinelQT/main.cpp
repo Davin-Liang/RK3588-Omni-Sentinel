@@ -3,9 +3,13 @@
 
 #include <QApplication>
 #include <QVector>
+#include <cstdio>
 
 int main(int argc, char *argv[])
 {
+    // 禁用 stderr 缓冲，确保崩溃前日志不丢失
+    setbuf(stderr, NULL);
+
     QApplication a(argc, argv);
 
     qRegisterMetaType<TrackedTarget>("TrackedTarget");

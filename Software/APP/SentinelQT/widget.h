@@ -27,11 +27,13 @@ class NVMeDataManager;
 class TopDownView;
 class VirtualKeyboard;
 class WebServer;
+class AIReportWorker;
 class QThread;
 class QTimer;
 class QTableWidget;
 class QComboBox;
 class QPushButton;
+class QTextEdit;
 enum class StreamerEvent;
 
 QT_BEGIN_NAMESPACE
@@ -73,6 +75,9 @@ private slots:
     void on_btn_backtrack_page_();
     void on_btn_back_from_backtrack_();
     void on_btn_auto_backtrack_();
+    void on_btn_ai_analysis_();
+    void on_ai_report_ready_(const QString& report);
+    void on_ai_auto_tick_();
     void update_clock_();
     void update_hw_usage_();
     void update_record_info_(int camNum);
@@ -148,14 +153,26 @@ private:
     // ---- EIS ----
     bool                showEisControl_ = false;
     // ---- Visual EIS + IMU assist ----
-    // 当前方案中，视觉侧负责估计画面运动并输出 offset；
-    // ICM45686 只提供 gyroRms / vibrationLevel 等辅助状态，
-    // 不再直接用 IMU 积分结果决定 offsetX / offsetY。
     Icm45686Reader*     eisReader_ = nullptr;
     EisStabilizer*      imuOnlyEis_ = nullptr;
     VisionEisConfig     visualEisCfg_[2];
     ImuOnlyEisConfig    imuOnlyEisCfg_[2];
     uint32_t            imuAssistWindowMs_ = 200;
+
+    // ---- AI 分析 ----
+    AIReportWorker*     aiReportWorker_;
+    QThread*            aiReportThread_;
+    QTextEdit*          aiReportText_;
+    QTimer*             aiAutoTimer_;
+    int                 aiAutoIntervalSec_;
+    int                 aiCountdownSec_;
+    bool                aiAutoEnabled_;
+    std::atomic<bool>   aiWorkerReady_{false};
+    QString             lastAiReport_;  // 最近一次 AI 报告（供 Web API 缓存）
+
+    void update_ai_status_snapshot_(int tempC, int cpuUsage);
+    void reload_ai_auto_config_();
+    void update_ai_countdown_display_();
 
     void load_config_();
     void init_eis_();

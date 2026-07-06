@@ -13,7 +13,9 @@
 #include "vision_eis.hpp"
 #include "nvme_worker.h"
 #include "NVMeDataManager.h"
+#include "ai_report_worker.h"
 
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -438,13 +440,14 @@ Widget::Widget(QWidget *parent)
         webServer_->set_command_handler([this](const std::string& method,
                                                 const std::string& path,
                                                 const std::string& body) -> std::string {
-            fprintf(stderr, "[WebServer] cmdHandler called: %s %s\n", method.c_str(), path.c_str());
+            // 仅 AI 推理请求打印详细日志，其他请求静默
+            bool isAi = (path.find("/ai/") != std::string::npos);
+            if (isAi) fprintf(stderr, "[WebCmd] %s %s\n", method.c_str(), path.c_str());
             std::string result;
             QMetaObject::invokeMethod(this, [this, &result, &method, &path, &body]() {
-                fprintf(stderr, "[WebServer] invokeMethod lambda executing on main thread\n");
                 result = handle_web_command(method, path, body);
             }, Qt::BlockingQueuedConnection);
-            fprintf(stderr, "[WebServer] cmdHandler returning: %s\n", result.c_str());
+            if (isAi) fprintf(stderr, "[WebCmd] result: %s\n", result.c_str());
             return result;
         });
         if (webServer_->start()) {
@@ -455,6 +458,51 @@ Widget::Widget(QWidget *parent)
     }
 
     init_nvme_();
+
+    // ---- AI 分析 Worker（延迟初始化，避免阻塞启动） ----
+    aiReportWorker_ = nullptr;
+    aiReportThread_ = nullptr;
+    aiReportText_   = ui->aiReportText;
+    aiReportText_->setVisible(false);  // 默认隐藏
+
+    aiAutoTimer_      = nullptr;
+    aiAutoIntervalSec_ = 300;
+    aiCountdownSec_   = -1;
+    aiAutoEnabled_    = false;
+    aiWorkerReady_.store(false);
+
+    // 延迟 500ms 初始化（早于 clockTimer_ 的 1000ms 首 tick）
+    QTimer::singleShot(500, this, [this]() {
+        fprintf(stderr, "[SentinelQT] AI: delayed init starting...\n");
+        DeepSeekInference::Config aiCfg;
+        aiCfg.modelPath = config_.value("AI/modelPath",
+            "/root/Deepseek/install/demo_Linux_aarch64/"
+            "DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm").toString().toStdString();
+        aiCfg.maxNewTokens  = config_.value("AI/maxNewTokens",  512).toInt();
+        aiCfg.maxContextLen = config_.value("AI/maxContextLen", 2048).toInt();
+        aiCfg.temperature   = config_.value("AI/temperature",   0.7f).toFloat();
+        aiReportWorker_ = new AIReportWorker();
+        aiReportWorker_->setConfig(aiCfg);
+        aiReportThread_ = new QThread(this);
+        aiReportWorker_->moveToThread(aiReportThread_);
+        connect(aiReportWorker_, &AIReportWorker::reportReady, this, &Widget::on_ai_report_ready_);
+        connect(aiReportWorker_, &AIReportWorker::error, this, [this](const QString& msg) {
+            aiReportText_->setVisible(true);
+            aiReportText_->setHtml(
+                QString("<html><body style='color:#f85149;'>AI 错误: %1</body></html>").arg(msg));
+        });
+        connect(aiReportThread_, &QThread::started, aiReportWorker_, &AIReportWorker::start);
+        aiReportThread_->start();
+        aiWorkerReady_.store(true);
+        aiAutoTimer_ = new QTimer(this);
+        connect(aiAutoTimer_, &QTimer::timeout, this, &Widget::on_ai_auto_tick_);
+        reload_ai_auto_config_();
+        aiAutoTimer_->start(1000);
+        fprintf(stderr, "[SentinelQT] AI auto-report: enabled=%d interval=%ds\n",
+                aiAutoEnabled_, aiAutoIntervalSec_);
+    });
+
+    connect(ui->btnAIAnalysis, &QPushButton::clicked, this, &Widget::on_btn_ai_analysis_);
 
     set_status_("系统就绪", "#3fb950");
     update_button_states_();
@@ -469,6 +517,23 @@ Widget::~Widget()
         webServer_->stop();
         delete webServer_;
         webServer_ = nullptr;
+    }
+
+    // 停止 AI 自动分析定时器
+    if (aiAutoTimer_) {
+        aiAutoTimer_->stop();
+    }
+    // 停止 AI 分析子系统
+    if (aiReportWorker_) {
+        aiReportWorker_->stop();
+        if (aiReportThread_ && aiReportThread_->isRunning()) {
+            aiReportThread_->quit();
+            aiReportThread_->wait(3000);
+        }
+        delete aiReportWorker_;
+        aiReportWorker_ = nullptr;
+        delete aiReportThread_;
+        aiReportThread_ = nullptr;
     }
 
     // 停止 fusion 子系统
@@ -1013,6 +1078,9 @@ void Widget::update_hw_usage_()
     if (webServer_ && webServer_->is_running()) {
         webServer_->push_status(get_status_json_());
     }
+
+    // AI 状态快照推送 (1Hz) — 直接传入已算好的 tempC/cpuUsage，保证和 Web UI 一致
+    update_ai_status_snapshot_(tempC, cpuUsage);
 }
 
 // ---- Record info ----
@@ -2050,7 +2118,10 @@ std::string Widget::handle_web_command(const std::string& method,
                                         const std::string& path,
                                         const std::string& body)
 {
-    fprintf(stderr, "[WebCmd] %s %s\n", method.c_str(), path.c_str());
+    // 仅 AI 相关请求打印日志，减少终端噪音
+    if (path.find("/ai/") != std::string::npos) {
+        fprintf(stderr, "[WebCmd] %s %s\n", method.c_str(), path.c_str());
+    }
 
     // ---- 状态查询 (GET) ----
     if (method == "GET") {
@@ -3675,16 +3746,56 @@ std::string Widget::web_auto_backtrack_status_()
 
 std::string Widget::web_ai_report_()
 {
-    QFile file(aiReportFile_);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return R"({"ok":false,"error":"report file not found"})";
+    // Web 请求始终触发一次新的实时推理（不使用缓存）
+    if (!aiReportWorker_ || !aiWorkerReady_.load()) {
+        return R"({"ok":false,"error":"AI module not ready"})";
     }
-    QString text = QString::fromUtf8(file.readAll());
-    file.close();
+
+    // 先清空上次缓存，确保拿到的是本次推理结果
+    lastAiReport_.clear();
+
+    // 同步更新 QT 屏幕显示（和 on_btn_ai_analysis_ 一致）
+    if (aiAutoEnabled_) {
+        aiCountdownSec_ = aiAutoIntervalSec_;  // 重置倒计时
+    }
+    if (aiReportText_) {
+        aiReportText_->setVisible(true);
+        aiReportText_->setHtml(
+            QString::fromUtf8("<html><body style='color:#58a6ff;'>"
+            "<b>正在分析系统运行状态…</b><br>"
+            "DeepSeek-R1 1.5B 模型推理中，预计需要 2-3 分钟，请耐心等待..."
+            "</body></html>"));
+    }
+
+    QString result;
+    bool done = false;
+
+    // 使用 QueuedConnection：Worker 线程发出的信号投递到主线程事件队列，
+    // processEvents() 才能收到并执行回调
+    QMetaObject::Connection conn = connect(aiReportWorker_, &AIReportWorker::reportReady,
+        this, [&](const QString& report) {
+            result = report;
+            done = true;
+        }, Qt::QueuedConnection);
+
+    aiReportWorker_->requestReport();
+
+    // 等待推理完成，最长 120 秒
+    QElapsedTimer timer;
+    timer.start();
+    while (!done && timer.elapsed() < 300000) {
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 100);
+    }
+
+    disconnect(conn);
+
+    if (result.isEmpty()) {
+        return R"({"ok":false,"error":"AI inference timeout or failed"})";
+    }
 
     nlohmann::json resp;
     resp["ok"] = true;
-    resp["text"] = text.toStdString();
+    resp["text"] = result.toStdString();
     return resp.dump();
 }
 
@@ -3766,3 +3877,253 @@ bool Widget::eventFilter(QObject* obj, QEvent* event)
     return QWidget::eventFilter(obj, event);
 }
 
+// ============================================================================
+// AI 系统状态分析
+// ============================================================================
+
+void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
+{
+    // 必须等 delayed init 完成（aiWorkerReady_ 置 true）后才能访问
+    if (!aiWorkerReady_.load()) return;
+
+    // 相机状态字符串
+    auto camStatusStr = [this](int i) -> QString {
+        QStringList parts;
+        parts.append(previewActive_[i]
+            ? QString::fromUtf8("预览中") : QString::fromUtf8("预览关闭"));
+        if (streamer_->is_streaming(i))
+            parts.append(QString::fromUtf8("推流中"));
+        if (streamer_->is_recording(i)) {
+            QString res = (recordResolution_[i] == 720) ? "720p" : "1080p";
+            parts.append(QString::fromUtf8("录像中(%1)").arg(res));
+        }
+        if (cameraPaused_[i])
+            parts.append(QString::fromUtf8("已暂停"));
+        return parts.join(", ");
+    };
+
+    // 激光雷达状态
+    QString lidarStatus;
+    if (lidar_) {
+        lidarStatus = lidar_->is_running()
+            ? QString::fromUtf8("运行中, 10Hz")
+            : QString::fromUtf8("未启动");
+    } else {
+        lidarStatus = QString::fromUtf8("未初始化");
+    }
+
+    // IMU 状态（当前未接入，使用占位）
+    QString imuStatus = QString::fromUtf8("未启用");
+
+    // 融合跟踪状态
+    QString fusionStatus;
+    if (fusionEnabled_) {
+        uint32_t total = static_cast<uint32_t>(lastTrackedTargets_.size());
+        uint32_t confirmed = 0;
+        uint32_t warnings = 0;
+        for (const auto& t : lastTrackedTargets_) {
+            if (t.state == TrackState::FusionTracking) ++confirmed;
+            if (t.warningActive) ++warnings;
+        }
+        fusionStatus = QString::fromUtf8("目标数: %1, 已确认: %2, 告警: %3, 融合引擎: 运行中")
+                           .arg(total).arg(confirmed).arg(warnings);
+    } else {
+        fusionStatus = QString::fromUtf8("融合引擎: 关闭");
+    }
+
+    // tempC/cpuUsage 直接使用 update_hw_usage_() 传入的值，与 Web 界面左上角完全一致
+    aiReportWorker_->updateStatus(
+        tempC, cpuUsage,
+        camStatusStr(0), camStatusStr(1),
+        lidarStatus, imuStatus, fusionStatus,
+        lastFps_[0], lastFps_[1]);
+}
+
+void Widget::on_btn_ai_analysis_()
+{
+    if (!aiReportWorker_) {
+        aiReportText_->setVisible(true);
+        aiReportText_->setHtml(
+            QString::fromUtf8("<html><body style='color:#f85149;'>AI 模块未初始化</body></html>"));
+        return;
+    }
+
+    // 手动触发时重置自动倒计时
+    if (aiAutoEnabled_) {
+        aiCountdownSec_ = aiAutoIntervalSec_;
+    }
+
+    aiReportText_->setVisible(true);
+    aiReportText_->setHtml(
+        QString::fromUtf8("<html><body style='color:#58a6ff;'>"
+        "<b>正在分析系统运行状态…</b><br>"
+        "DeepSeek-R1 1.5B 模型推理中，预计需要 20-60 秒，请耐心等待..."
+        "</body></html>"));
+    QApplication::processEvents();  // 立即刷新 UI
+
+    aiReportWorker_->requestReport();
+}
+
+void Widget::on_ai_report_ready_(const QString& report)
+{
+    // 缓存报告供 Web API 查询
+    lastAiReport_ = report;
+
+    if (!aiReportText_) return;
+
+    // 打印原始报告到终端，方便查看完整内容
+    fprintf(stderr, "\n");
+    fprintf(stderr, "========================================\n");
+    fprintf(stderr, "  AI 系统状态分析报告\n");
+    fprintf(stderr, "========================================\n");
+    fprintf(stderr, "%s\n", report.toUtf8().constData());
+    fprintf(stderr, "========================================\n\n");
+
+    // 将报告中的换行转为 HTML，过滤 <think> 标签用灰色显示
+    QString html = report;
+    html.replace("&", "&amp;");
+    html.replace("<", "&lt;");
+    html.replace(">", "&gt;");
+    html.replace("\n", "<br>");
+
+    // 还原 <think>...</think> 标签（用灰色斜体显示思维链）
+    html.replace("&lt;think&gt;",
+                 "<span style='color:#8b949e; font-style:italic;'>[思考] ");
+    html.replace("&lt;/think&gt;", "</span>");
+
+    aiReportText_->setHtml(
+        QString("<html><body style='color:#e6edf3; font-size:12px;'>"
+                "<b style='color:#3fb950;'>AI 系统状态分析报告</b><br><br>"
+                "%1"
+                "</body></html>").arg(html));
+
+    // 报告完成后重置倒计时
+    if (aiAutoEnabled_) {
+        aiCountdownSec_ = aiAutoIntervalSec_;
+    }
+    update_ai_countdown_display_();
+
+    set_status_("AI 分析完成", "#3fb950");
+}
+
+// ============================================================================
+// AI 自动定时分析
+// ============================================================================
+
+void Widget::reload_ai_auto_config_()
+{
+    bool wasEnabled = aiAutoEnabled_;
+    int  wasInterval = aiAutoIntervalSec_;
+
+    aiAutoEnabled_ = config_.value("AI/autoReportEnabled", false).toBool();
+    aiAutoIntervalSec_ = config_.value("AI/autoReportIntervalSec", 300).toInt();
+
+    // 合法性检查：最少 30 秒，最多 3600 秒
+    if (aiAutoIntervalSec_ < 30)  aiAutoIntervalSec_ = 30;
+    if (aiAutoIntervalSec_ > 3600) aiAutoIntervalSec_ = 3600;
+
+    // 如果配置变更，重置倒计时
+    if (!wasEnabled && aiAutoEnabled_) {
+        // 从禁用变为启用：开始倒计时
+        aiCountdownSec_ = aiAutoIntervalSec_;
+        fprintf(stderr, "[SentinelQT] AI auto-report enabled, interval=%ds\n", aiAutoIntervalSec_);
+    } else if (wasEnabled && !aiAutoEnabled_) {
+        // 从启用变为禁用：清除显示
+        aiCountdownSec_ = -1;
+        fprintf(stderr, "[SentinelQT] AI auto-report disabled\n");
+    } else if (wasInterval != aiAutoIntervalSec_ && aiAutoEnabled_) {
+        // 间隔变更：按比例调整当前倒计时（保持已流逝比例不变）
+        int elapsed = wasInterval - aiCountdownSec_;
+        aiCountdownSec_ = aiAutoIntervalSec_ - elapsed;
+        if (aiCountdownSec_ <= 0) aiCountdownSec_ = aiAutoIntervalSec_;
+        fprintf(stderr, "[SentinelQT] AI auto-report interval changed: %d→%ds\n",
+                wasInterval, aiAutoIntervalSec_);
+    }
+
+    update_ai_countdown_display_();
+}
+
+void Widget::update_ai_countdown_display_()
+{
+    if (!aiReportText_) return;
+
+    if (!aiAutoEnabled_) {
+        // 自动分析禁用，不修改已有的报告内容
+        return;
+    }
+
+    if (aiCountdownSec_ < 0) {
+        // 初始状态
+        aiCountdownSec_ = aiAutoIntervalSec_;
+    }
+
+    int min = aiCountdownSec_ / 60;
+    int sec = aiCountdownSec_ % 60;
+    QString countdownStr = QString("%1:%2").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0'));
+
+    // 在现有报告底部追加倒计时信息
+    // 仅在当前没有显示"正在分析"时更新
+    QString current = aiReportText_->toPlainText();
+    if (current.contains(QString::fromUtf8("正在分析"))) {
+        return;  // 推理进行中，不更新
+    }
+
+    // 如果报告区当前隐藏或为空，只显示倒计时
+    if (!aiReportText_->isVisible() || current.trimmed().isEmpty()) {
+        aiReportText_->setVisible(true);
+        aiReportText_->setHtml(
+            QString("<html><body style='color:#8b949e; font-size:11px;'>"
+                    "AI 自动分析倒计时: <b style='color:#58a6ff;'>%1</b>"
+                    "</body></html>").arg(countdownStr));
+    }
+}
+
+void Widget::on_ai_auto_tick_()
+{
+    if (!aiAutoTimer_) return;
+
+    // 每次 tick 检查 config.ini 是否被外部修改（热加载）
+    reload_ai_auto_config_();
+
+    if (!aiAutoEnabled_) {
+        return;  // 自动分析禁用，什么都不做
+    }
+
+    // 倒计时
+    if (aiCountdownSec_ > 0) {
+        aiCountdownSec_--;
+
+        // 每秒刷新一次倒计时显示
+        int min = aiCountdownSec_ / 60;
+        int sec = aiCountdownSec_ % 60;
+        QString countdownStr = QString("%1:%2").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0'));
+
+        QString current = aiReportText_->toPlainText();
+        // 仅在空闲状态时更新倒计时显示（推理中不覆盖）
+        if (!current.contains(QString::fromUtf8("正在分析")) &&
+            !current.contains(QString::fromUtf8("AI 系统状态分析报告"))) {
+            aiReportText_->setVisible(true);
+            aiReportText_->setHtml(
+                QString("<html><body style='color:#8b949e; font-size:11px;'>"
+                        "AI 自动分析倒计时: <b style='color:#58a6ff;'>%1</b>"
+                        "</body></html>").arg(countdownStr));
+        } else if (current.contains(QString::fromUtf8("AI 系统状态分析报告"))) {
+            // 上次报告已显示，追加倒计时
+            // 这里不做复杂 HTML 拼接，简单覆盖底部状态栏
+            set_status_(QString::fromUtf8("下次 AI 分析: %1 后").arg(countdownStr), "#8b949e");
+        }
+    }
+
+    // 倒计时归零 → 触发分析
+    if (aiCountdownSec_ <= 0) {
+        fprintf(stderr, "[SentinelQT] AI auto-report timer fired\n");
+
+        if (aiReportWorker_) {
+            // 如果已有请求在处理中，pending_ 检查会拒绝重复
+            aiReportWorker_->requestReport();
+        }
+
+        // 重置倒计时
+        aiCountdownSec_ = aiAutoIntervalSec_;
+    }
+}

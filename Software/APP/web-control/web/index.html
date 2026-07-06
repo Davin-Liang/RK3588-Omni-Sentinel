@@ -253,7 +253,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
               <span class="sys-label">间隔</span>
               <input type="number" id="aiIntervalMin" value="5" min="1" max="60" step="1" style="width:48px;font-size:13px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px;text-align:center">
               <span class="sys-label" style="font-size:12px">min</span>
-              <button class="btn btn-accent" id="btnAiManual" style="padding:4px 10px;min-width:auto">手动分析</button>
+              <button class="btn btn-accent" id="btnAiManual" style="padding:4px 10px;min-width:auto">AI 分析</button>
               <button class="btn btn-off" id="btnAiToggle" style="padding:4px 10px;min-width:auto">开启分析</button>
             </div>
           </div>
@@ -335,7 +335,7 @@ function connectWS(){
 function handleWS(msg){switch(msg.type){case'status':updateUI(msg.data);break;case'tracking':updateTracking(msg.data);break;case'event':toast(handleEvent(msg.data));break;case'alert':showAlertNotify(msg.data);break}}
 
 // ===== REST =====
-async function api(m,p,b){try{const r=await fetch('/api/v1'+p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):m==='GET'?undefined:'{}'});const j=await r.json();if(!j.ok)toast(j.error||'操作失败');return j}catch(e){toast('网络错误');return{ok:!1}}}
+async function api(m,p,b,opt){opt=opt||{};try{const r=await fetch('/api/v1'+p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):m==='GET'?undefined:'{}'});const j=await r.json();if(!j.ok&&!opt.silent)toast(j.error||'操作失败');return j}catch(e){if(!opt.silent)toast('网络错误');return{ok:!1}}}
 function toast(msg){if(!msg)return;const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),4000)}
 
 // ===== Alert notify =====
@@ -438,7 +438,7 @@ function updateUI(data){
   }
 }
 function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus()}if(data.clusters&&data.clusters.length>0){trackingClusters=data.clusters}drawRadar()}
-function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''}
+function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return null}
 
 // ===== Buttons =====
 for(let i=0;i<2;i++){document.getElementById('btnPreview'+i).onclick=()=>togglePreview(i);document.getElementById('btnStream'+i).onclick=()=>toggleStream(i);document.getElementById('btnRecord'+i).onclick=()=>toggleRecord(i);document.getElementById('btnPause'+i).onclick=()=>togglePause(i);document.getElementById('btnOsd'+i).onclick=()=>toggleOsd(i);document.getElementById('btnEis'+i).onclick=()=>toggleEis(i);document.getElementById('btnLidarOsd'+i).onclick=()=>toggleLidarOsd(i)}
@@ -455,7 +455,7 @@ async function toggleLidarOsd(i){await api('POST','/cam/'+i+'/lidar-osd/'+(cam[i
 // ===== EIS 防抖参数 =====
 let eisTab=0;
 function switchEisTab(i){eisTab=i;document.getElementById('eisTab0').className='btn'+(i===0?' btn-on':'');document.getElementById('eisTab1').className='btn'+(i===1?' btn-on':'');document.getElementById('eisPanel0').style.display=i===0?'flex':'none';document.getElementById('eisPanel1').style.display=i===1?'flex':'none'}
-async function loadEisConfig(){const j=await api('GET','/eis/config');if(!j.ok)return;for(let i=0;i<2;i++){const c=j['cam'+i];if(!c)continue;document.getElementById('eisFocalX'+i).value=c.focalX;document.getElementById('eisFocalY'+i).value=c.focalY;document.getElementById('eisHalfWin'+i).value=c.halfWindowMs;document.getElementById('eisMaxOff'+i).value=c.maxOffsetPixel;document.getElementById('eisSignX'+i).value=c.signX;document.getElementById('eisSignY'+i).value=c.signY;document.getElementById('eisSwap'+i).checked=c.swapXY;document.getElementById('eisTimeOff'+i).value=c.timeOffsetMs;document.getElementById('eisFps'+i).value=c.frameRate;document.getElementById('eisSmEn'+i).checked=c.enableSmoothing;document.getElementById('eisSmAlpha'+i).value=c.smoothingAlpha}}
+async function loadEisConfig(){const j=await api('GET','/eis/config',null,{silent:true});if(!j.ok)return;for(let i=0;i<2;i++){const c=j['cam'+i];if(!c)continue;document.getElementById('eisFocalX'+i).value=c.focalX;document.getElementById('eisFocalY'+i).value=c.focalY;document.getElementById('eisHalfWin'+i).value=c.halfWindowMs;document.getElementById('eisMaxOff'+i).value=c.maxOffsetPixel;document.getElementById('eisSignX'+i).value=c.signX;document.getElementById('eisSignY'+i).value=c.signY;document.getElementById('eisSwap'+i).checked=c.swapXY;document.getElementById('eisTimeOff'+i).value=c.timeOffsetMs;document.getElementById('eisFps'+i).value=c.frameRate;document.getElementById('eisSmEn'+i).checked=c.enableSmoothing;document.getElementById('eisSmAlpha'+i).value=c.smoothingAlpha}}
 function readCamEis(i){return{camId:i,focalX:parseFloat(document.getElementById('eisFocalX'+i).value)||1200,focalY:parseFloat(document.getElementById('eisFocalY'+i).value)||1200,halfWindowMs:parseInt(document.getElementById('eisHalfWin'+i).value)||20,maxOffsetPixel:parseInt(document.getElementById('eisMaxOff'+i).value)||200,signX:parseFloat(document.getElementById('eisSignX'+i).value),signY:parseFloat(document.getElementById('eisSignY'+i).value),swapXY:document.getElementById('eisSwap'+i).checked,timeOffsetMs:parseFloat(document.getElementById('eisTimeOff'+i).value)||0,frameRate:parseFloat(document.getElementById('eisFps'+i).value)||30,enableSmoothing:document.getElementById('eisSmEn'+i).checked,smoothingAlpha:parseFloat(document.getElementById('eisSmAlpha'+i).value)||0.4}}
 async function saveEisConfig(){const body={cam0:readCamEis(0),cam1:readCamEis(1)};const r=await api('POST','/eis/config',body);if(r.ok)toast('防抖参数已保存')}
 
@@ -501,7 +501,7 @@ function buildFusionParams(){
 let helpTimer=null;
 function toggleHelp(id){const el=document.getElementById(id);if(!el)return;if(helpTimer)clearTimeout(helpTimer);if(el.style.display==='none'||!el.style.display){el.style.display='block';helpTimer=setTimeout(()=>{el.style.display='none'},4000)}else{el.style.display='none'}}
 async function loadFusionConfig(){
-  const d=await api('GET','/fusion/config');if(!d||!d.ok)return;
+  const d=await api('GET','/fusion/config',null,{silent:true});if(!d||!d.ok)return;
   ['dbscanEpsMeters','dbscanMinPoints','maxClusterDistanceMeters','clusterPersistenceFrames','bboxClaimMaxPixelDist','minBboxClaimPoints','alpha','beta','bboxAssocMaxDistMeters','orphanAssocMaxDistMeters','minHitsToConfirm','maxLostFrames','maxTracks','warningEnterDistMeters','warningExitDistMeters','radarRangeMeters'].forEach(k=>{const el=document.getElementById('fp_'+k);if(el&&d[k]!==undefined){el.value=Number(d[k]).toFixed(3)}});
   for(let i=0;i<2;i++){const cd=d['cam'+i];if(!cd)continue;['fx','fy','cx','cy'].forEach(f=>{const el=document.getElementById('fp_cam'+i+'_'+f);if(el&&cd[f]!==undefined)el.value=Number(cd[f]).toFixed(1)})}
 }
@@ -513,7 +513,7 @@ async function saveFusionConfig(){
 }
 
 // ===== Videos =====
-async function loadVideos(){const d=await api('GET','/videos');const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.slice(-30).forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
+async function loadVideos(){const d=await api('GET','/videos',null,{silent:true});const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.slice(-30).forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
 function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
 function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.pause();video.src='';overlay.classList.remove('show')}
 async function delVideo(p){if(confirm('确认删除?')){await api('DELETE','/videos',{path:decodeURIComponent(p)});loadVideos()}}
@@ -535,7 +535,7 @@ document.getElementById('btnAutoBacktrack').onclick = async function(){
 document.getElementById('backtrackSecs').oninput = function() { btrDirty = true; };
 document.getElementById('backtrackCam').onchange = function() { btrDirty = true; };
 async function loadBacktrackFiles() {
-    const d = await api('GET', '/backtrack/files');
+    const d = await api('GET', '/backtrack/files', null, {silent:true});
     const tb = document.getElementById('backtrackBody');
     tb.innerHTML = '';
     if (!d || !d.files || d.files.length === 0) {
@@ -567,35 +567,35 @@ function setAiStatus(mode){
     if(!t)return;
     if(mode==='idle'){t.textContent='AI正在休息中...'}
     else if(mode==='collecting'){t.textContent='AI正在收集系统日志中...'}
-    else if(mode==='analyzing'){t.textContent='AI正在分析总结中...'}
+    else if(mode==='analyzing'){t.textContent='DeepSeek-R1 1.5B 模型推理中\n预计需要 20-60 秒，请耐心等待...'}
     else if(mode==='done'){t.textContent='AI分析总结完毕！'}
 }
+var _aiReqId=0;
 async function doAiAnalysis(){
     if(aiRunning)return;aiRunning=!0;
+    var reqId=++_aiReqId;
     setAiStatus('analyzing');
-    await new Promise(function(r){setTimeout(r,5000)});
+    var out=document.getElementById('aiOutput');
+    if(out){out.textContent=(out.textContent||'')+'[正在分析系统运行状态...]\n';out.scrollTop=out.scrollHeight}
     try{
         var r=await api('GET','/ai/report');
-        var out=document.getElementById('aiOutput');
+        if(reqId!==_aiReqId)return;  // 忽略过期请求的响应
         if(out&&r&&r.text){
             var now=new Date();
-            var ts=now.getFullYear()+'-'+
-                String(now.getMonth()+1).padStart(2,'0')+'-'+
-                String(now.getDate()).padStart(2,'0')+' '+
-                String(now.getHours()).padStart(2,'0')+':'+
-                String(now.getMinutes()).padStart(2,'0')+':'+
-                String(now.getSeconds()).padStart(2,'0');
-            var entry='['+ts+']\n'+r.text+'\n';
-            out.textContent = (out.textContent||'')+entry;
+            var ts=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+' '+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0')+':'+String(now.getSeconds()).padStart(2,'0');
+            out.textContent=(out.textContent||'')+'['+ts+']\n'+r.text+'\n';
             out.scrollTop=out.scrollHeight;
         }
     }catch(e){}
+    if(reqId!==_aiReqId)return;
     setAiStatus('done');
     setTimeout(function(){
         if(aiEnabled)setAiStatus('collecting');
         aiRunning=!1;
     },5000);
 }
+
+document.getElementById('btnAiManual').onclick=function(){doAiAnalysis()};
 function startAiTimer(){
     stopAiTimer();
     var min=parseInt(document.getElementById('aiIntervalMin').value)||5;
@@ -614,7 +614,7 @@ document.getElementById('btnAiToggle').onclick=function(){
         setAiStatus('idle');stopAiTimer();
     }
 };
-document.getElementById('btnAiManual').onclick=function(){doAiAnalysis()};
+// 手动分析已移至标题栏 btnAiHeader，此处保留兼容
 
 // ===== Misc =====
 let sysDirtyTimer=0;
@@ -626,7 +626,7 @@ connectWS();updateClock();setInterval(updateClock,1000);buildFusionParams();
 window.addEventListener('resize',()=>{initCanvas();drawRadar()});
 setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig();switchEisTab(0);initEisControl();initAutoBacktrackStatus()},1000);
 async function initAutoBacktrackStatus(){
-    var r = await api('GET','/backtrack/auto-status');
+    var r = await api('GET','/backtrack/auto-status', null, {silent:true});
     if(r.enabled !== undefined){
         var btn = document.getElementById('btnAutoBacktrack');
         if(btn){
@@ -635,7 +635,7 @@ async function initAutoBacktrackStatus(){
         }
     }
 }
-async function initEisControl(){const j=await api('GET','/eis/visible');const card=document.getElementById('eisControlCard');if(!card)return;if(j.visible===false){card.style.cssText='flex-direction:column;display:none!important'}else{card.style.cssText='flex-direction:column';loadEisConfig()}}
+async function initEisControl(){const j=await api('GET','/eis/visible',null,{silent:true});const card=document.getElementById('eisControlCard');if(!card)return;if(j.visible===false){card.style.cssText='flex-direction:column;display:none!important'}else{card.style.cssText='flex-direction:column';loadEisConfig()}}
 document.getElementById('fusionCanvasWrap').addEventListener('click',()=>{loadFusionConfig()});
 </script>
 </body>
