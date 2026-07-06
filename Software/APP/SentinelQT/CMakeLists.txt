@@ -157,7 +157,7 @@ if(Qt5LinguistTools_FOUND)
 endif()
 
 install(TARGETS SentinelQT DESTINATION ./)
-install(FILES config.ini DESTINATION ./)
+install(FILES config.ini ai_report.txt DESTINATION ./)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../web-control/web/ DESTINATION web
     FILES_MATCHING PATTERN "*.html" PATTERN "*.css" PATTERN "*.js")
 

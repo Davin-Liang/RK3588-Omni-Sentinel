@@ -59,6 +59,9 @@ void LidarTargetTracker::reset()
     clusterHistoryCount_ = 0;
     rawClusterCount_    = 0;
     lastLidarTimestampNs_ = 0;
+
+    latencyIdx_ = 0;
+    latencyCount_ = 0;
 }
 
 void LidarTargetTracker::register_callback(TrackingCallback cb, void* userData)
@@ -93,10 +96,25 @@ bool LidarTargetTracker::update(const FusionResult&,
     update_snapshot_();
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    static uint32_t timeLogCnt = 0;
     int64_t us = (t1.tv_sec - t0.tv_sec) * 1000000
                + (t1.tv_nsec - t0.tv_nsec) / 1000;
-    fprintf(stderr, "[TrackerTime] %ld us\n", (long)us);
+
+    latencyWindow_[latencyIdx_ % kLatencyWindowSize] = us;
+    ++latencyIdx_;
+    if (latencyCount_ < kLatencyWindowSize) ++latencyCount_;
+
+    if (latencyIdx_ % kLatencyWindowSize == 0 && latencyCount_ > 0) {
+        uint32_t n = latencyCount_;
+        int64_t sum = 0, vmin = latencyWindow_[0], vmax = latencyWindow_[0];
+        for (uint32_t i = 0; i < n; ++i) {
+            int64_t v = latencyWindow_[i];
+            sum += v;
+            if (v < vmin) vmin = v;
+            if (v > vmax) vmax = v;
+        }
+        fprintf(stderr, "[TrackerTime] avg=%ld us  min=%ld us  max=%ld us  (window=%u)\n",
+            (long)(sum / n), (long)vmin, (long)vmax, n);
+    }
 
     return true;
 }
@@ -123,6 +141,23 @@ bool LidarTargetTracker::copy_cluster_vis(ClusterVisData* out, uint32_t maxCount
     std::memcpy(out, clusterVisBuf_, count * sizeof(ClusterVisData));
     *outCount = count;
     return true;
+}
+
+void LidarTargetTracker::get_latency_stats(int64_t& outAvg,
+    int64_t& outMin, int64_t& outMax) const
+{
+    outAvg = outMin = outMax = 0;
+    if (latencyCount_ == 0) return;
+    int64_t sum = 0, vmin = latencyWindow_[0], vmax = latencyWindow_[0];
+    for (uint32_t i = 0; i < latencyCount_; ++i) {
+        int64_t v = latencyWindow_[i];
+        sum += v;
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+    }
+    outAvg = sum / latencyCount_;
+    outMin = vmin;
+    outMax = vmax;
 }
 
 bool LidarTargetTracker::get_bbox_detection_centroid(uint32_t globalBboxIdx,

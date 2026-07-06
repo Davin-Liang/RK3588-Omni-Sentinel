@@ -140,6 +140,18 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:8px 24px;border-radius:20px;font-size:13px;pointer-events:none;opacity:0;transition:opacity 0.3s;z-index:999}
 #toast.show{opacity:1}
 
+/* Alert notify popup */
+.alert-popup{
+  background:rgba(26,26,46,0.95);border:1px solid #da3633;
+  border-radius:10px;padding:14px 18px;min-width:320px;max-width:400px;
+  box-shadow:0 4px 20px rgba(218,54,51,0.3);
+  animation:alertSlideIn 0.3s ease-out;
+}
+@keyframes alertSlideIn{
+  from{transform:translateX(100%);opacity:0}
+  to{transform:translateX(0);opacity:1}
+}
+
 @media(max-width:1000px){#camRow,#bottomRow{grid-template-columns:1fr}}
 </style>
 </head>
@@ -230,9 +242,28 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
     <div id="bottomRow2" style="flex:1;min-height:0">
       <div style="display:flex;flex-direction:column;gap:var(--gap);flex:1">
         <div class="right-card" style="flex-direction:column;height:280px">
-          <div style="display:flex;align-items:center;justify-content:space-between"><div class="sys-title">数据回溯</div><div style="display:flex;gap:6px"><button class="btn btn-accent" id="btnBacktrack" style="padding:4px 10px">回溯</button><button class="btn btn-cream" id="btnRefrBacktrack" style="padding:4px 10px">刷新</button></div></div>
+          <div style="display:flex;align-items:center;justify-content:space-between"><div class="sys-title">数据回溯</div><div style="display:flex;gap:6px"><button class="btn btn-accent" id="btnBacktrack" style="padding:4px 10px">回溯</button><button class="btn btn-cream" id="btnRefrBacktrack" style="padding:4px 10px">刷新</button><button class="btn btn-off" id="btnAutoBacktrack" style="padding:4px 10px;min-width:auto">自动回溯: 关</button></div></div>
           <div class="sys-row"><span class="sys-label" style="min-width:60px">秒数</span><input type="number" id="backtrackSecs" value="5.0" step="0.5" min="0.1" max="30" style="flex:1;font-size:13px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px"><span class="sys-label" style="min-width:50px">相机</span><select id="backtrackCam" style="flex:1;font-size:13px"><option value="-1">全部</option><option value="0">相机1</option><option value="1">相机2</option></select></div>
           <div style="flex:1;overflow-y:auto;min-height:0;margin-top:4px"><table class="video-table"><thead><tr><th>文件名</th><th>时长</th><th>大小</th><th>操作</th></tr></thead><tbody id="backtrackBody"><tr><td colspan="4" style="color:var(--gray2);text-align:center">暂无回溯文件</td></tr></tbody></table></div>
+        </div>
+        <div class="right-card" style="flex-direction:column;height:280px;width:calc(200% + var(--gap));position:relative;z-index:1">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div class="sys-title">系统运行日志AI分析总结</div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <span class="sys-label">间隔</span>
+              <input type="number" id="aiIntervalMin" value="5" min="1" max="60" step="1" style="width:48px;font-size:13px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px;text-align:center">
+              <span class="sys-label" style="font-size:12px">min</span>
+              <button class="btn btn-accent" id="btnAiManual" style="padding:4px 10px;min-width:auto">手动分析</button>
+              <button class="btn btn-off" id="btnAiToggle" style="padding:4px 10px;min-width:auto">开启分析</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;flex:1;min-height:0">
+            <div id="aiOutput" style="flex:1;overflow-y:auto;min-height:0;margin-top:4px;background:var(--dark);border-radius:6px;padding:10px 14px;font-size:14px;line-height:1.7;color:#c9d1d9;white-space:pre-wrap"></div>
+            <div style="width:140px;display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;background:var(--card2);border-radius:6px;padding:8px;font-size:13px;color:var(--text2);text-align:center" id="aiStatus">
+              <div style="font-size:28px">🤖</div>
+              <div id="aiStatusText">AI正在休息中...</div>
+            </div>
+          </div>
         </div>
         <div class="right-card" style="flex-direction:column">
           <div class="sys-title">系统控制</div>
@@ -267,6 +298,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 </div>
 
 <div id="toast"></div>
+<div id="alertStack" style="position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column-reverse;gap:8px;z-index:1000"></div>
 
 <!-- Video Player Overlay -->
 <div id="playerOverlay">
@@ -300,11 +332,32 @@ function connectWS(){
   if(ws&&ws.readyState===WebSocket.OPEN)return;
   try{ws=new WebSocket(WS_URL);ws.onopen=()=>{if(wsTimer)clearInterval(wsTimer)};ws.onmessage=e=>{try{handleWS(JSON.parse(e.data))}catch(ex){}};ws.onclose=()=>{ws=null;wsTimer=setInterval(connectWS,3000)};ws.onerror=()=>{if(ws)ws.close()}}catch(ex){}
 }
-function handleWS(msg){switch(msg.type){case'status':updateUI(msg.data);break;case'tracking':updateTracking(msg.data);break;case'event':toast(handleEvent(msg.data));break}}
+function handleWS(msg){switch(msg.type){case'status':updateUI(msg.data);break;case'tracking':updateTracking(msg.data);break;case'event':toast(handleEvent(msg.data));break;case'alert':showAlertNotify(msg.data);break}}
 
 // ===== REST =====
 async function api(m,p,b){try{const r=await fetch('/api/v1'+p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):m==='GET'?undefined:'{}'});const j=await r.json();if(!j.ok)toast(j.error||'操作失败');return j}catch(e){toast('网络错误');return{ok:!1}}}
 function toast(msg){if(!msg)return;const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),4000)}
+
+// ===== Alert notify =====
+function showAlertNotify(data){
+    var id='alert_'+Date.now();
+    var div=document.createElement('div');
+    div.id=id;div.className='alert-popup';
+    var fileList=(data.files||[]).map(function(f){
+        return '<div style="font-size:12px;color:#8b949e;word-break:break-all;margin-top:4px">'+f+'</div>';
+    }).join('');
+    div.innerHTML='<div style="display:flex;flex-direction:column;gap:8px">'
+        +'<div style="font-size:14px;line-height:1.6;color:#e6edf3">检测到人已经进入告警范围，请注意！<br>回溯视频已生成，请查看：</div>'
+        +fileList
+        +'<button class="btn btn-accent" style="align-self:flex-end;padding:4px 14px;min-width:auto" onclick="dismissAlert(\''+id+'\')">我已知道</button>'
+        +'</div>';
+    document.getElementById('alertStack').appendChild(div);
+}
+function dismissAlert(id){
+    var el=document.getElementById(id);
+    if(el){el.style.opacity='0';el.style.transition='opacity 0.3s';
+        setTimeout(function(){el.remove()},300);}
+}
 
 // ===== UI Update =====
 function updateUI(data){
@@ -363,6 +416,14 @@ function updateUI(data){
     if(document.activeElement!==r1) r1.value = (data.cam1&&data.cam1.recordResolution) || 1080;
   }
   // Fusion config (Qt → Web sync, reload when version changes)
+  // Auto backtrack toggle sync
+  if(typeof data.autoBacktrackEnabled === 'boolean'){
+    var btn=document.getElementById('btnAutoBacktrack');
+    if(btn){
+      btn.textContent = data.autoBacktrackEnabled ? '自动回溯: 开' : '自动回溯: 关';
+      btn.className = 'btn ' + (data.autoBacktrackEnabled ? 'btn-on' : 'btn-off');
+    }
+  }
   // EIS control card — WebSocket 同步 showEisControl
   if(typeof data.showEisControl === 'boolean'){
     var card=document.getElementById('eisControlCard');
@@ -467,6 +528,10 @@ document.getElementById('btnBacktrack').onclick = async function() {
     loadBacktrackFiles();
 };
 document.getElementById('btnRefrBacktrack').onclick = function() { loadBacktrackFiles(); };
+document.getElementById('btnAutoBacktrack').onclick = async function(){
+    await api('POST','/backtrack/auto-toggle');
+    // 按钮状态由 WebSocket status 推送同步
+};
 document.getElementById('backtrackSecs').oninput = function() { btrDirty = true; };
 document.getElementById('backtrackCam').onchange = function() { btrDirty = true; };
 async function loadBacktrackFiles() {
@@ -495,6 +560,62 @@ async function delBacktrackFile(name) {
     if (r.ok) { loadBacktrackFiles(); }
 }
 
+// ===== AI 分析 =====
+let aiEnabled=!1,aiTimer=null,aiRunning=!1;
+function setAiStatus(mode){
+    var t=document.getElementById('aiStatusText');
+    if(!t)return;
+    if(mode==='idle'){t.textContent='AI正在休息中...'}
+    else if(mode==='collecting'){t.textContent='AI正在收集系统日志中...'}
+    else if(mode==='analyzing'){t.textContent='AI正在分析总结中...'}
+    else if(mode==='done'){t.textContent='AI分析总结完毕！'}
+}
+async function doAiAnalysis(){
+    if(aiRunning)return;aiRunning=!0;
+    setAiStatus('analyzing');
+    await new Promise(function(r){setTimeout(r,5000)});
+    try{
+        var r=await api('GET','/ai/report');
+        var out=document.getElementById('aiOutput');
+        if(out&&r&&r.text){
+            var now=new Date();
+            var ts=now.getFullYear()+'-'+
+                String(now.getMonth()+1).padStart(2,'0')+'-'+
+                String(now.getDate()).padStart(2,'0')+' '+
+                String(now.getHours()).padStart(2,'0')+':'+
+                String(now.getMinutes()).padStart(2,'0')+':'+
+                String(now.getSeconds()).padStart(2,'0');
+            var entry='['+ts+']\n'+r.text+'\n';
+            out.textContent = (out.textContent||'')+entry;
+            out.scrollTop=out.scrollHeight;
+        }
+    }catch(e){}
+    setAiStatus('done');
+    setTimeout(function(){
+        if(aiEnabled)setAiStatus('collecting');
+        aiRunning=!1;
+    },5000);
+}
+function startAiTimer(){
+    stopAiTimer();
+    var min=parseInt(document.getElementById('aiIntervalMin').value)||5;
+    aiTimer=setInterval(doAiAnalysis,min*60000);
+}
+function stopAiTimer(){if(aiTimer){clearInterval(aiTimer);aiTimer=null}}
+
+document.getElementById('btnAiToggle').onclick=function(){
+    aiEnabled=!aiEnabled;
+    var btn=document.getElementById('btnAiToggle');
+    if(aiEnabled){
+        btn.textContent='关闭分析';btn.className='btn btn-on';
+        setAiStatus('collecting');startAiTimer();
+    }else{
+        btn.textContent='开启分析';btn.className='btn btn-off';
+        setAiStatus('idle');stopAiTimer();
+    }
+};
+document.getElementById('btnAiManual').onclick=function(){doAiAnalysis()};
+
 // ===== Misc =====
 let sysDirtyTimer=0;
 function changeRes(n){sysDirty=true;clearTimeout(sysDirtyTimer);sysDirtyTimer=setTimeout(()=>{sysDirty=false},3000);api('PUT','/cam/'+n+'/record-resolution',{resolution:document.getElementById('resSelect'+n).value+'p'})}
@@ -503,7 +624,17 @@ function updateClock(){const n=new Date();document.getElementById('clock').textC
 // ===== Init =====
 connectWS();updateClock();setInterval(updateClock,1000);buildFusionParams();
 window.addEventListener('resize',()=>{initCanvas();drawRadar()});
-setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig();switchEisTab(0);initEisControl()},1000);
+setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig();switchEisTab(0);initEisControl();initAutoBacktrackStatus()},1000);
+async function initAutoBacktrackStatus(){
+    var r = await api('GET','/backtrack/auto-status');
+    if(r.enabled !== undefined){
+        var btn = document.getElementById('btnAutoBacktrack');
+        if(btn){
+            btn.textContent = r.enabled ? '自动回溯: 开' : '自动回溯: 关';
+            btn.className = 'btn ' + (r.enabled ? 'btn-on' : 'btn-off');
+        }
+    }
+}
 async function initEisControl(){const j=await api('GET','/eis/visible');const card=document.getElementById('eisControlCard');if(!card)return;if(j.visible===false){card.style.cssText='flex-direction:column;display:none!important'}else{card.style.cssText='flex-direction:column';loadEisConfig()}}
 document.getElementById('fusionCanvasWrap').addEventListener('click',()=>{loadFusionConfig()});
 </script>

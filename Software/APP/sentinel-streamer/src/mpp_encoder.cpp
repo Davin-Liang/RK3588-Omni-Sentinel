@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -226,6 +227,9 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
     std::memcpy(frame->data[0], src, ySize);
     std::memcpy(frame->data[1], src + ySize, ySize / 2);
 
+    struct timespec tEnc0, tEnc1;
+    clock_gettime(CLOCK_MONOTONIC, &tEnc0);
+
     int64_t sentPts = pts;
     int ret = avcodec_send_frame(encCtx, frame);
     av_frame_free(&frame);
@@ -261,6 +265,30 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
         av_packet_unref(pkt);
     }
     av_packet_free(&pkt);
+
+    clock_gettime(CLOCK_MONOTONIC, &tEnc1);
+    int64_t encUs = (tEnc1.tv_sec - tEnc0.tv_sec) * 1000000
+                  + (tEnc1.tv_nsec - tEnc0.tv_nsec) / 1000;
+
+    static constexpr int kWin = 100;
+    static int64_t encWindow[100];
+    static int encIdx = 0;
+    static int encCnt = 0;
+    encWindow[encIdx % kWin] = encUs;
+    ++encIdx;
+    if (encCnt < kWin) ++encCnt;
+
+    if (encIdx % kWin == 0 && encCnt > 0) {
+        int64_t sum = 0, vmin = encWindow[0], vmax = encWindow[0];
+        for (int i = 0; i < encCnt; ++i) {
+            int64_t v = encWindow[i];
+            sum += v;
+            if (v < vmin) vmin = v;
+            if (v > vmax) vmax = v;
+        }
+        fprintf(stderr, "[EncodeLatency] avg=%ld us  min=%ld us  max=%ld us  (frames=%d)\n",
+            (long)(sum / encCnt), (long)vmin, (long)vmax, encCnt);
+    }
 
     return true;
 }

@@ -16,7 +16,9 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <chrono>
+#include <thread>
 #include <QThread>
 #include <QTimer>
 #include <QMessageBox>
@@ -81,6 +83,22 @@ static void fusion_warning_callback_(const TrackedTarget& target, void* /*userDa
 
 void Widget::on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs)
 {
+    if (!autoBacktrackEnabled_)
+        return;
+
+    auto it = lastAutoBacktrackUs_.find(targetId);
+    if (it != lastAutoBacktrackUs_.end()) {
+        double elapsedSec = (alertTsUs - it->second) / 1000000.0;
+        if (elapsedSec < autoBacktrackCooldownSec_) {
+            fprintf(stderr,
+                "[SentinelQT] auto backtrack throttled: target=%d "
+                "elapsed=%.1fs < cooldown=%.1fs\n",
+                targetId, elapsedSec, autoBacktrackCooldownSec_);
+            return;
+        }
+    }
+    lastAutoBacktrackUs_[targetId] = alertTsUs;
+
     double backSecs = config_.value("Backtrack/maxBacktrackSeconds", 5.0).toDouble();
 
     uint64_t startTs = alertTsUs - static_cast<uint64_t>(backSecs * 1000000.0);
@@ -98,7 +116,33 @@ void Widget::on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs)
         (unsigned long long)startTs,
         (unsigned long long)alertTsUs);
 
-    do_backtrack_(alertTsUs, -1, QString("alert_t%1").arg(targetId));
+    // 后台线程导出，避免阻塞主线程导致俯视图无法更新
+    uint64_t ts = alertTsUs;
+    int tid = targetId;
+    std::thread([this, ts, tid]() {
+        QStringList files = do_backtrack_(ts, -1,
+            QString("alert_t%1").arg(tid));
+
+        QMetaObject::invokeMethod(this, [this, tid, files]() {
+            if (!files.isEmpty()) {
+                set_status_(QString("回溯完成: %1 个视频").arg(files.size()), "#2ea043");
+            } else {
+                set_status_("回溯导出失败", "#f85149");
+            }
+            on_btn_refresh_backtrack_();
+
+            if (webServer_ && webServer_->is_running() && !files.isEmpty()) {
+                std::string alertJson;
+                alertJson += "{\"targetId\":\"" + std::to_string(tid) + "\",\"files\":[";
+                for (int i = 0; i < files.size(); ++i) {
+                    if (i > 0) alertJson += ",";
+                    alertJson += "\"" + files[i].toStdString() + "\"";
+                }
+                alertJson += "]}";
+                webServer_->push_alert(alertJson);
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
 }
 
 // ---- Styles ----
@@ -489,6 +533,10 @@ void Widget::load_config_()
 
     backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
     nvmeDevicePath_ = config_.value("Backtrack/nvmeDevice", "/dev/nvme0n1").toString();
+    autoBacktrackEnabled_ = config_.value("Backtrack/autoBacktrackEnabled", false).toBool();
+    autoBacktrackCooldownSec_ = config_.value("Backtrack/autoBacktrackCooldownSec", 30.0).toDouble();
+
+    aiReportFile_ = config_.value("AI/reportFile", "./ai_report.txt").toString();
 
     // EIS 防抖配置：视觉为主 + IMU 辅助。
     // 视觉 EIS 由 sentinel-visioner 在采集线程内对实时相机帧做 LK 光流估计；
@@ -1809,8 +1857,9 @@ void Widget::on_btn_fusion_toggle_()
 
         fusion_->configure_tracker(fusionTrackerCfg_);
         fusion_->enable_tracking(true);
-        // 自动回溯暂关闭
-        // fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+        if (autoBacktrackEnabled_) {
+            fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+        }
 
         if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
             if (!osdEnabled_[0] && !osdEnabled_[1]) {
@@ -2012,6 +2061,8 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/eis/config")    return get_eis_config_json_();
         if (path == "/api/v1/eis/visible")   return showEisControl_ ? R"({"visible":true})" : R"({"visible":false})";
         if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
+        if (path == "/api/v1/backtrack/auto-status") return web_auto_backtrack_status_();
+        if (path == "/api/v1/ai/report") return web_ai_report_();
         return R"({"ok":false,"error":"unknown GET path"})";
     }
 
@@ -2056,6 +2107,7 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/fusion/camera/0/intrinsics") return web_fusion_intrinsics_(0, body);
         if (path == "/api/v1/fusion/camera/1/intrinsics") return web_fusion_intrinsics_(1, body);
         if (path == "/api/v1/backtrack/query")  return web_backtrack_query_(body);
+        if (path == "/api/v1/backtrack/auto-toggle") return web_auto_backtrack_toggle_();
         return R"({"ok":false,"error":"unknown POST path"})";
     }
 
@@ -2705,8 +2757,9 @@ std::string Widget::web_fusion_start_()
 
     fusion_->configure_tracker(fusionTrackerCfg_);
     fusion_->enable_tracking(true);
-    // 自动回溯暂关闭
-    // fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+    if (autoBacktrackEnabled_) {
+        fusion_->register_warning_callback(fusion_warning_callback_, nullptr);
+    }
 
     if (!fusion_->start(lidar_, fusionCamCfg_, fusionCamCount_)) {
         if (!osdEnabled_[0] && !osdEnabled_[1] && yoloInfer_) {
@@ -2915,6 +2968,7 @@ std::string Widget::get_status_json_() const
 
     j["radarRangeMeters"] = fusionTrackerCfg_.radarRangeMeters;
     j["fusionConfigVersion"] = fusionConfigVersion_;
+    j["autoBacktrackEnabled"] = autoBacktrackEnabled_;
 
     j["ok"] = true;
     return j.dump();
@@ -3264,6 +3318,15 @@ void Widget::build_backtrack_page_()
     connect(btnRefresh, &QPushButton::clicked, this, &Widget::on_btn_refresh_backtrack_);
     paramLayout->addWidget(btnRefresh);
 
+    btnAutoBacktrack_ = new QPushButton(
+        autoBacktrackEnabled_ ? "自动回溯: 开" : "自动回溯: 关", paramFrame);
+    btnAutoBacktrack_->setFixedSize(120, 28);
+    btnAutoBacktrack_->setStyleSheet(autoBacktrackEnabled_
+        ? "font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #238636; border: 1px solid #2ea043; border-radius: 8px;"
+        : "font-size: 12px; color: #2d3535; background-color: #F5F0D7; border: 1px solid #8b949e; border-radius: 8px;");
+    connect(btnAutoBacktrack_, &QPushButton::clicked, this, &Widget::on_btn_auto_backtrack_);
+    paramLayout->addWidget(btnAutoBacktrack_);
+
     rootLayout->addWidget(paramFrame);
 
     // 文件列表
@@ -3342,12 +3405,14 @@ void Widget::deinit_nvme_()
     }
 }
 
-void Widget::do_backtrack_(uint64_t triggerTsUs, int cameraId,
-                           const QString& label)
+QStringList Widget::do_backtrack_(uint64_t triggerTsUs, int cameraId,
+                                   const QString& label)
 {
+    QStringList savedFiles;
+
     if (!nvme_manager_) {
         set_status_("NVMe 未初始化", "#f85149");
-        return;
+        return savedFiles;
     }
 
     double backSecs = backtrackSecsEdit_
@@ -3380,18 +3445,19 @@ void Widget::do_backtrack_(uint64_t triggerTsUs, int cameraId,
             fprintf(stderr, "[SentinelQT] backtrack clip saved: %s\n",
                     filePath.toUtf8().constData());
             ++okCount;
+            savedFiles.append(fileName);
         } else {
             fprintf(stderr, "[SentinelQT] backtrack export failed for cam%d\n", cam);
         }
     }
 
     if (okCount > 0) {
-        set_status_(QString("回溯完成: %1 个视频").arg(okCount), "#2ea043");
+        fprintf(stderr, "[SentinelQT] backtrack done: %d clip(s) saved\n", okCount);
     } else {
-        set_status_("回溯导出失败", "#f85149");
+        fprintf(stderr, "[SentinelQT] backtrack export failed\n");
     }
 
-    on_btn_refresh_backtrack_();
+    return savedFiles;
 }
 
 void Widget::on_btn_backtrack_page_()
@@ -3403,6 +3469,35 @@ void Widget::on_btn_backtrack_page_()
 void Widget::on_btn_back_from_backtrack_()
 {
     ui->stackedWidget->setCurrentIndex(0);
+}
+
+void Widget::set_auto_backtrack_enabled_(bool enabled)
+{
+    autoBacktrackEnabled_ = enabled;
+
+    if (btnAutoBacktrack_) {
+        btnAutoBacktrack_->setText(enabled ? "自动回溯: 开" : "自动回溯: 关");
+        btnAutoBacktrack_->setStyleSheet(enabled
+            ? "font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #238636; border: 1px solid #2ea043; border-radius: 8px;"
+            : "font-size: 12px; color: #2d3535; background-color: #F5F0D7; border: 1px solid #8b949e; border-radius: 8px;");
+    }
+
+    if (fusionEnabled_ && fusion_) {
+        fusion_->register_warning_callback(
+            enabled ? fusion_warning_callback_ : nullptr, nullptr);
+    }
+
+    if (!enabled) {
+        lastAutoBacktrackUs_.clear();
+    }
+
+    fprintf(stderr, "[SentinelQT] auto backtrack %s\n",
+        enabled ? "enabled" : "disabled");
+}
+
+void Widget::on_btn_auto_backtrack_()
+{
+    set_auto_backtrack_enabled_(!autoBacktrackEnabled_);
 }
 
 void Widget::on_btn_backtrack_()
@@ -3432,7 +3527,14 @@ void Widget::on_btn_backtrack_()
     uint64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
         now.time_since_epoch()).count();
 
-    do_backtrack_(nowUs, cam, QString("manual_cam%1").arg(cam));
+    QStringList files = do_backtrack_(nowUs, cam,
+        QString("manual_cam%1").arg(cam));
+    if (!files.isEmpty()) {
+        set_status_(QString("回溯完成: %1 个视频").arg(files.size()), "#2ea043");
+    } else {
+        set_status_("回溯导出失败", "#f85149");
+    }
+    on_btn_refresh_backtrack_();
 }
 
 void Widget::on_btn_refresh_backtrack_()
@@ -3537,7 +3639,15 @@ std::string Widget::web_backtrack_query_(const std::string& body)
         uint64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
             now.time_since_epoch()).count();
 
-        do_backtrack_(nowUs, cam, QString("web_cam%1").arg(cam));
+        QStringList files = do_backtrack_(nowUs, cam,
+            QString("web_cam%1").arg(cam));
+
+        if (!files.isEmpty()) {
+            set_status_(QString("回溯完成: %1 个视频").arg(files.size()), "#2ea043");
+        } else {
+            set_status_("回溯导出失败", "#f85149");
+        }
+        on_btn_refresh_backtrack_();
 
         nlohmann::json resp;
         resp["ok"] = true;
@@ -3546,6 +3656,36 @@ std::string Widget::web_backtrack_query_(const std::string& body)
     } catch (...) {
         return R"({"ok":false,"error":"invalid JSON"})";
     }
+}
+
+std::string Widget::web_auto_backtrack_toggle_()
+{
+    set_auto_backtrack_enabled_(!autoBacktrackEnabled_);
+    return autoBacktrackEnabled_
+        ? R"({"ok":true,"autoBacktrackEnabled":true})"
+        : R"({"ok":true,"autoBacktrackEnabled":false})";
+}
+
+std::string Widget::web_auto_backtrack_status_()
+{
+    return autoBacktrackEnabled_
+        ? R"({"enabled":true})"
+        : R"({"enabled":false})";
+}
+
+std::string Widget::web_ai_report_()
+{
+    QFile file(aiReportFile_);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return R"({"ok":false,"error":"report file not found"})";
+    }
+    QString text = QString::fromUtf8(file.readAll());
+    file.close();
+
+    nlohmann::json resp;
+    resp["ok"] = true;
+    resp["text"] = text.toStdString();
+    return resp.dump();
 }
 
 std::string Widget::get_backtrack_files_json_() const
