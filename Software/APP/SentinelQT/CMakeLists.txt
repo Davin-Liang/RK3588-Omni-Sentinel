@@ -26,6 +26,27 @@ if(DEFINED QT5_PREFIX)
 endif()
 find_package(Qt5 COMPONENTS Widgets REQUIRED)
 
+# -----------------------------------------------------------------------------
+# OpenCV include path for sub-projects
+# -----------------------------------------------------------------------------
+# 视觉 EIS 的公共头文件 vision_eis.hpp 使用 #include <opencv2/opencv.hpp>.
+# SentinelQT 会 add_subdirectory 编译 sentinel-visioner、sentinel-streamer 等子工程，
+# sentinel-streamer 又会间接包含 sentinel-visioner.h -> vision_eis.hpp。
+# 因此必须在 add_subdirectory(...) 之前把 OpenCV include 路径加入当前目录作用域，
+# 让后续子工程也能继承该 include 路径。
+#
+# 注意：代码写的是 #include <opencv2/opencv.hpp>，所以这里应该加入
+#       APP/3rdparty/opencv/include，不能加入 include/opencv2。
+set(APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(PROJECT_OPENCV_INCLUDE_DIR ${APP_ROOT}/3rdparty/opencv/include)
+
+if(EXISTS "${PROJECT_OPENCV_INCLUDE_DIR}/opencv2/opencv.hpp")
+    include_directories(${PROJECT_OPENCV_INCLUDE_DIR})
+    message(STATUS "Global OpenCV include dir for sub-projects: ${PROJECT_OPENCV_INCLUDE_DIR}")
+else()
+    message(WARNING "OpenCV header not found: ${PROJECT_OPENCV_INCLUDE_DIR}/opencv2/opencv.hpp")
+endif()
+
 # 第三方: RGA
 if(NOT TARGET librga)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/librga 3rdparty_rga.out)
@@ -73,12 +94,17 @@ endif()
 
 # ICM45686 EIS 防抖
 if(NOT TARGET icm45686_eis_lib)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app-parameterized ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
 endif()
 
 # NVMe SSD 回溯存储
 if(NOT TARGET nvme_data_manager_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../NVMe-SSD ${CMAKE_CURRENT_BINARY_DIR}/nvme_build)
+endif()
+
+# DeepSeek AI 推理
+if(NOT TARGET deepseek_ai_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Deepseek ${CMAKE_CURRENT_BINARY_DIR}/deepseek_build)
 endif()
 
 find_package(Threads REQUIRED)
@@ -110,8 +136,9 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-lslidarer/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lidar-camera-fusion/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-yolo-infer/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app-parameterized/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../NVMe-SSD/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Deepseek/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -123,6 +150,7 @@ target_link_libraries(SentinelQT PRIVATE
     lidar_camera_fusion_lib
     sentinel_yolo_infer_lib
     web_control_lib
+    deepseek_ai_lib
     ${LIBRGA}
     Threads::Threads
     dma_buffer_pool_lib
@@ -136,6 +164,7 @@ if(Qt5LinguistTools_FOUND)
 endif()
 
 install(TARGETS SentinelQT DESTINATION ./)
-install(FILES config.ini DESTINATION ./)
+install(FILES config.ini ai_report.txt DESTINATION ./)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../web-control/web/ DESTINATION web
     FILES_MATCHING PATTERN "*.html" PATTERN "*.css" PATTERN "*.js")
+

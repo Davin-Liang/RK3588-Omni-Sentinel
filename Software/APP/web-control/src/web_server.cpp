@@ -133,6 +133,8 @@ bool WebServer::start()
     impl_->httpServer_.Get(R"(/api/v1/eis/config)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/eis/visible)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/backtrack/files)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/backtrack/auto-status)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/ai/report)", wrap_get);
 
     // MJPEG snapshots
     impl_->httpServer_.Get(R"(/api/v1/cam/0/snapshot.jpg)", [this](const httplib::Request&, httplib::Response& res) {
@@ -189,6 +191,7 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/0/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/1/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/backtrack/query)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/backtrack/auto-toggle)", wrap_post);
 
     // PUT
     auto wrap_put = [handle_api](const httplib::Request& req, httplib::Response& res) {
@@ -355,6 +358,15 @@ void WebServer::push_event(const std::string& eventType, const std::string& json
 void WebServer::push_tracking(const std::string& json)
 {
     std::string msg = R"({"type":"tracking","data":)" + json + "}";
+    {
+        std::lock_guard<std::mutex> lk(impl_->queueMutex_);
+        impl_->sendQueue_.push(std::move(msg));
+    }
+}
+
+void WebServer::push_alert(const std::string& json)
+{
+    std::string msg = R"({"type":"alert","data":)" + json + "}";
     {
         std::lock_guard<std::mutex> lk(impl_->queueMutex_);
         impl_->sendQueue_.push(std::move(msg));

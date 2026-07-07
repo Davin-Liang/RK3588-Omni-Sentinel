@@ -41,6 +41,10 @@ public:
     /** @brief 推送融合跟踪目标数据到所有 WebSocket 客户端 (5Hz) */
     void push_tracking(const std::string& json);
 
+    /** @brief 推送告警回溯通知到所有 WebSocket 客户端
+     *  @param json  告警数据 JSON: {"targetId":"3","files":["backtrack_...mp4",...]} */
+    void push_alert(const std::string& json);
+
     // ---- 预览帧缓存（线程安全，供 MJPEG 端点读取） ----
 
     QImage get_cached_preview(int camNum) const;

@@ -95,11 +95,13 @@ int main(int argc, char* argv[]) {
     int usbCamNum         = 1;
 
     int runSeconds = 30;
+    bool enableVisualEis = false;
 
     // 支持命令行覆盖
     if (argc > 1) ispDev    = argv[1];
     if (argc > 2) usbDev    = argv[2];
     if (argc > 3) runSeconds = atoi(argv[3]);
+    if (argc > 4) enableVisualEis = (atoi(argv[4]) != 0);
 
     std::cout << "========================================" << std::endl;
     std::cout << "Dual Camera Test" << std::endl;
@@ -108,6 +110,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  USB Cam : " << usbDev << " " << usbWidth << "x" << usbHeight
               << " (camNum=" << usbCamNum << ")" << std::endl;
     std::cout << "  Runtime : " << runSeconds << "s" << std::endl;
+    std::cout << "  VisualEIS: " << (enableVisualEis ? "ON" : "OFF") << std::endl;
     std::cout << "========================================" << std::endl;
 
     // 1. 添加 ISP 相机
@@ -120,6 +123,32 @@ int main(int argc, char* argv[]) {
     if (!visioner.add_camera(usbDev, usbWidth, usbHeight, 8, usbCamNum, CameraType::USB_CAM)) {
         std::cerr << "Failed to add USB camera!" << std::endl;
         return -1;
+    }
+
+    // 可选：两路相机分别启用视觉为主 EIS。
+    // 注意两个相机必须各自维护独立 VisionEisStabilizer，不能共用轨迹状态。
+    if (enableVisualEis) {
+        VisionEisConfig ispCfg;
+        ispCfg.camId = ispCamNum;
+        ispCfg.inputWidth = ispWidth;
+        ispCfg.inputHeight = ispHeight;
+        ispCfg.processWidth = 640;
+        ispCfg.processHeight = 360;
+        ispCfg.maxOffsetPixel = 80;
+        ispCfg.enableImuAdaptiveAlpha = false;
+        visioner.set_visual_eis_config(ispCamNum, ispCfg);
+        visioner.enable_visual_eis(ispCamNum, true);
+
+        VisionEisConfig usbCfg;
+        usbCfg.camId = usbCamNum;
+        usbCfg.inputWidth = usbWidth;
+        usbCfg.inputHeight = usbHeight;
+        usbCfg.processWidth = 480;
+        usbCfg.processHeight = 360;
+        usbCfg.maxOffsetPixel = 60;
+        usbCfg.enableImuAdaptiveAlpha = false;
+        visioner.set_visual_eis_config(usbCamNum, usbCfg);
+        visioner.enable_visual_eis(usbCamNum, true);
     }
 
     // 3. 开启两路视频流

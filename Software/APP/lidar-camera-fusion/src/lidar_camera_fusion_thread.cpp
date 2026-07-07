@@ -109,7 +109,7 @@ void LidarCameraFusion::fusion_thread_()
         }
 
         // [LidarCalib] 点云投射打印（调试用）
-        if (true) {
+        if (false) {
             fprintf(stderr, "[LidarCalib] all points (every 2nd):\n");
             uint32_t statBoth = 0, statCam0 = 0, statCam1 = 0, statOut = 0;
             for (uint32_t i = 0; i < frame.pointsCount; i += 2) {

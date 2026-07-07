@@ -7,12 +7,14 @@
 #include <QDateTime>
 #include <QMap>
 #include <QLineEdit>
+#include <map>
 #include <QEvent>
 #include <memory>
 
 #include "lidar_camera_fusion.h"
 
 #include "imu_eis.hpp"
+#include "vision_eis.hpp"
 
 class SentinelVisioner;
 class SentinelStreamer;
@@ -25,10 +27,13 @@ class NVMeDataManager;
 class TopDownView;
 class VirtualKeyboard;
 class WebServer;
+class AIReportWorker;
 class QThread;
 class QTimer;
 class QTableWidget;
 class QComboBox;
+class QPushButton;
+class QTextEdit;
 enum class StreamerEvent;
 
 QT_BEGIN_NAMESPACE
@@ -69,6 +74,10 @@ private slots:
     void on_btn_refresh_backtrack_();
     void on_btn_backtrack_page_();
     void on_btn_back_from_backtrack_();
+    void on_btn_auto_backtrack_();
+    void on_btn_ai_analysis_();
+    void on_ai_report_ready_(const QString& report);
+    void on_ai_auto_tick_();
     void update_clock_();
     void update_hw_usage_();
     void update_record_info_(int camNum);
@@ -143,15 +152,35 @@ private:
 
     // ---- EIS ----
     bool                showEisControl_ = false;
+    // ---- Visual EIS + IMU assist ----
     Icm45686Reader*     eisReader_ = nullptr;
-    EisStabilizer*      eisStabilizer_ = nullptr;
-    EisCameraConfig     eisCamCfg_[2];
+    EisStabilizer*      imuOnlyEis_ = nullptr;
+    VisionEisConfig     visualEisCfg_[2];
+    ImuOnlyEisConfig    imuOnlyEisCfg_[2];
+    uint32_t            imuAssistWindowMs_ = 200;
+
+    // ---- AI 分析 ----
+    AIReportWorker*     aiReportWorker_;
+    QThread*            aiReportThread_;
+    QTextEdit*          aiReportText_;
+    QTimer*             aiAutoTimer_;
+    int                 aiAutoIntervalSec_;
+    int                 aiCountdownSec_;
+    bool                aiAutoEnabled_;
+    std::atomic<bool>   aiWorkerReady_{false};
+    QString             lastAiReport_;  // 最近一次 AI 报告（供 Web API 缓存）
+
+    void update_ai_status_snapshot_(int tempC, int cpuUsage);
+    void reload_ai_auto_config_();
+    void update_ai_countdown_display_();
 
     void load_config_();
     void init_eis_();
     void deinit_eis_();
     void setup_lidar_osd_provider_();
-    bool eis_offset_callback_(uint64_t timestampUs, int camNum, int32_t& offsetX, int32_t& offsetY);
+    bool imu_assist_callback_(uint64_t timestampUs, int camNum, VisionImuAssistState& state);
+    bool imu_only_eis_offset_callback_(uint64_t timestampUs, int camNum,
+                                       int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);
     void start_preview_(int camNum);
     void stop_preview_(int camNum);
@@ -195,6 +224,9 @@ private:
     std::string web_backtrack_query_(const std::string& body);
     std::string web_delete_backtrack_(const std::string& body);
     std::string get_backtrack_files_json_() const;
+    std::string web_auto_backtrack_toggle_();
+    std::string web_auto_backtrack_status_();
+    std::string web_ai_report_();
 
     // ---- NVMe ----
     NVMeDataManager*    nvme_manager_ = nullptr;
@@ -203,7 +235,7 @@ private:
     QString             nvmeDevicePath_;
     void init_nvme_();
     void deinit_nvme_();
-    void do_backtrack_(uint64_t triggerTimestampUs, int cameraId, const QString& label);
+    QStringList do_backtrack_(uint64_t triggerTimestampUs, int cameraId, const QString& label);
 
     // ---- Backtrack helpers ----
     QTableWidget*       backtrackTable_;
@@ -211,6 +243,16 @@ private:
     QComboBox*          backtrackCamCombo_;
     QString             backtrackDir_;
     void build_backtrack_page_();
+
+    // ---- 自动回溯 ----
+    bool                    autoBacktrackEnabled_ = false;
+    double                  autoBacktrackCooldownSec_ = 30.0;
+    QPushButton*            btnAutoBacktrack_ = nullptr;
+    std::map<int, uint64_t> lastAutoBacktrackUs_;
+    void set_auto_backtrack_enabled_(bool enabled);
+
+    // ---- AI 分析 ----
+    QString                 aiReportFile_;
 
 
     // ---- Fusion helpers ----
@@ -224,3 +266,4 @@ private:
     bool eventFilter(QObject* obj, QEvent* event) override;
 };
 #endif // WIDGET_H
+

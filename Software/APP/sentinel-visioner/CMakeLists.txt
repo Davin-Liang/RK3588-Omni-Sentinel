@@ -35,9 +35,15 @@ if(NOT TARGET dma_buffer_pool_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool ${CMAKE_CURRENT_BINARY_DIR}/dma_build)
 endif()
 
+# FFmpeg (用于 MJPG 软件解码)
+set(FFMPEG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/ffmpeg)
+set(AVCODEC_LIB  ${FFMPEG_ROOT}/lib/libavcodec.so)
+set(AVUTIL_LIB   ${FFMPEG_ROOT}/lib/libavutil.so)
+
 # 编译 SentinelVisioner 静态库
 add_library(sentinel_visioner_lib STATIC
     src/sentinel-visioner.cpp
+    src/vision_eis.cpp
 )
 
 # 设置头文件包含路径
@@ -45,14 +51,10 @@ target_include_directories(sentinel_visioner_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${LIBRGA_INCLUDES}
     ${FFMPEG_ROOT}/include
+    ${OpenCV_INCLUDE_DIRS}
 )
 
 find_package(Threads REQUIRED)
-
-# FFmpeg (用于 MJPG 软件解码)
-set(FFMPEG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/ffmpeg)
-set(AVCODEC_LIB  ${FFMPEG_ROOT}/lib/libavcodec.so)
-set(AVUTIL_LIB   ${FFMPEG_ROOT}/lib/libavutil.so)
 
 # 链接对应的库
 target_link_libraries(sentinel_visioner_lib PUBLIC
@@ -61,6 +63,7 @@ target_link_libraries(sentinel_visioner_lib PUBLIC
     dma_buffer_pool_lib
     ${AVCODEC_LIB}
     ${AVUTIL_LIB}
+    ${OpenCV_LIBS}
 )
 
 # 编译可执行测试程序 (Demo)

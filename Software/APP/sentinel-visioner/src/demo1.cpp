@@ -120,12 +120,32 @@ int main(int argc, char* argv[]) {
 
     std::string devName = (argc > 1) ? argv[1] : "/dev/video11";
     int runSeconds      = (argc > 2) ? atoi(argv[2]) : 60;
+    bool enableVisualEis = (argc > 3) ? (atoi(argv[3]) != 0) : false;
     int camNum = 0;
 
     // 1. 注册并添加摄像头
     if (!visioner.add_camera(devName, 1920, 1080, 8, camNum)) {
         std::cerr << "Failed to add camera!" << std::endl;
         return -1;
+    }
+
+    // 可选：开启“视觉为主 + IMU辅助”EIS。
+    // 当前 demo1 不直接依赖 ICM45686，因此没有设置 IMU 回调；视觉 EIS 会独立运行，
+    // 后续在完整系统中可通过 set_imu_assist_callback() 接入 ICM45686 的 gyro_rms/vibration_level。
+    if (enableVisualEis) {
+        VisionEisConfig eisCfg;
+        eisCfg.camId = camNum;
+        eisCfg.inputWidth = 1920;
+        eisCfg.inputHeight = 1080;
+        eisCfg.processWidth = 640;
+        eisCfg.processHeight = 360;
+        eisCfg.maxOffsetPixel = 80;
+        eisCfg.alphaLowVibration = 0.30f;
+        eisCfg.alphaMidVibration = 0.20f;
+        eisCfg.alphaHighVibration = 0.12f;
+        eisCfg.enableImuAdaptiveAlpha = false;
+        visioner.set_visual_eis_config(camNum, eisCfg);
+        visioner.enable_visual_eis(camNum, true);
     }
 
     // 2. 开启视频流
@@ -140,7 +160,8 @@ int main(int argc, char* argv[]) {
     std::thread stream_thread(stream_consumer_thread, &visioner, camNum);
 
     // 主线程保持运行
-    std::cout << "System running... Press Ctrl+C to stop (or wait " << runSeconds << "s)." << std::endl;
+    std::cout << "System running... Press Ctrl+C to stop (or wait " << runSeconds
+              << "s). VisualEIS=" << (enableVisualEis ? "ON" : "OFF") << std::endl;
     for (int i = 0; i < runSeconds; ++i) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
