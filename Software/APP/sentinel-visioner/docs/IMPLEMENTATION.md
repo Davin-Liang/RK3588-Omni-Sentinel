@@ -89,10 +89,7 @@ DQBUF → sync_dma_buf_for_device → imcopy(相机BUF → usbSafePool)
 
 | 文件 | 职责 |
 |------|------|
-| `include/sentinel-visioner.h` | 公共 API 头文件（类声明、CameraContext、NpuPreview 结构体） |
-| `include/ThreadSafeQueue.h` | 泛型阻塞队列模板（条件变量实现，带超时支持） |
-| `src/sentinel-visioner.cpp` | 核心实现：相机管理、捕获线程、RGA 操作、资源生命周期 |
-| `src/demo_single.cpp` | 单路相机基础 Demo（可选构建） |
+| `include/sentinel-visioner.h` | 公共 API 头文件（类声明、CameraContext 结构体） |
 
 ---
 
@@ -110,7 +107,11 @@ struct DmaBuffer_t {
     int bufferSize;          // 内存块实际字节大小
     int width;               // 图像宽度
     int height;              // 图像高度
+    uint64_t timestampUs;
     uint64_t timestampUs;    // 时间戳 (CLOCK_MONOTONIC，来自 V4L2 buf.timestamp)
+    int32_t eisOffsetX;      // EIS 防抖水平偏移（像素），供下游 OSD/streamer 使用
+    int32_t eisOffsetY;      // EIS 防抖垂直偏移（像素）
+    bool eisActive;          // EIS 是否激活    // 时间戳 (CLOCK_MONOTONIC，来自 V4L2 buf.timestamp)
     DmaBuffer_t* next;       // 空闲链表 next 指针
 };
 ```
@@ -137,33 +138,32 @@ struct CameraContext {
 
     std::unique_ptr<DmaBufferPool> npuRgbPool;      // NPU 推理小图池 (640×640 RGB888)
     std::unique_ptr<DmaBufferPool> origCopyPool;    // 原始推流拷贝池 (NV12)
-    std::unique_ptr<DmaBufferPool> previewPool;     // 预览图像池 (RGB888)
+    std::unique_ptr<DmaBufferPool> previewPool;     // 预览图像池 (1080p BGR888)
     std::unique_ptr<DmaBufferPool> usbConvertPool;  // USB YUYV→NV12 中间转换池 (NV12)
+    std::unique_ptr<DmaBufferPool> usbSafePool;     // USB NV12 安全拷贝缓冲池 (NV12)
+    std::unique_ptr<DmaBufferPool> mjpegDecodePool; // USB MJPG→NV12 FFmpeg 解码输出池
 
-    ThreadSafeQueue<NpuPreview> previewTaskQueue;   // 预览/NPU 任务队列
-    ThreadSafeQueue<DmaBuffer_t*> processTaskQueue; // 推流/录像原图队列
+    ThreadSafeQueue<DmaBuffer_t*> npuTaskQueue;      // NPU 推理任务队列 (640×640 RGB888)
+    ThreadSafeQueue<DmaBuffer_t*> previewTaskQueue;   // 预览任务队列 (1080p BGR888)
+    ThreadSafeQueue<DmaBuffer_t*> processTaskQueue;  // 推流/录像原图队列 (NV12)
 
     // 相机类型相关 (仅 USB 时部分字段有效)
     CameraType camType;               // ISP_CAM 或 USB_CAM
     int v4l2BufType;                  // V4L2 buffer type (MPLANE 或 SINGLE_PLANAR)
-    unsigned int actualPixelFormat;   // 实际协商后的像素格式
+    unsigned int actualPixelFormat;   // 实际协商后的像素格式 (NV12/YUYV/MJPG)
+    int srcBytesPerLine;              // USB 相机实际行跨度 (V4L2 bytesperline)
+
+    // EIS EMA 低通滤波状态 (每路独立)
+    float eisSmoothAlpha;
+    int32_t prevEisOffsetX;
+    int32_t prevEisOffsetY;
+    bool eisPrevValid;
 };
 ```
 
-### 4.3 NpuPreview
+### 4.3 SentinelVisioner（公共 API）
 
-打包传递给下游的 NPU 推理和预览图像：
-
-```cpp
-struct NpuPreview {
-    DmaBuffer_t* npuImage;     // 640×640 RGB888 NPU 推理小图 (带 Letterbox)
-    DmaBuffer_t* previewImage; // 1920×1080 RGB888 预览大图 (可能为 nullptr)
-};
-```
-
-> **注意**: `npuImage` 带有 Letterbox 灰边，不应用于界面展示。预览显示应使用 `previewImage`。
-
-### 4.4 SentinelVisioner（公共 API）
+NPU 和预览已拆分为独立队列，各自有独立的 `wait`/`try`/`release` 方法组：
 
 ```cpp
 class SentinelVisioner {
@@ -178,32 +178,41 @@ public:
     bool camera_stream_ctrl(int camNum, bool isOpen);
     void camera_pause(int camNum, bool paused);
 
-    // 预览/NPU 消费者 API
-    NpuPreview wait_get_preview(int camNum);
-    NpuPreview try_get_preview(int camNum, int timeoutMs);
-    void release_preview(int camNum, NpuPreview* preview);
+    // NPU 消费者 API (独立队列)
+    DmaBuffer_t* wait_get_npu(int camNum);
+    DmaBuffer_t* try_get_npu(int camNum, int timeoutMs);
+    void release_npu(int camNum, DmaBuffer_t* buf);
+
+    // 预览消费者 API (独立队列)
+    DmaBuffer_t* wait_get_preview(int camNum);
+    DmaBuffer_t* try_get_preview(int camNum, int timeoutMs);
+    void release_preview(int camNum, DmaBuffer_t* buf);
 
     // 推流/录像消费者 API
     DmaBuffer_t* wait_get_orig_copy_buffer(int camNum);
     void release_orig_copy_buffer(int camNum, DmaBuffer_t* buf);
 
+    // EIS 防抖配置
+    void set_eis_offset_callback(std::function<bool(uint64_t, int, int32_t&, int32_t&)> cb);
+    void set_eis_smooth_alpha(float alpha);
+
 private:
-    // 多路摄像头映射表: camNum → CameraContext
     std::unordered_map<int, std::unique_ptr<CameraContext>> _cameraContextMap;
+    std::function<bool(uint64_t, int, int32_t&, int32_t&)> eis_offset_callback_;
 
     void release_camera_resources_(CameraContext* context);
     void capture_thread_func_(int camNum);
 
     // RGA 硬件操作
-    bool rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight,
-                             DmaBuffer_t* dstBuf,
-                             int horizontalOffset, int verticalOffset);
-    bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight,
+    bool rga_process_to_rgb_(int srcFd, int srcWidth, int srcHeight, int srcStride,
+                             DmaBuffer_t* dstBuf, int horizontalOffset, int verticalOffset);
+    bool rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, int srcStride,
                                    DmaBuffer_t* dstBuf);
-    bool rga_copy_buffer_(int srcFd, int width, int height,
-                          DmaBuffer_t* dstBuf);
-    bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight,
-                           DmaBuffer_t* dstBuf);
+    bool rga_copy_buffer_(int srcFd, int width, int height, int srcStride, DmaBuffer_t* dstBuf);
+    bool rga_yuyv_to_nv12_(int srcFd, int srcWidth, int srcHeight, int srcStride, DmaBuffer_t* dstBuf);
+
+    // FFmpeg 软件解码
+    bool mjpeg_decode_to_nv12_(const uint8_t* jpegData, size_t jpegSize, DmaBuffer_t* dstBuf);
 };
 ```
 
@@ -216,7 +225,8 @@ private:
 | 线程 | 职责 | 生命周期 | 同步机制 |
 |------|------|----------|----------|
 | capture_thread_func_ | 每路相机 1 个线程，epoll 监听 V4L2 帧到达，连续 3 次 RGA 调度，写入两个阻塞队列 | `camera_stream_ctrl(true)` 创建，`camera_stream_ctrl(false)` join 销毁 | `isThreadRunning` atomic |
-| NPU/预览消费者线程 | 由调用方创建（如 SentinelQT PreviewWorker），调用 `wait_get_preview` / `try_get_preview` 阻塞拉取 | 调用方自行管理 | `ThreadSafeQueue` 内部 mutex + condvar |
+| NPU 消费者线程 | 由调用方创建，调用 `wait_get_npu` / `try_get_npu` 阻塞拉取 | 调用方自行管理 | `npuTaskQueue` 内部 mutex + condvar |
+| 预览消费者线程 | 由调用方创建（如 SentinelQT PreviewWorker），调用 `wait_get_preview` / `try_get_preview` 阻塞拉取 | 调用方自行管理 | `previewTaskQueue` 内部 mutex + condvar |
 | 推流/录像消费者线程 | 由调用方创建（如 SentinelStreamer 内部线程），调用 `wait_get_orig_copy_buffer` 阻塞拉取 | 调用方自行管理 | `ThreadSafeQueue` 内部 mutex + condvar |
 
 ### 5.2 捕获线程生命周期
@@ -259,14 +269,15 @@ main thread                            capture_thread_func_
 |------|------|
 | `isThreadRunning` | `std::atomic<bool>`，main thread 写入 false，capture thread 读取 |
 | `isPaused` | `std::atomic<bool>`，main thread 通过 `camera_pause()` 写入，capture thread 读取 |
-| `DmaBufferPool` (3 个) | **仅 capture thread 写**（get_buffer / release_buffer 在失败路径），消费者线程**不直接操作** pool |
-| `previewTaskQueue` | capture thread push，消费者线程 pop（双向生产者-消费者，mutex + condvar 保护） |
-| `processTaskQueue` | capture thread push，消费者线程 pop（双向生产者-消费者，mutex + condvar 保护） |
+| `DmaBufferPool` (多个) | **仅 capture thread 写**（get_buffer / release_buffer 在失败路径），消费者线程**不直接操作** pool |
+| `npuTaskQueue` | capture thread push，NPU 消费者线程 pop（生产者-消费者，mutex + condvar 保护） |
+| `previewTaskQueue` | capture thread push，预览消费者线程 pop（生产者-消费者，mutex + condvar 保护） |
+| `processTaskQueue` | capture thread push，推流消费者线程 pop（生产者-消费者，mutex + condvar 保护） |
 | `_cameraContextMap` | 仅 main thread 写入（add / remove），其他线程通过指针只读访问 |
 
 ---
 
-## 6. 三个 DmaBufferPool 的用途与格式
+## 6. 主要 DmaBufferPool 的用途与格式
 
 | 池名称 | 分辨率 | 格式 | 用途 | 消费者 |
 |--------|--------|------|------|--------|
@@ -320,6 +331,21 @@ class ThreadSafeQueue {
         }
         cond_.notify_one();
     }
+
+    // 清空队列，只取最新元素（跳帧用，非阻塞）
+    bool drain_latest(T& val) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) return false;
+        while (queue_.size() > 1) { queue_.pop(); }
+        val = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
 };
 ```
 
@@ -327,15 +353,18 @@ class ThreadSafeQueue {
 
 | 方法 | 调用方 | 场景 |
 |------|--------|------|
-| `pop()` | `wait_get_preview` / `wait_get_orig_copy_buffer` | 消费者无需退出检查，可无限阻塞等待 |
-| `try_pop(val, timeoutMs)` | `try_get_preview(camNum, timeoutMs)` | 消费者需要周期性检查退出标志（如 QT 子线程），用 200ms 超时轮询 |
+| `pop()` | `wait_get_npu` / `wait_get_preview` / `wait_get_orig_copy_buffer` | 消费者无需退出检查，可无限阻塞等待 |
+| `try_pop(val)` | 非阻塞快速检查 | 消费者不希望阻塞，立即返回 |
+| `try_pop(val, timeoutMs)` | `try_get_npu` / `try_get_preview` | 消费者需要周期性检查退出标志（如 QT 子线程），用 200ms 超时轮询 |
 | `push(val)` | `capture_thread_func_` | 捕获线程 RGA 完成后投递任务 |
+| `drain_latest(val)` | 下游消费者做跳帧处理 | 宁可丢弃旧帧也要最新一帧的场景 |
+| `empty()` | 消费者/管理线程 | 轮询检查队列是否有数据就绪 |
 
 ### 7.3 易踩坑的细节
 
-- **`wait_get_preview` 使用无限阻塞 `pop()`**：如果下游消费者线程在 `wait_get_preview` 上阻塞，而捕获线程已停止（无新帧产生），消费者线程将永久挂起。对于需要优雅退出的场景，应使用 `try_get_preview(camNum, 200)`，在超时后检查退出标志。
+- **`wait_get_npu` / `wait_get_preview` 使用无限阻塞 `pop()`**：如果下游消费者线程在阻塞等待时捕获线程已停止，消费者线程将永久挂起。对于需要优雅退出的场景，应使用 `try_get_*` 超时版，在超时后检查退出标志。
 - **`push` 后 `notify_one()` 的作用域**：`notify_one()` 在 `lock_guard` 作用域**之外**调用，避免"hurry up and wait"问题——waiting thread 被唤醒后立即因 mutex 仍被锁而再次休眠。
-- **`NpuPreview` 的值语义**：队列中存储的是 `NpuPreview` 结构体（两个指针），不是 `DmaBuffer_t` 本身。消费者拿到的是指针副本，归还时需要调用对应的 `release_*` 接口。
+- **`DmaBuffer_t*` 的指针语义**：队列中存储的是 `DmaBuffer_t*` 指针，消费者拿到指针后必须调用对应的 `release_*` 接口归还到对应内存池。NPU 和预览是两个完全独立的队列，归还时各自调用 `release_npu` / `release_preview`。
 
 ---
 
@@ -388,14 +417,14 @@ capture_thread_func_(camNum)
        └─ VIDIOC_QBUF  (归还 V4L2 buffer)
 ```
 
-**重要**: 操作 A+B 作为一个打包的 `NpuPreview` 写入 `previewTaskQueue`，操作 C 独立写入 `processTaskQueue`。这样下游消费者可以只订阅自己需要的数据流，互不干扰。
+**重要**: 操作 A、B、C 各自独立写入三个队列（`npuTaskQueue`、`previewTaskQueue`、`processTaskQueue`），互不阻塞。NPU 池空不影响预览产出，反之亦然。操作 C 的 buffer 还携带 EIS 偏移信息（`eisOffsetX`/`eisOffsetY`/`eisActive`），供推流/录像方的 OSD 叠加使用。这样下游消费者可以只订阅自己需要的数据流，互不干扰。
 
 ### 8.2 RGA 操作 A: rga_process_to_rgb_ (NPU 小图)
 
 功能：1080P NV12 输入 → 640×640 RGB888 输出，带 Letterbox 灰边填充和 EIS 防抖平移偏移。
 
 ```
-rga_process_to_rgb_(srcFd, 1920, 1080, dstBuf, horizOffset, vertOffset)
+rga_process_to_rgb_(srcFd, srcWidth, srcHeight, srcStride, dstBuf, horizOffset, vertOffset)
   │
   ├─ importbuffer_fd(srcFd, 1920×1080, YCrCb_420_SP)  → rga_handle_src
   ├─ importbuffer_fd(dstFd, 640×640, RGB_888)          → rga_handle_dst
@@ -430,10 +459,10 @@ void set_eis_offset_callback(
 
 ### 8.3 RGA 操作 B: rga_convert_to_rgb_full_ (预览 1080p)
 
-功能：1080P NV12 → 1080P RGB888，纯 1:1 格式转换，无缩放无 Letterbox。
+功能：1080P NV12 → 1080P BGR888，纯 1:1 格式转换，无缩放无 Letterbox。
 
 ```
-rga_convert_to_rgb_full_(srcFd, 1920, 1080, dstBuf)
+rga_convert_to_rgb_full_(srcFd, srcWidth, srcHeight, srcStride, dstBuf)
   │
   ├─ importbuffer_fd(srcFd, 1920×1080, YCrCb_420_SP) → rga_handle_src
   ├─ importbuffer_fd(dstFd, 1920×1080, RGB_888)      → rga_handle_dst
@@ -445,14 +474,14 @@ rga_convert_to_rgb_full_(srcFd, 1920, 1080, dstBuf)
   └─ releasebuffer_handle(src/dst)
 ```
 
-最简单的 RGA 操作，仅做色彩空间转换。输出的 RGB888 图像通过 `virtAddr` 可直接构造 `QImage`，供 QT 界面渲染。
+最简单的 RGA 操作，仅做色彩空间转换。输出格式为 `RK_FORMAT_BGR_888`，与 QT `QImage::Format_RGB888` 的通道顺序吻合，通过 `virtAddr` 可直接构造 `QImage`。原始输出的 RGB888 图像通过 `virtAddr` 可直接构造 `QImage`，供 QT 界面渲染。
 
 ### 8.4 RGA 操作 C: rga_copy_buffer_ (推流原图拷贝)
 
 功能：1080P NV12 → 1080P NV12，同格式硬件拷贝。不使用 `improcess`，而是用 `imcopy`，RGA 按原始位深直接复制。
 
 ```
-rga_copy_buffer_(srcFd, 1920, 1080, dstBuf)
+rga_copy_buffer_(srcFd, width, height, srcStride, dstBuf)
   │
   ├─ importbuffer_fd(srcFd, 1920×1080, YCrCb_420_SP) → rga_handle_src
   ├─ importbuffer_fd(dstFd, 1920×1080, YCrCb_420_SP) → rga_handle_dst
@@ -470,25 +499,41 @@ rga_copy_buffer_(srcFd, 1920, 1080, dstBuf)
 
 ### 9.1 previewTaskQueue 消费者
 
+### 9.1 NPU 消费者 (npuTaskQueue)
+
 | API | 阻塞方式 | 返回值 | 使用场景 |
 |-----|---------|--------|---------|
-| `wait_get_preview(camNum)` | `pop()` 无限阻塞 | `NpuPreview`，无数据时线程挂起 | 消费者无需退出检查 |
-| `try_get_preview(camNum, timeoutMs)` | `try_pop(timeoutMs)` 超时返回 | 超时返回 `{nullptr, nullptr}` | 消费者需要周期性检查退出标志 |
+| `wait_get_npu(camNum)` | `pop()` 无限阻塞 | `DmaBuffer_t*`，无数据时线程挂起 | 消费者无需退出检查 |
+| `try_get_npu(camNum, timeoutMs)` | `try_pop(timeoutMs)` 超时返回 | 超时返回 `nullptr` | 消费者需要周期性检查退出标志 |
+
+```cpp
+// 使用示例: YOLO 推理线程
+while (running_) {
+    DmaBuffer_t* npuBuf = visioner->try_get_npu(camNum, 200);
+    if (npuBuf == nullptr) continue;
+    // 使用 npuBuf->dmaFd 做 NPU 推理 (640×640 RGB888 + Letterbox + EIS)
+    visioner->release_npu(camNum, npuBuf);
+}
+```
+
+### 9.2 预览消费者 (previewTaskQueue)
+
+| API | 阻塞方式 | 返回值 | 使用场景 |
+|-----|---------|--------|---------|
+| `wait_get_preview(camNum)` | `pop()` 无限阻塞 | `DmaBuffer_t*` | 消费者无需退出检查 |
+| `try_get_preview(camNum, timeoutMs)` | `try_pop(timeoutMs)` 超时返回 | 超时返回 `nullptr` | 消费者需要周期性检查退出标志 |
 
 ```cpp
 // 使用示例: QT PreviewWorker 子线程
 while (running_) {
-    NpuPreview task = visioner->try_get_preview(camNum, 200);
-    if (task.npuImage == nullptr) continue;  // 超时，检查 running_ 标志
-
-    // 使用 task.npuImage->dmaFd 做 NPU 推理
-    // 使用 task.previewImage->virtAddr 渲染 QT 界面
-
-    visioner->release_preview(camNum, &task);  // 必须归还
+    DmaBuffer_t* previewBuf = visioner->try_get_preview(camNum, 200);
+    if (previewBuf == nullptr) continue;
+    // previewBuf->virtAddr 用于 QImage (BGR888 格式)
+    visioner->release_preview(camNum, previewBuf);
 }
 ```
 
-### 9.2 processTaskQueue 消费者
+### 9.3 推流/录像消费者 (processTaskQueue)
 
 | API | 阻塞方式 | 返回值 |
 |-----|---------|--------|
@@ -506,15 +551,12 @@ while (threadRunning) {
 }
 ```
 
-### 9.3 release API 归还机制
+### 9.4 release API 归还机制
 
 ```cpp
-release_preview(camNum, &task)
-  ├─ npuRgbPool->release_buffer(task.npuImage)
-  └─ previewPool->release_buffer(task.previewImage)
-
-release_orig_copy_buffer(camNum, buf)
-  └─ origCopyPool->release_buffer(buf)
+release_npu(camNum, buf)               → npuRgbPool->release_buffer(buf)
+release_preview(camNum, buf)           → previewPool->release_buffer(buf)
+release_orig_copy_buffer(camNum, buf)  → origCopyPool->release_buffer(buf)
 ```
 
 归还操作直接将 `DmaBuffer_t` 重新压入对应内存池的空闲链表（Free List），`ifUse` 标记复位，可供下一次 `get_buffer()` 取用。
@@ -710,8 +752,9 @@ USB UVC 摄像头与 MIPI CSI 摄像头的 V4L2 接口在三个层面不同：
 | 差异点 | ISP (MIPI CSI) | USB (UVC) |
 |--------|---------------|-----------|
 | Buffer 类型 | `V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE` | `V4L2_BUF_TYPE_VIDEO_CAPTURE` (单平面) |
-| 像素格式 | NV12 (ISP 硬件输出) | YUYV 或 NV12 (因摄像头而异) |
+| 像素格式 | NV12 (ISP 硬件输出) | YUYV、NV12 或 MJPG (因摄像头而异) |
 | planes 数组 | QBUF/DQBUF 必须设置 `v4l2_plane` | 不需要，设了反而出错 |
+| stride | 无 padding | 可能有 bytesperline > width |
 
 设计策略：调用者通过 `CameraType` 枚举显式指定相机类型，库内据此分流初始化路径。USB 相机优先尝试 NV12 原生格式（零额外 RGA 开销），不支持时回退 YUYV + RGA 硬件转换。无论哪种路径，最终都产出 NV12 喂入统一的三 RGA 下游管线。
 
@@ -723,12 +766,13 @@ add_camera(dev, w, h, bufCnt, camNum, USB_CAM)
   ├─ v4l2BufType = V4L2_BUF_TYPE_VIDEO_CAPTURE (单平面)
   │
   ├─ VIDIOC_S_FMT(NV12)
-  │    ├─ 成功 → actualPixelFormat = NV12, 无 usbConvertPool
+  │    ├─ 成功 → actualPixelFormat = NV12, 按需分配 usbSafePool
   │    └─ 失败 → VIDIOC_S_FMT(YUYV)
   │              ├─ 成功 → actualPixelFormat = YUYV, 分配 usbConvertPool
   │              └─ 失败 → return false
   │
-  └─ VIDIOC_G_FMT 回读实际格式和分辨率
+  ├─ VIDIOC_G_FMT 回读实际格式、分辨率和 bytesperline
+  │    └─ actualPixelFormat == MJPG → 分配 mjpegDecodePool
 ```
 
 ### 15.3 捕获线程中的 YUYV→NV12 转换
@@ -740,7 +784,7 @@ VIDIOC_DQBUF → currentDmaFd (YUYV)
   │
   ├─ usbConvertPool->get_buffer() → convBuf
   ├─ rga_yuyv_to_nv12_(currentDmaFd, width, height, convBuf)
-  │    RGA: RK_FORMAT_YUYV_422 → RK_FORMAT_YCrCb_420_SP (1:1, 无缩放)
+  │    RGA: RK_FORMAT_YVYU_422 → RK_FORMAT_YCrCb_420_SP (1:1, 无缩放)
   ├─ nv12DmaFd = convBuf->dmaFd
   │
   ├─ 操作 A/B/C 使用 nv12DmaFd (NV12) 作为源
@@ -780,14 +824,22 @@ VIDIOC_DQBUF → currentDmaFd (YUYV)
 
 | 功能 | 函数 | 文件:行号 |
 |------|------|-----------|
-| 相机初始化 | `add_camera()` | `sentinel-visioner.cpp:23` |
-| 流启停 | `camera_stream_ctrl()` | `sentinel-visioner.cpp:166` |
-| 捕获线程 | `capture_thread_func_()` | `sentinel-visioner.cpp:214` |
-| 暂停/恢复 | `camera_pause()` | `sentinel-visioner.cpp:355` |
-| NPU 小图 RGA | `rga_process_to_rgb_()` | `sentinel-visioner.cpp:456` |
-| 预览转换 RGA | `rga_convert_to_rgb_full_()` | `sentinel-visioner.cpp:526` |
-| 拷贝 RGA | `rga_copy_buffer_()` | `sentinel-visioner.cpp` |
-| YUYV→NV12 RGA | `rga_yuyv_to_nv12_()` | `sentinel-visioner.cpp` |
-| 资源清理 | `release_camera_resources_()` | `sentinel-visioner.cpp` |
-| 阻塞队列 | `ThreadSafeQueue::pop/push` | `ThreadSafeQueue.h:10/46` |
-| 超时队列 | `ThreadSafeQueue::try_pop` | `ThreadSafeQueue.h:31` |
+| 相机初始化 | `add_camera()` | `src/sentinel-visioner.cpp` |
+| 流启停 | `camera_stream_ctrl()` | `src/sentinel-visioner.cpp` |
+| 捕获线程 | `capture_thread_func_()` | `src/sentinel-visioner.cpp` |
+| 暂停/恢复 | `camera_pause()` | `src/sentinel-visioner.cpp` |
+| NPU 小图 RGA | `rga_process_to_rgb_()` | `src/sentinel-visioner.cpp` |
+| 预览转换 RGA | `rga_convert_to_rgb_full_()` | `src/sentinel-visioner.cpp` |
+| 拷贝 RGA | `rga_copy_buffer_()` | `src/sentinel-visioner.cpp` |
+| YUYV→NV12 RGA | `rga_yuyv_to_nv12_()` | `src/sentinel-visioner.cpp` |
+| MJPG→NV12 解码 | `mjpeg_decode_to_nv12_()` | `src/sentinel-visioner.cpp` |
+| EIS 回调设置 | `set_eis_offset_callback()` | `src/sentinel-visioner.cpp` |
+| EIS 平滑系数 | `set_eis_smooth_alpha()` | `src/sentinel-visioner.cpp` |
+| NPU 消费 | `wait_get_npu` / `try_get_npu` / `release_npu` | `src/sentinel-visioner.cpp` |
+| 预览消费 | `wait_get_preview` / `try_get_preview` / `release_preview` | `src/sentinel-visioner.cpp` |
+| 推流消费 | `wait_get_orig_copy_buffer` / `release_orig_copy_buffer` | `src/sentinel-visioner.cpp` |
+| 资源清理 | `release_camera_resources_()` | `src/sentinel-visioner.cpp` |
+| 阻塞队列基础 | `ThreadSafeQueue::pop` / `push` | `include/ThreadSafeQueue.h` |
+| 超时队列 | `ThreadSafeQueue::try_pop(timeoutMs)` | `include/ThreadSafeQueue.h` |
+| 非阻塞弹出 | `ThreadSafeQueue::try_pop(val)` | `include/ThreadSafeQueue.h` |
+| 跳帧取最新 | `ThreadSafeQueue::drain_latest` | `include/ThreadSafeQueue.h` |
