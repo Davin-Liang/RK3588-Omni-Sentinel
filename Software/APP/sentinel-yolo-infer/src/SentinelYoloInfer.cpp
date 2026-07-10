@@ -3,7 +3,9 @@
 
 #include <chrono>
 #include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <pthread.h>
 
 struct SentinelYoloInfer::InferThreadContext {
     explicit InferThreadContext(int cam) : camNum(cam) {}
@@ -85,13 +87,34 @@ bool SentinelYoloInfer::create_infer_thread(int camNum) {
 
     auto ctx = std::make_shared<InferThreadContext>(camNum);
     ctx->engine.reset(new Yolov8RknnEngine());
-    if (!ctx->engine->init(config_.modelPath, config_.boxThreshold, config_.nmsThreshold)) {
+    if (!ctx->engine->init(config_.modelPath, config_.boxThreshold, config_.nmsThreshold,
+                           config_.npuCoreMask)) {
         std::cerr << "[SentinelYoloInfer] init YOLOv8 RKNN engine failed, camNum=" << camNum << std::endl;
         return false;
     }
 
     ctx->running.store(true);
     ctx->worker = std::thread(&SentinelYoloInfer::infer_thread_loop_, this, ctx);
+
+    // 绑定推理线程到指定 CPU 核心（仅 linux/pthread 平台生效）
+    if (config_.cpuAffinityMask != 0) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        for (int i = 0; i < 8; ++i) {
+            if (config_.cpuAffinityMask & (1 << i)) {
+                CPU_SET(i, &cpuset);
+            }
+        }
+        int ret = pthread_setaffinity_np(ctx->worker.native_handle(), sizeof(cpuset), &cpuset);
+        if (ret != 0) {
+            std::cerr << "[SentinelYoloInfer] pthread_setaffinity_np failed, ret="
+                      << ret << std::endl;
+        } else {
+            std::cout << "[SentinelYoloInfer] CPU affinity set to 0x"
+                      << std::hex << config_.cpuAffinityMask << std::dec << std::endl;
+        }
+    }
+
     contexts_[camNum] = ctx;
 
     std::cout << "[SentinelYoloInfer] infer thread started, camNum=" << camNum << std::endl;

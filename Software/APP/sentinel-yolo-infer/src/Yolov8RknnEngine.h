@@ -15,7 +15,8 @@ public:
     Yolov8RknnEngine(const Yolov8RknnEngine&) = delete;
     Yolov8RknnEngine& operator=(const Yolov8RknnEngine&) = delete;
 
-    bool init(const std::string& modelPath, float boxThreshold, float nmsThreshold);
+    bool init(const std::string& modelPath, float boxThreshold, float nmsThreshold,
+              int npuCoreMask = 4);
     void release();
     bool isReady() const { return rknnCtx_ != 0; }
 
@@ -64,4 +65,5 @@ private:
     bool isQuant_ = false;
     float boxThreshold_ = 0.25f;
     float nmsThreshold_ = 0.45f;
+    int   npuCoreMask_  = 4;     // 默认 NPU Core 2，避免与 DeepSeek LLM 抢占
 };
