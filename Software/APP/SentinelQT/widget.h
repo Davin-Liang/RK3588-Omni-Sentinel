@@ -14,6 +14,7 @@
 #include "lidar_camera_fusion.h"
 
 #include "imu_eis.hpp"
+#include "eis_quality_evaluator.h"
 
 class SentinelVisioner;
 class SentinelStreamer;
@@ -155,6 +156,12 @@ private:
     Icm45686Reader*     eisReader_ = nullptr;
     EisStabilizer*      imuOnlyEis_ = nullptr;
     ImuOnlyEisConfig    imuOnlyEisCfg_[2];
+
+    // ---- EIS 实时效果评价（只分析图像，不参与防抖控制）----
+    EisQualityEvaluator eisQualityEvaluator_[2];
+    EisQualityMetrics   eisQualityMetrics_[2];
+    int                 eisQualityFrameCounter_[2] = {0, 0};
+    void draw_eis_quality_overlay_(QImage& image, int camNum);
 
     // ---- AI 分析 ----
     AIReportWorker*     aiReportWorker_;

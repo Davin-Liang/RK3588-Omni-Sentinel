@@ -113,6 +113,8 @@ add_executable(SentinelQT
     widget.ui
     preview_worker.cpp
     preview_worker.h
+    eis_quality_evaluator.cpp
+    eis_quality_evaluator.h
     fusion_worker.cpp
     fusion_worker.h
     top_down_view.cpp

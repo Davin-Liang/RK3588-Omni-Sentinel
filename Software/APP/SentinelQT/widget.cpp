@@ -772,9 +772,33 @@ void Widget::on_btn_toggle_preview_(int camNum)
 
 void Widget::on_frame_ready_(int camNum, const QImage& image)
 {
-    // 缓存最新预览帧供 Web MJPEG 端点使用
+    if (camNum < 0 || camNum >= 2 || image.isNull()) {
+        return;
+    }
+
+    /*
+     * 评价频率约为预览帧率的 1/3：30 FPS 时约 10 次/秒。
+     * 防抖关闭时，评价器在后台滚动采集“未防抖基线”；
+     * 防抖开启后，评价器计算防抖后的残余抖动和抑振率。
+     */
+    ++eisQualityFrameCounter_[camNum];
+    if (eisQualityFrameCounter_[camNum] % 3 == 0) {
+        EisQualityMetrics metrics;
+        if (eisQualityEvaluator_[camNum].processFrame(image, metrics)) {
+            eisQualityMetrics_[camNum] = metrics;
+        }
+    }
+
+    // 只有开启 EIS 时才复制图像并叠加两个评价指标。
+    QImage displayImage = image;
+    if (eisEnabled_[camNum]) {
+        displayImage = image.convertToFormat(QImage::Format_ARGB32);
+        draw_eis_quality_overlay_(displayImage, camNum);
+    }
+
+    // Web 预览与本地屏幕显示同一份评价叠加画面。
     if (webServer_) {
-        webServer_->set_cached_preview(camNum, image);
+        webServer_->set_cached_preview(camNum, displayImage);
     }
 
     frameCount_[camNum]++;
@@ -797,10 +821,79 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
 
     QLabel* previewLabel = cam_lbl(ui->previewLabel0, ui->previewLabel1, camNum);
     previewLabel->setPixmap(
-        QPixmap::fromImage(image).scaled(
+        QPixmap::fromImage(displayImage).scaled(
             previewLabel->size(),
             Qt::KeepAspectRatio,
             Qt::SmoothTransformation));
+}
+
+void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
+{
+    if (camNum < 0 || camNum >= 2 || image.isNull() || !eisEnabled_[camNum]) {
+        return;
+    }
+
+    const EisQualityMetrics& metrics = eisQualityMetrics_[camNum];
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const QRect panelRect(14, 14, 300, 96);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 185));
+    painter.drawRoundedRect(panelRect, 9, 9);
+
+    QFont titleFont = painter.font();
+    titleFont.setBold(true);
+    titleFont.setPixelSize(17);
+    painter.setFont(titleFont);
+    painter.setPen(QColor(230, 237, 243));
+    painter.drawText(panelRect.adjusted(12, 7, -10, -8),
+                     Qt::AlignLeft | Qt::AlignTop,
+                     QString::fromUtf8("IMU 防抖效果评价"));
+
+    QFont valueFont = painter.font();
+    valueFont.setBold(true);
+    valueFont.setPixelSize(16);
+    painter.setFont(valueFont);
+
+    QString suppressionText;
+    QColor suppressionColor(180, 180, 180);
+
+    if (!metrics.baselineReady) {
+        suppressionText = QString::fromUtf8("采集基线中");
+    } else if (!metrics.valid) {
+        suppressionText = QString::fromUtf8("计算中");
+    } else {
+        suppressionText = QString("%1 %").arg(metrics.suppressionPercent, 0, 'f', 1);
+        if (metrics.suppressionPercent >= 60.0f) {
+            suppressionColor = QColor(63, 185, 80);
+        } else if (metrics.suppressionPercent >= 30.0f) {
+            suppressionColor = QColor(210, 153, 34);
+        } else {
+            suppressionColor = QColor(248, 81, 73);
+        }
+    }
+
+    painter.setPen(suppressionColor);
+    painter.drawText(QRect(panelRect.left() + 12,
+                           panelRect.top() + 36,
+                           panelRect.width() - 24,
+                           24),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QString::fromUtf8("抑振率：") + suppressionText);
+
+    painter.setPen(QColor(88, 166, 255));
+    const QString residualText = metrics.valid
+        ? QString("%1 px RMS").arg(metrics.residualJitterRmsPx, 0, 'f', 2)
+        : QString::fromUtf8("计算中");
+
+    painter.drawText(QRect(panelRect.left() + 12,
+                           panelRect.top() + 64,
+                           panelRect.width() - 24,
+                           24),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QString::fromUtf8("残余抖动：") + residualText);
 }
 
 // ---- Stream ----
@@ -2455,6 +2548,7 @@ void Widget::deinit_eis_()
 
     for (int i = 0; i < 2; ++i) {
         eisEnabled_[i] = false;
+        eisQualityEvaluator_[i].setEisEnabled(false);
         QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
         if (btn) {
             btn->setText(QString::fromUtf8("防抖关"));
@@ -2509,6 +2603,7 @@ void Widget::on_btn_eis_(int camNum)
         imuOnlyEis_->resetImuOnlyState(camNum);
 
         eisEnabled_[camNum] = true;
+        eisQualityEvaluator_[camNum].setEisEnabled(true);
         btn->setText(QString::fromUtf8("防抖开"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
@@ -2519,6 +2614,7 @@ void Widget::on_btn_eis_(int camNum)
             imuOnlyEis_->resetImuOnlyState(camNum);
         }
         eisEnabled_[camNum] = false;
+        eisQualityEvaluator_[camNum].setEisEnabled(false);
         btn->setText(QString::fromUtf8("防抖关"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; "
@@ -2548,6 +2644,7 @@ std::string Widget::web_eis_start_(int camNum)
     imuOnlyEis_->resetImuOnlyState(camNum);
 
     eisEnabled_[camNum] = true;
+    eisQualityEvaluator_[camNum].setEisEnabled(true);
     update_camera_button_states_(camNum);
     fprintf(stderr, "[SentinelQT] cam %d IMU-only EIS enabled via web\n", camNum);
     return R"({"ok":true})";
@@ -2560,6 +2657,7 @@ std::string Widget::web_eis_stop_(int camNum)
         imuOnlyEis_->resetImuOnlyState(camNum);
     }
     eisEnabled_[camNum] = false;
+    eisQualityEvaluator_[camNum].setEisEnabled(false);
     update_camera_button_states_(camNum);
     if (!eisEnabled_[0] && !eisEnabled_[1]) {
         deinit_eis_();
