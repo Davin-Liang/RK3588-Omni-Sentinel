@@ -14,7 +14,6 @@
 #include "lidar_camera_fusion.h"
 
 #include "imu_eis.hpp"
-#include "vision_eis.hpp"
 
 class SentinelVisioner;
 class SentinelStreamer;
@@ -152,12 +151,10 @@ private:
 
     // ---- EIS ----
     bool                showEisControl_ = false;
-    // ---- Visual EIS + IMU assist ----
+    // ---- IMU-only EIS ----
     Icm45686Reader*     eisReader_ = nullptr;
     EisStabilizer*      imuOnlyEis_ = nullptr;
-    VisionEisConfig     visualEisCfg_[2];
     ImuOnlyEisConfig    imuOnlyEisCfg_[2];
-    uint32_t            imuAssistWindowMs_ = 200;
 
     // ---- AI 分析 ----
     AIReportWorker*     aiReportWorker_;
@@ -178,7 +175,6 @@ private:
     void init_eis_();
     void deinit_eis_();
     void setup_lidar_osd_provider_();
-    bool imu_assist_callback_(uint64_t timestampUs, int camNum, VisionImuAssistState& state);
     bool imu_only_eis_offset_callback_(uint64_t timestampUs, int camNum,
                                        int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);

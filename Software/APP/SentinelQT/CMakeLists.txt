@@ -29,14 +29,9 @@ find_package(Qt5 COMPONENTS Widgets REQUIRED)
 # -----------------------------------------------------------------------------
 # OpenCV include path for sub-projects
 # -----------------------------------------------------------------------------
-# 视觉 EIS 的公共头文件 vision_eis.hpp 使用 #include <opencv2/opencv.hpp>.
-# SentinelQT 会 add_subdirectory 编译 sentinel-visioner、sentinel-streamer 等子工程，
-# sentinel-streamer 又会间接包含 sentinel-visioner.h -> vision_eis.hpp。
-# 因此必须在 add_subdirectory(...) 之前把 OpenCV include 路径加入当前目录作用域，
-# 让后续子工程也能继承该 include 路径。
-#
-# 注意：代码写的是 #include <opencv2/opencv.hpp>，所以这里应该加入
-#       APP/3rdparty/opencv/include，不能加入 include/opencv2。
+# SentinelQT 本身只保留 IMU-only EIS；但 sentinel-visioner 子工程的公共头文件
+# 可能仍间接依赖 OpenCV include 路径。为保证 add_subdirectory 后子工程可编译，
+# 此处保留全局 OpenCV include 路径。
 set(APP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(PROJECT_OPENCV_INCLUDE_DIR ${APP_ROOT}/3rdparty/opencv/include)
 
