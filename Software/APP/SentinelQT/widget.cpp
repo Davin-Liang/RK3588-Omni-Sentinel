@@ -786,6 +786,13 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
         EisQualityMetrics metrics;
         if (eisQualityEvaluator_[camNum].processFrame(image, metrics)) {
             eisQualityMetrics_[camNum] = metrics;
+
+            // 评价计算约 10 Hz。每两次推送一次，Web 指标约 5 Hz 更新，
+            // 不依赖 1 Hz 的系统状态推送，也不修改视频流本身。
+            ++eisQualityWebPushCounter_[camNum];
+            if (eisQualityWebPushCounter_[camNum] % 2 == 0) {
+                push_eis_quality_to_web_(camNum);
+            }
         }
     }
 
@@ -894,6 +901,27 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
                            24),
                      Qt::AlignLeft | Qt::AlignVCenter,
                      QString::fromUtf8("残余抖动：") + residualText);
+}
+
+void Widget::push_eis_quality_to_web_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2 || !webServer_ || !webServer_->is_running()) {
+        return;
+    }
+
+    const EisQualityMetrics& metrics = eisQualityMetrics_[camNum];
+
+    nlohmann::json j;
+    j["cam"] = camNum;
+    j["eisEnabled"] = eisEnabled_[camNum];
+    j["valid"] = metrics.valid;
+    j["baselineReady"] = metrics.baselineReady;
+    j["suppressionPercent"] = metrics.suppressionPercent;
+    j["residualJitterRmsPx"] = metrics.residualJitterRmsPx;
+
+    // WebServer::push_event 会封装为 type=event、event=eis_quality。
+    // 前端只更新 HTML 指标卡片，不参与 IMU-only 防抖控制。
+    webServer_->push_event("eis_quality", j.dump());
 }
 
 // ---- Stream ----
@@ -2987,6 +3015,14 @@ std::string Widget::get_status_json_() const
 
         // FPS
         cam["fps"] = lastFps_[i];
+
+        // EIS 评价指标也放入 1 Hz 状态快照，供 Web 首次连接、重连和兜底同步。
+        nlohmann::json eisQuality;
+        eisQuality["valid"] = eisQualityMetrics_[i].valid;
+        eisQuality["baselineReady"] = eisQualityMetrics_[i].baselineReady;
+        eisQuality["suppressionPercent"] = eisQualityMetrics_[i].suppressionPercent;
+        eisQuality["residualJitterRmsPx"] = eisQualityMetrics_[i].residualJitterRmsPx;
+        cam["eisQuality"] = eisQuality;
 
         j[QString("cam%1").arg(i).toStdString()] = cam;
     }

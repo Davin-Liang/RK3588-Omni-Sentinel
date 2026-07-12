@@ -161,7 +161,9 @@ private:
     EisQualityEvaluator eisQualityEvaluator_[2];
     EisQualityMetrics   eisQualityMetrics_[2];
     int                 eisQualityFrameCounter_[2] = {0, 0};
+    int                 eisQualityWebPushCounter_[2] = {0, 0};
     void draw_eis_quality_overlay_(QImage& image, int camNum);
+    void push_eis_quality_to_web_(int camNum);
 
     // ---- AI 分析 ----
     AIReportWorker*     aiReportWorker_;

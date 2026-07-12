@@ -65,7 +65,20 @@ body{
 .cam-info{font-size:14px;color:var(--text2);margin-left:8px}
 .cam-video{background:#000;position:relative;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
 .cam-video img{width:100%;height:100%;object-fit:contain}
-.cam-placeholder{color:rgba(255,255,255,0.3);font-size:30px;position:absolute}
+.cam-video iframe{position:absolute;inset:0;width:100%;height:100%;border:none;z-index:1}
+.cam-placeholder{color:rgba(255,255,255,0.3);font-size:30px;position:absolute;z-index:0}
+.eis-quality-overlay{
+  display:none;position:absolute;left:12px;top:12px;z-index:6;min-width:230px;
+  padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.72);
+  color:#fff;pointer-events:none;box-shadow:0 2px 10px rgba(0,0,0,.35);
+  backdrop-filter:blur(2px)
+}
+.eis-quality-overlay.show{display:block}
+.eis-quality-title{font-size:14px;font-weight:700;margin-bottom:6px;color:#e6edf3}
+.eis-quality-row{display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:14px;line-height:1.7}
+.eis-quality-label{color:#c9d1d9}
+.eis-quality-value{font-weight:700;white-space:nowrap}
+.eis-good{color:#3fb950}.eis-medium{color:#d29922}.eis-poor{color:#f85149}.eis-wait{color:#8b949e}.eis-residual{color:#58a6ff}
 .cam-controls{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid rgba(48,54,61,0.15);flex-wrap:wrap}
 .cam-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:14px;color:var(--text2)}
 .cam-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
@@ -167,7 +180,14 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <span class="cam-name">相机 1</span>
       <span class="cam-info" id="camInfo0">1920×1080</span>
     </div>
-    <div class="cam-video" id="camVideo0"><span class="cam-placeholder" id="camPlaceholder0">推流待启动</span></div>
+    <div class="cam-video" id="camVideo0">
+      <span class="cam-placeholder" id="camPlaceholder0">推流待启动</span>
+      <div class="eis-quality-overlay" id="eisQuality0">
+        <div class="eis-quality-title">IMU 防抖效果评价</div>
+        <div class="eis-quality-row"><span class="eis-quality-label">抑振率</span><span class="eis-quality-value eis-wait" id="eisSuppression0">采集基线中</span></div>
+        <div class="eis-quality-row"><span class="eis-quality-label">残余抖动</span><span class="eis-quality-value eis-residual" id="eisResidual0">计算中</span></div>
+      </div>
+    </div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview0">开启预览</button>
       <button class="btn btn-off" id="btnStream0">开始推流</button>
@@ -190,7 +210,14 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <span class="cam-name">相机 2</span>
       <span class="cam-info" id="camInfo1">1280×720</span>
     </div>
-    <div class="cam-video" id="camVideo1"><span class="cam-placeholder" id="camPlaceholder1">推流待启动</span></div>
+    <div class="cam-video" id="camVideo1">
+      <span class="cam-placeholder" id="camPlaceholder1">推流待启动</span>
+      <div class="eis-quality-overlay" id="eisQuality1">
+        <div class="eis-quality-title">IMU 防抖效果评价</div>
+        <div class="eis-quality-row"><span class="eis-quality-label">抑振率</span><span class="eis-quality-value eis-wait" id="eisSuppression1">采集基线中</span></div>
+        <div class="eis-quality-row"><span class="eis-quality-label">残余抖动</span><span class="eis-quality-value eis-residual" id="eisResidual1">计算中</span></div>
+      </div>
+    </div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview1">开启预览</button>
       <button class="btn btn-off" id="btnStream1">开始推流</button>
@@ -293,7 +320,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
-let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
+let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null}};
 let trackingTargets=[],trackingClusters=[],radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
@@ -301,7 +328,7 @@ function connectWS(){
   if(ws&&ws.readyState===WebSocket.OPEN)return;
   try{ws=new WebSocket(WS_URL);ws.onopen=()=>{if(wsTimer)clearInterval(wsTimer)};ws.onmessage=e=>{try{handleWS(JSON.parse(e.data))}catch(ex){}};ws.onclose=()=>{ws=null;wsTimer=setInterval(connectWS,3000)};ws.onerror=()=>{if(ws)ws.close()}}catch(ex){}
 }
-function handleWS(msg){switch(msg.type){case'status':updateUI(msg.data);break;case'tracking':updateTracking(msg.data);break;case'event':toast(handleEvent(msg.data));break}}
+function handleWS(msg){switch(msg.type){case'status':updateUI(msg.data);break;case'tracking':updateTracking(msg.data);break;case'event':{const text=handleEvent(msg.data);if(text)toast(text);break}}}
 
 // ===== REST =====
 async function api(m,p,b){try{const r=await fetch('/api/v1'+p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):m==='GET'?undefined:'{}'});const j=await r.json();if(!j.ok)toast(j.error||'操作失败');return j}catch(e){toast('网络错误');return{ok:!1}}}
@@ -312,7 +339,7 @@ function updateUI(data){
   if(data.hw&&data.hw.ok){const h=data.hw;document.getElementById('hwTemp').textContent=(h.temp>=0?h.temp:'--')+'°C';document.getElementById('hwCpu').textContent=h.cpu>=0?h.cpu:'--';if(h.rga&&h.rga.length)document.getElementById('hwRga').textContent=h.rga.map(v=>v>=0?v:'-').join('/');if(h.npu&&h.npu.length)document.getElementById('hwNpu').textContent=h.npu.map(v=>v>=0?v:'-').join('/')}
 
   for(let i=0;i<2;i++){const d=data['cam'+i];if(!d)continue;
-    Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
+    Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});if(d.eisQuality)cam[i].eisQuality=d.eisQuality;
 
     // Header dot
     document.getElementById('camDot'+i).className='cam-dot '+(cam[i].previewActive?'on':'off');
@@ -324,7 +351,7 @@ function updateUI(data){
     const br=document.getElementById('btnRecord'+i);br.textContent=cam[i].recording?'停止录像':'开始录像';br.className='btn '+(cam[i].recording?'btn-on':'btn-off');
     const bp=document.getElementById('btnPause'+i);bp.textContent=cam[i].paused?'恢复':'暂停';bp.className='btn '+(cam[i].paused?'btn-on':'btn-off');
     const bo=document.getElementById('btnOsd'+i);bo.textContent=cam[i].osdEnabled?'框去除':'框叠加';bo.className='btn '+(cam[i].osdEnabled?'btn-on':'btn-off');
-    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'防抖开':'防抖关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');
+    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'防抖开':'防抖关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');updateEisQuality(i,cam[i].eisQuality);
     const bl=document.getElementById('btnLidarOsd'+i);bl.textContent=cam[i].lidarOsdEnabled?'点云投影开':'点云投影关';bl.className='btn '+(cam[i].lidarOsdEnabled?'btn-on':'btn-off');
     const bv=document.getElementById('btnPreview'+i);bv.textContent=cam[i].previewActive?'关闭预览':'开启预览';bv.className='btn '+(cam[i].previewActive?'btn-on':'btn-off');
 
@@ -378,7 +405,24 @@ function updateUI(data){
   }
 }
 function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus()}if(data.clusters&&data.clusters.length>0){trackingClusters=data.clusters}drawRadar()}
-function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''}
+function updateEisQuality(i,q){
+  const panel=document.getElementById('eisQuality'+i),sEl=document.getElementById('eisSuppression'+i),rEl=document.getElementById('eisResidual'+i);
+  if(!panel||!sEl||!rEl)return;
+  if(!cam[i].eisEnabled){panel.classList.remove('show');return}
+  panel.classList.add('show');
+  if(!q){sEl.textContent='计算中';sEl.className='eis-quality-value eis-wait';rEl.textContent='计算中';return}
+  cam[i].eisQuality=q;
+  if(!q.baselineReady){sEl.textContent='采集基线中';sEl.className='eis-quality-value eis-wait'}
+  else if(!q.valid){sEl.textContent='计算中';sEl.className='eis-quality-value eis-wait'}
+  else{const v=Number(q.suppressionPercent||0);sEl.textContent=v.toFixed(1)+' %';sEl.className='eis-quality-value '+(v>=60?'eis-good':v>=30?'eis-medium':'eis-poor')}
+  rEl.textContent=q.valid?Number(q.residualJitterRmsPx||0).toFixed(2)+' px RMS':'计算中';
+}
+function handleEvent(data){
+  if(data&&data.event==='eis_quality'){
+    const i=Number(data.cam||0);if(i===0||i===1){cam[i].eisEnabled=!!data.eisEnabled;updateEisQuality(i,data)}return''
+  }
+  const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''
+}
 
 // ===== Buttons =====
 for(let i=0;i<2;i++){document.getElementById('btnPreview'+i).onclick=()=>togglePreview(i);document.getElementById('btnStream'+i).onclick=()=>toggleStream(i);document.getElementById('btnRecord'+i).onclick=()=>toggleRecord(i);document.getElementById('btnPause'+i).onclick=()=>togglePause(i);document.getElementById('btnOsd'+i).onclick=()=>toggleOsd(i);document.getElementById('btnEis'+i).onclick=()=>toggleEis(i);document.getElementById('btnLidarOsd'+i).onclick=()=>toggleLidarOsd(i)}
@@ -400,7 +444,7 @@ function readCamEis(i){return{fx:parseFloat(document.getElementById('eisFx'+i).v
 async function saveEisConfig(){const body={cam0:readCamEis(0),cam1:readCamEis(1)};const r=await api('POST','/eis/config',body);if(r.ok)toast('IMU-only防抖参数已保存')}
 
 // ===== MJPEG =====
-function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('camVideo'+i),ph=document.getElementById('camPlaceholder'+i);const iframe=document.createElement('iframe');iframe.src='http://'+location.hostname+':8889/live/cam'+i+'/';iframe.allow='autoplay';iframe.style.width='100%';iframe.style.height='100%';iframe.style.border='none';pane.appendChild(iframe);hlsPlayer[i]=iframe;if(ph)ph.style.display='none'}function stopHls(i){if(hlsPlayer[i]){hlsPlayer[i].remove();hlsPlayer[i]=null}document.getElementById('camPlaceholder'+i).style.display=''}
+function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('camVideo'+i),ph=document.getElementById('camPlaceholder'+i);const iframe=document.createElement('iframe');iframe.src='http://'+location.hostname+':8889/live/cam'+i+'/';iframe.allow='autoplay';pane.appendChild(iframe);hlsPlayer[i]=iframe;if(ph)ph.style.display='none'}function stopHls(i){if(hlsPlayer[i]){hlsPlayer[i].remove();hlsPlayer[i]=null}document.getElementById('camPlaceholder'+i).style.display=''}
 
 // ===== Fusion =====
 document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop');fusionEnabled=!1;trackingTargets=[];trackingClusters=[];updateFusionStatus();drawRadar()}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
