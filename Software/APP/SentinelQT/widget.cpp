@@ -4016,7 +4016,7 @@ void Widget::reload_ai_auto_config_()
     int  wasInterval = aiAutoIntervalSec_;
 
     aiAutoEnabled_ = config_.value("AI/autoReportEnabled", false).toBool();
-    aiAutoIntervalSec_ = config_.value("AI/autoReportIntervalSec", 300).toInt();
+    aiAutoIntervalSec_ = config_.value("AI/autoReportIntervalSec", 1800).toInt();
 
     // 合法性检查：最少 30 秒，最多 3600 秒
     if (aiAutoIntervalSec_ < 30)  aiAutoIntervalSec_ = 30;

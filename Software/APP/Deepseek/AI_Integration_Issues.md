@@ -141,6 +141,50 @@ RKLLM_RUN_ERROR   = 3
 
 ---
 
+## 9. OOM + DDR 带宽饱和：全功能开启后推理导致 VmRSS 暴涨 895MB 并卡死
+
+**现象**: 仅 AI 分析功能时 VmRSS 约 2.03 GB，连续推理 3 次 VmRSS 仅增 19 MB。全功能开启后（推流 + YOLO + 融合 + 录像），VmRSS 基线约 2.16 GB，触发一次推理后 VmRSS 暴涨至 **3.05 GB**（+895 MB），系统响应缓慢甚至无法退出，监控 shell 的 `sleep 30` 间隔被拉长到 75~102 秒。
+
+**原因**: 全功能开启时 DDR 带宽已被 RGA + MPP + YOLO + 融合占满，rkllm_run 首次执行时需要分配 NPU 计算工作缓冲（workspace/scratch buffers ~500MB）。DDR 拥堵导致：1) 内存分配排队变慢，多块工作缓冲"同时存在"而非"申请→用完→释放→再申请"；2) 内核内存回收操作也排队等 DDR 总线，释放跟不上分配。VmRSS 看到的是"所有缓冲同时堆积"的虚假高水位。
+
+**关键是两次推理的内存差异**：
+```
+第 1 次（无其他功能）：
+  基线 2.03 GB → 峰值 2.09 GB，+19 MB
+  DDR 空闲，workspace 快速分配回收
+
+第 2 次（全功能开启）：
+  基线 2.16 GB → 峰值 3.05 GB，+895 MB
+  DDR 饱和，分配释放均排队，workspace 堆积
+```
+
+**解决 — 热身推理（workspace 预分配）**:
+在 `AIReportWorker::start()` 中，`initialize()` 成功后、进入轮询循环前，跑一次极短推理：
+
+```cpp
+// inferSync("Hello", 5000) — 触发 rkllm 首次 workspace 分配
+// 此时 DDR 空闲，streamer/yolo/fusion 都还没启动
+// → 一次性分到连续大块 workspace，后续推理复用，不触发 dma_buf_alloc
+```
+
+原理与 YOLO 的 DMA 缓冲池预分配完全相同 — 在 DDR 空闲时抢占连续大块内存，后续运行时永远不分配不释放。
+
+**DDR 带宽饱和的连锁反应**：
+
+- NPU 读取模型权重占满 DDR 总线 → RGA/MPP/YOLO 请求排队
+- CPU 内核内存回收（page free/compaction）同样排队等 DDR
+- `free()` 从微秒级变成毫秒级 → 大量待释放内存堆积 → VmRSS 飙升
+- shell `sleep 30` 无法按时调度 → 系统整体响应卡死
+
+**教训**:
+
+1. 嵌入式平台（4 GB + 单 DDR 控制器）的 LLM 推理，不能只考虑内存容量，更要考虑 DDR 带宽的峰值并发
+2. 所有 DMA 工作缓冲应在**系统启动早期、DDR 空闲时**预分配并驻留，避免运行时动态分配
+3. 不同子系统（视频、推理、融合）的初始化顺序会影响内存布局的连续性
+4. `/proc/PID/status` 的 VmRSS 在 DDR 拥堵时会呈现"虚假高水位"——内存实际并未泄漏，只是分配和释放的速度差造成的瞬时堆积
+
+---
+
 ## 架构决策
 
 | 决策 | 方案 | 原因 |

@@ -23,7 +23,7 @@ AIReportWorker::~AIReportWorker() { stop(); }
 void AIReportWorker::setConfig(const DeepSeekInference::Config& cfg) { config_ = cfg; }
 
 // ============================================================================
-// start() — Worker 线程的主入口
+// start() — Worker 线程的主入口（懒加载模式）
 //
 // 调用栈：
 //   主线程:  aiReportThread_->start()
@@ -31,30 +31,46 @@ void AIReportWorker::setConfig(const DeepSeekInference::Config& cfg) { config_ =
 //             → 发射 QThread::started 信号
 //             → 槽函数 AIReportWorker::start() 在此被执行（子线程上下文）
 //
-// 工作流程：
-//   1. 加载 DeepSeek 模型到 NPU（inference_.initialize）
-//   2. 进入 while(running_) 轮询，每 200ms 检查一次 pending_ 标志
-//   3. 检测到 pending_ == true → buildPrompt_() 构建中文问题
-//      → inference_.inferSync() 阻塞等待 NPU 推理（约 2 分钟）
+// 工作流程（懒加载）：
+//   1. 进入 while(running_) 轮询，每 200ms 检查 pending_ 标志
+//      （不预加载模型 — 节省 ~1GB DDR，仅在线程退出时才可能被使用）
+//   2. 检测到 pending_ == true → 首次调用时自动 inference_.initialize()
+//      → warmup 推理预分配 workspace → buildPrompt_() 构建中文问题
+//      → inference_.inferSync() 阻塞等待 NPU 推理
 //      → emit reportReady / error 通知主线程
-//   4. 循环退出时 inference_.destroy() 释放 NPU 资源
+//      → 模型保持驻留，后续请求免初始化
+//   3. 循环退出时 inference_.destroy() 释放 NPU 资源
 // ============================================================================
 void AIReportWorker::start()
 {
-    // ---- 第 1 步：加载模型 ----
-    if (!inference_.initialize(config_)) {
-        fprintf(stderr, "[AIReportWorker] DeepSeekInference init failed\n");
-        emit error(QString::fromUtf8("AI 模型初始化失败"));
-        return;
-    }
-
     running_.store(true);
-    fprintf(stderr, "[AIReportWorker] started, waiting for report requests\n");
+    fprintf(stderr, "[AIReportWorker] started (lazy-load mode), waiting for report requests\n");
 
-    // ---- 第 2 步：轮询等待推理请求 ----
+    // ---- 轮询等待推理请求 ----
     while (running_.load()) {
         if (pending_.load()) {                               // 主线程通过 requestReport() 设置了 pending_
             fprintf(stderr, "[AIReportWorker] processing report request...\n");
+
+            // ---- 懒加载：首次推理请求时才初始化模型 ----
+            if (!initialized_.load()) {
+                fprintf(stderr, "[AIReportWorker] lazy-loading model (~1GB, may take a few seconds)...\n");
+                if (!inference_.initialize(config_)) {
+                    fprintf(stderr, "[AIReportWorker] DeepSeekInference init failed\n");
+                    emit error(QString::fromUtf8("AI 模型初始化失败"));
+                    pending_.store(false);
+                    continue;  // 继续轮询，允许重试
+                }
+                initialized_.store(true);
+                fprintf(stderr, "[AIReportWorker] model loaded successfully\n");
+
+                // 热身推理 — 预分配 NPU workspace（~500MB）
+                // 首次 rkllm_run 会触发 dma_buf_alloc，此时做一次短推理
+                // 让 workspace 驻留复用，避免后续正式推理时重复分配
+                fprintf(stderr, "[AIReportWorker] warmup inference to pre-allocate workspace...\n");
+                std::string warmupResult = inference_.inferSync("Hello", 5000);
+                fprintf(stderr, "[AIReportWorker] warmup done, result=%d chars\n",
+                        static_cast<int>(warmupResult.size()));
+            }
 
             QString prompt = buildPrompt_();                 // 读系统状态快照，生成中文问题
             std::string promptStr = prompt.toStdString();
@@ -77,9 +93,12 @@ void AIReportWorker::start()
         QThread::msleep(200);                                // 200ms 轮询间隔，避免空转 CPU
     }
 
-    // ---- 第 3 步：清理 ----
-    fprintf(stderr, "[AIReportWorker] stopping, destroying inference...\n");
-    inference_.destroy();
+    // ---- 清理 ----
+    if (initialized_.load()) {
+        fprintf(stderr, "[AIReportWorker] stopping, destroying inference...\n");
+        inference_.destroy();
+        initialized_.store(false);
+    }
     fprintf(stderr, "[AIReportWorker] stopped\n");
 }
 

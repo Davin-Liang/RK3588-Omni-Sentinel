@@ -15,19 +15,19 @@
  *   将耗时的 NPU 推理（~60~130 秒）从 Qt 主线程剥离，避免阻塞 UI 和相机预览。
  *   主线程每秒更新状态快照，用户触发（按钮/Web/定时器）时本线程生成报告。
  *
- * 线程模型：
+ * 线程模型（懒加载模式）：
  * @code
  *   主线程                      AIReportWorker 子线程
  *   ────────                    ─────────────────
  *   updateStatus() [每秒]         start()
- *     ├─ 加锁写快照              ├─ inference_.initialize() → 加载模型到 NPU
- *     └─ 解锁                    └─ while(running_):
- *                                    每 200ms 检测 pending_ 标志
- *   requestReport()                       │ pending_ == true
+ *     ├─ 加锁写快照              └─ while(running_):
+ *     └─ 解锁                        每 200ms 检测 pending_ 标志
+ *                                          │ pending_ == true
+ *   requestReport()                       │   ├─ [首次] inference_.initialize() → 加载模型
  *     └─ pending_ = true ──────────────→  │   ├─ buildPrompt_() → 读快照生成中文问题
- *                                          │   ├─ inference_.inferSync() → NPU 推理（阻塞 ~2 分钟）
+ *                                          │   ├─ inference_.inferSync() → NPU 推理
  *                                          │   ├─ emit reportReady(result) → 主线程显示
- *                                          │   └─ pending_ = false
+ *                                          │   └─ pending_ = false (模型驻留，后续免加载)
  *   on_ai_report_ready_()  ←───── Qt::QueuedConnection ──┘
  *     └─ 显示报告到屏幕和 Web
  * @endcode
@@ -69,11 +69,10 @@ public slots:
     /**
      * @brief Worker 线程主入口（由 QThread::started 信号触发）
      *
-     * 工作流程：
-     *   1. 调用 inference_.initialize() 加载模型到 NPU
-     *   2. 进入 while(running_) 轮询，每 200ms 检查 pending_ 标志
-     *   3. 检测到推理请求后：buildPrompt_() → inferSync() → emit reportReady/error
-     *   4. 循环退出时 inference_.destroy() 释放 NPU 资源
+     * 懒加载模式：启动时仅进入轮询循环，不加载模型。
+     * 首次推理请求时自动调用 inference_.initialize() 加载模型到 NPU，
+     * 之后模型保持驻留，后续请求无需重新加载。
+     * 循环退出时 inference_.destroy() 释放 NPU 资源。
      */
     void start();
 
@@ -116,8 +115,9 @@ private:
     DeepSeekInference::Config config_;   ///< 模型路径、温度等配置（start 前设置）
 
     // ---- 线程控制 ----
-    std::atomic<bool>       running_{false};  ///< 控制轮询循环是否继续
-    std::atomic<bool>       pending_{false};  ///< 是否有待处理的推理请求
+    std::atomic<bool>       running_{false};     ///< 控制轮询循环是否继续
+    std::atomic<bool>       pending_{false};     ///< 是否有待处理的推理请求
+    std::atomic<bool>       initialized_{false}; ///< 模型是否已加载（懒加载标志）
 
     // ---- 系统状态快照（mutex 保护，主线程写 / Worker 线程读） ----
     QMutex  statusMutex_;        ///< 保护以下所有状态成员的互斥锁
