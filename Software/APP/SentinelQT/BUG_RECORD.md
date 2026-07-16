@@ -300,3 +300,35 @@
 1. JS 端改用 `=== false` 精确比较，仅显式 `false` 时隐藏，`undefined`/`true` 均显示
 2. 新增专用端点 `GET /api/v1/eis/visible` 返回 `{"visible":true/false}`，不走复杂的 status JSON，接口极简便于 curl 直接验证
 3. 卡片默认显示（无 `display:none`），仅在后端明确返回 `visible:false` 时才隐藏，安全默认
+
+---
+
+## 31. PreviewWorker 在无帧时调 release_preview(nullptr) 导致堆损坏
+
+**现象**: `QLabel::setPixmap()` → `QImageData::~QImageData()` → `free()` 检测到 `malloc_printerr` / `corrupted double-linked list`。崩溃在 Qt 渲染管线，实际根因在 PreviewWorker。
+
+**原因**: `PreviewWorker::start()` 中 `visioner_->release_preview(camNum_, previewBuf)` 在 if-else 块外部无条件执行。当 `try_get_preview()` 返回 `nullptr`（200ms 超时无帧），`release_preview(nullptr)` 向 DMA 缓冲池释放空指针，可能写坏池元数据。堆损坏延迟到后续 `QLabel::setPixmap()` 析构旧图时被 glibc 检测到。
+
+**解决**: 将 `release_preview` 移入 `if (previewBuf != nullptr)` 分支内，只在成功获取帧时才释放。
+
+---
+
+## 32. RGA 预览输出 BGR_888 ↔ QImage Format_RGB888 颜色通道问题
+
+**现象**: 修改 `rga_convert_to_rgb_full_()` 的 RGA 输出格式从 `RK_FORMAT_BGR_888` 改为 `RK_FORMAT_RGB_888` 后，预览画面颜色通道不对（红蓝互换）。
+
+**原因**: ARM 平台上有字节序差异——RGA 的 `RK_FORMAT_BGR_888` 输出在 QImage `Format_RGB888` 下显示颜色正确。此前将两者强行统一为 RGB_888 反而导致颜色异常。这是硬件造成的命名不一致，不是 bug。
+
+**解决**: 保持 `rga_convert_to_rgb_full_()` 输出 `RK_FORMAT_BGR_888`（原始值）。`rga_process_to_rgb_()`（NPU 路径）仍输出 `RK_FORMAT_RGB_888`。
+
+---
+
+## 33. AI 报告页面重构：主页面 → 独立子页面
+
+**新增功能**: AI 分析报告从主页底部小文本框迁移到独立子页面 Page 4，与"融合管理""数据回溯"同级的 QStackedWidget 页面。
+
+**涉及改动**:
+- `widget.ui`: 新增 `pageAIReport` 空占位页 + `btnAIReport` 导航按钮（与 btnFusion/btnBacktrack 并列）
+- `widget.cpp`: `build_ai_report_page_()` 动态构建标题栏、操作栏、全屏 QTextEdit、倒计时标签
+- 主页面 AI 元素（`aiControlBar`、`aiReportText`）全部 `setVisible(false)` + `setMaximumHeight(0)`
+- 触发分析自动跳转 Page 4，报告只显示在子页面

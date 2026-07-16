@@ -41,7 +41,7 @@ bool SentinelLslidarer::start() {
 
     // 3. 分配环形缓冲区
     ringBuffer_ = std::make_unique<RingBuffer>(config_.ringBufferSize,
-                                               LidarConfig::kPointsPerSweep);
+                                               LidarConfig::LidarConfig::kPointsPerSweep);
 
     // 4. 启动读取线程
     running_.store(true, std::memory_order_release);
@@ -131,7 +131,7 @@ uint32_t SentinelLslidarer::available_frames() const {
 }
 
 uint32_t SentinelLslidarer::max_points_per_frame() const {
-    return LidarConfig::kPointsPerSweep;
+    return LidarConfig::LidarConfig::kPointsPerSweep;
 }
 
 const LidarConfig& SentinelLslidarer::config() const {
@@ -241,6 +241,7 @@ void SentinelLslidarer::reader_loop_() {
             }
             // 从圈边界开始累积（边界前的点为上一圈残余，丢弃）
             for (int i = boundaryIdx; i < decodedCount; ++i) {
+                if (sweepCount >= LidarConfig::kPointsPerSweep) break;  // 防溢出
                 lastAzimuth = decoded[i].azimuth;
                 if (!is_point_valid_(decoded[i].distance, static_cast<int>(decoded[i].azimuth))) {
                     continue;
@@ -258,7 +259,7 @@ void SentinelLslidarer::reader_loop_() {
 
         // ---- 7. 正常模式：累积 boundaryIdx 之前的点到当前圈 ----
 
-        for (int i = 0; i < boundaryIdx; ++i) {
+        for (int i = 0; i < boundaryIdx && sweepCount < LidarConfig::kPointsPerSweep; ++i) {
             if (!is_point_valid_(decoded[i].distance, static_cast<int>(decoded[i].azimuth))) {
                 continue;
             }
@@ -289,6 +290,7 @@ void SentinelLslidarer::reader_loop_() {
 
             // boundaryIdx 之后的点属于新一圈
             for (int i = boundaryIdx; i < decodedCount; ++i) {
+                if (sweepCount >= LidarConfig::kPointsPerSweep) break;  // 防溢出
                 lastAzimuth = decoded[i].azimuth;
                 if (!is_point_valid_(decoded[i].distance, static_cast<int>(decoded[i].azimuth))) {
                     continue;

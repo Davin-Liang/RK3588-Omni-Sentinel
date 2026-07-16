@@ -42,6 +42,10 @@ set(FFMPEG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/ffmpeg)
 # ---- Threads ----
 find_package(Threads REQUIRED)
 
+# ---- OpenCV（sentinel-visioner 头文件的传递依赖） ----
+set(OpenCV_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/opencv/share/OpenCV)
+find_package(OpenCV REQUIRED)
+
 set(AVCODEC_LIB  ${FFMPEG_ROOT}/lib/libavcodec.so)
 set(AVFORMAT_LIB ${FFMPEG_ROOT}/lib/libavformat.so)
 set(AVUTIL_LIB   ${FFMPEG_ROOT}/lib/libavutil.so)
@@ -67,6 +71,7 @@ target_include_directories(sentinel_streamer_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool/include
     ${FFMPEG_ROOT}/include
     ${LIBRGA_INCLUDES}
+    ${OpenCV_INCLUDE_DIRS}
 )
 
 target_link_libraries(sentinel_streamer_lib PUBLIC

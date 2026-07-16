@@ -1,6 +1,8 @@
 #include "ai_report_worker.h"
 #include <QThread>
 #include <cstdio>
+#include <cstring>
+#include <unistd.h>
 
 // ============================================================================
 // 构造函数
@@ -23,82 +25,68 @@ AIReportWorker::~AIReportWorker() { stop(); }
 void AIReportWorker::setConfig(const DeepSeekInference::Config& cfg) { config_ = cfg; }
 
 // ============================================================================
-// start() — Worker 线程的主入口（懒加载模式）
+// start() — Worker 线程的主入口（热加载模式）
 //
-// 调用栈：
-//   主线程:  aiReportThread_->start()
-//             → QThread 内部进入事件循环
-//             → 发射 QThread::started 信号
-//             → 槽函数 AIReportWorker::start() 在此被执行（子线程上下文）
-//
-// 工作流程（懒加载）：
-//   1. 进入 while(running_) 轮询，每 200ms 检查 pending_ 标志
-//      （不预加载模型 — 节省 ~1GB DDR，仅在线程退出时才可能被使用）
-//   2. 检测到 pending_ == true → 首次调用时自动 inference_.initialize()
-//      → warmup 推理预分配 workspace → buildPrompt_() 构建中文问题
-//      → inference_.inferSync() 阻塞等待 NPU 推理
-//      → emit reportReady / error 通知主线程
-//      → 模型保持驻留，后续请求免初始化
-//   3. 循环退出时 inference_.destroy() 释放 NPU 资源
+// 启动时即加载模型并热身，在 DDR 空闲时抢占连续大块 workspace，
+// 避免全功能运行时动态分配导致 DDR 拥堵 + VmRSS 虚假高水位 → OOM。
+// 模型权重 ~1GB + workspace ~500MB 常驻 DDR，后续推理不再分配。
 // ============================================================================
 void AIReportWorker::start()
 {
-    running_.store(true);
-    fprintf(stderr, "[AIReportWorker] started (lazy-load mode), waiting for report requests\n");
+    // ---- 第 1 步：加载模型 ----
+    fprintf(stderr, "[AIReportWorker] eager-loading model (~1GB)...\n");
+    if (!inference_.initialize(config_)) {
+        fprintf(stderr, "[AIReportWorker] DeepSeekInference init failed\n");
+        emit error(QString::fromUtf8("AI 模型初始化失败"));
+        return;
+    }
+    initialized_.store(true);
+    fprintf(stderr, "[AIReportWorker] model loaded successfully\n");
 
-    // ---- 轮询等待推理请求 ----
+    // ---- 第 2 步：热身推理，在 DDR 空闲时预分配 NPU workspace ----
+    fprintf(stderr, "[AIReportWorker] warmup inference to pre-allocate workspace...\n");
+    {
+        std::string warmupResult = inference_.inferSync("Hello", 5000);
+        fprintf(stderr, "[AIReportWorker] warmup done, result=%d chars, "
+                "waiting 3s for DDR reclaim...\n",
+                static_cast<int>(warmupResult.size()));
+    }
+    // 等待内核 buddy allocator 回收 warmup 触发的临时缓冲
+    QThread::sleep(3);
+    fprintf(stderr, "[AIReportWorker] DDR reclaim wait done\n");
+
+    running_.store(true);
+    fprintf(stderr, "[AIReportWorker] started, waiting for report requests\n");
+
+    // ---- 第 3 步：轮询等待推理请求 ----
     while (running_.load()) {
-        if (pending_.load()) {                               // 主线程通过 requestReport() 设置了 pending_
+        if (pending_.load()) {
             fprintf(stderr, "[AIReportWorker] processing report request...\n");
 
-            // ---- 懒加载：首次推理请求时才初始化模型 ----
-            if (!initialized_.load()) {
-                fprintf(stderr, "[AIReportWorker] lazy-loading model (~1GB, may take a few seconds)...\n");
-                if (!inference_.initialize(config_)) {
-                    fprintf(stderr, "[AIReportWorker] DeepSeekInference init failed\n");
-                    emit error(QString::fromUtf8("AI 模型初始化失败"));
-                    pending_.store(false);
-                    continue;  // 继续轮询，允许重试
-                }
-                initialized_.store(true);
-                fprintf(stderr, "[AIReportWorker] model loaded successfully\n");
-
-                // 热身推理 — 预分配 NPU workspace（~500MB）
-                // 首次 rkllm_run 会触发 dma_buf_alloc，此时做一次短推理
-                // 让 workspace 驻留复用，避免后续正式推理时重复分配
-                fprintf(stderr, "[AIReportWorker] warmup inference to pre-allocate workspace...\n");
-                std::string warmupResult = inference_.inferSync("Hello", 5000);
-                fprintf(stderr, "[AIReportWorker] warmup done, result=%d chars\n",
-                        static_cast<int>(warmupResult.size()));
-            }
-
-            QString prompt = buildPrompt_();                 // 读系统状态快照，生成中文问题
+            QString prompt = buildPrompt_();
             std::string promptStr = prompt.toStdString();
-
             fprintf(stderr, "[AIReportWorker] prompt length: %zu chars\n", promptStr.size());
 
-            std::string result = inference_.inferSync(promptStr, 60000);  // 阻塞，NPU 推理
+            std::string result = inference_.inferSync(promptStr, 60000);
 
             if (result.empty()) {
                 fprintf(stderr, "[AIReportWorker] inference returned empty result\n");
-                emit error(QString::fromUtf8("AI 推理返回空结果"));      // 跨线程信号 → 主线程
+                emit error(QString::fromUtf8("AI 推理返回空结果"));
             } else {
                 fprintf(stderr, "[AIReportWorker] inference done, result length: %zu\n", result.size());
-                emit reportReady(QString::fromStdString(result));         // 跨线程信号 → 主线程
+                emit reportReady(QString::fromStdString(result));
             }
 
-            pending_.store(false);                           // 重置标志，允许下一次触发
+            pending_.store(false);
         }
 
-        QThread::msleep(200);                                // 200ms 轮询间隔，避免空转 CPU
+        QThread::msleep(200);
     }
 
     // ---- 清理 ----
-    if (initialized_.load()) {
-        fprintf(stderr, "[AIReportWorker] stopping, destroying inference...\n");
-        inference_.destroy();
-        initialized_.store(false);
-    }
+    fprintf(stderr, "[AIReportWorker] stopping, destroying inference...\n");
+    inference_.destroy();
+    initialized_.store(false);
     fprintf(stderr, "[AIReportWorker] stopped\n");
 }
 
@@ -198,11 +186,103 @@ QString AIReportWorker::buildPrompt_()
 {
     QMutexLocker lock(&statusMutex_);    // 与 updateStatus() 互斥，保证读到一致的快照
 
+    // ---- 读取系统内存信息（/proc/meminfo） ----
+    int memTotalMB = 0, memAvailMB = 0;
+    {
+        FILE* fp = fopen("/proc/meminfo", "r");
+        if (fp) {
+            char line[256];
+            int memTotalKB = 0, memAvailKB = 0;
+            while (fgets(line, sizeof(line), fp)) {
+                if (strncmp(line, "MemTotal:", 9) == 0)
+                    sscanf(line + 9, "%d", &memTotalKB);
+                else if (strncmp(line, "MemAvailable:", 13) == 0)
+                    sscanf(line + 13, "%d", &memAvailKB);
+                if (memTotalKB > 0 && memAvailKB > 0) break;
+            }
+            fclose(fp);
+            memTotalMB = memTotalKB / 1024;
+            memAvailMB = memAvailKB / 1024;
+        }
+    }
+
+    // ---- 读取每核 CPU 占用率（两次采样 /proc/stat，间隔 100ms） ----
+    // RK3588: cpu0-3 = Cortex-A76 (大核), cpu4-7 = Cortex-A55 (小核)
+    auto readCpuStats_ = [](uint64_t idle[8], uint64_t total[8]) -> bool {
+        FILE* fp = fopen("/proc/stat", "r");
+        if (!fp) return false;
+        char line[256];
+        int coreIdx = -1;  // -1 = aggregate line, 0-7 = per-core
+        while (fgets(line, sizeof(line), fp) && coreIdx < 7) {
+            if (strncmp(line, "cpu ", 4) == 0) {
+                coreIdx = -1;  // skip aggregate
+                continue;
+            }
+            if (strncmp(line, "cpu", 3) != 0) break;  // done with cpu lines
+            int ci = atoi(line + 3);
+            if (ci < 0 || ci > 7) continue;
+            uint64_t user, nice, sys, iowait, irq, softirq, steal, guest, guest_nice;
+            int n = sscanf(line + 5, "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+                          &user, &nice, &sys, &idle[ci], &iowait, &irq, &softirq,
+                          &steal, &guest, &guest_nice);
+            if (n >= 4) {
+                // idle already stored, compute total
+                total[ci] = user + nice + sys + idle[ci] + iowait + irq + softirq + steal;
+                if (coreIdx < ci) coreIdx = ci;
+            }
+        }
+        fclose(fp);
+        return coreIdx >= 7;  // got all 8 cores
+    };
+
+    int bigPct[4]   = {-1, -1, -1, -1};  // cpu0-3 (A76)
+    int littlePct[4] = {-1, -1, -1, -1};  // cpu4-7 (A55)
+    {
+        uint64_t idle1[8] = {}, total1[8] = {};
+        uint64_t idle2[8] = {}, total2[8] = {};
+        if (readCpuStats_(idle1, total1)) {
+            QThread::msleep(100);
+            if (readCpuStats_(idle2, total2)) {
+                for (int i = 0; i < 8; ++i) {
+                    uint64_t dIdle = idle2[i] - idle1[i];
+                    uint64_t dTotal = total2[i] - total1[i];
+                    if (dTotal > 0) {
+                        int pct = (int)(100 - (dIdle * 100 / dTotal));
+                        if (i < 4) bigPct[i]    = pct;
+                        else       littlePct[i - 4] = pct;
+                    }
+                }
+            }
+        }
+    }
+
+    // 计算大小核平均占用
+    auto avgPct_ = [](const int* arr, int n) -> int {
+        int sum = 0, cnt = 0;
+        for (int i = 0; i < n; ++i) {
+            if (arr[i] >= 0) { sum += arr[i]; ++cnt; }
+        }
+        return cnt > 0 ? sum / cnt : -1;
+    };
+    int bigAvg    = avgPct_(bigPct, 4);
+    int littleAvg = avgPct_(littlePct, 4);
+
     QString prompt;
     prompt += QString::fromUtf8("请对以下RK3588边缘计算平台的运行状态进行综合分析：\n\n");
     prompt += QString::fromUtf8("硬件状态：\n");
     prompt += QString::fromUtf8("- CPU温度: %1°C\n").arg(cpuTemp_);
-    prompt += QString::fromUtf8("- CPU占用率: %1%\n").arg(cpuUsage_);
+    if (bigAvg >= 0 && littleAvg >= 0) {
+        // 有每核数据：显示大小核分别占用 + 汇总
+        prompt += QString::fromUtf8("- CPU占用: 8核平均 %1%%, 大核A76 %2%%, 小核A55 %3%%\n")
+                      .arg(cpuUsage_).arg(bigAvg).arg(littleAvg);
+    } else {
+        // 回退：仅显示汇总值
+        prompt += QString::fromUtf8("- CPU占用率: %1%\n").arg(cpuUsage_);
+    }
+    if (memTotalMB > 0) {
+        prompt += QString::fromUtf8("- 系统内存: 总计 %1 MB, 可用 %2 MB (已用约 %3 MB)\n")
+                      .arg(memTotalMB).arg(memAvailMB).arg(memTotalMB - memAvailMB);
+    }
     prompt += "\n";
 
     prompt += QString::fromUtf8("传感器状态：\n");
@@ -218,11 +298,22 @@ QString AIReportWorker::buildPrompt_()
     prompt += QString::fromUtf8("- %1\n").arg(fusionStatus_);
     prompt += "\n";
 
+    // 动态构建分析指令：有跟踪目标时加入安全评估
+    bool hasTargets = fusionStatus_.contains(QString::fromUtf8("目标数:")) &&
+                      !fusionStatus_.contains(QString::fromUtf8("目标数: 0,"));
     prompt += QString::fromUtf8("请分析：\n");
     prompt += QString::fromUtf8("1. 系统整体健康度评估（优/良/中/差）\n");
-    prompt += QString::fromUtf8("2. 是否存在异常或风险点\n");
-    prompt += QString::fromUtf8("3. 优化建议\n");
-    prompt += QString::fromUtf8("请用简洁的中文回答，控制在200字以内。");
+    if (hasTargets) {
+        prompt += QString::fromUtf8("2. 【安全评估】检查各目标距离是否小于告警阈值，"
+                                    "如有目标进入危险区域必须明确警告其编号和距离\n");
+        prompt += QString::fromUtf8("3. 是否存在其他异常或风险点\n");
+        prompt += QString::fromUtf8("4. 优化建议\n");
+        prompt += QString::fromUtf8("请用简洁的中文回答，控制在250字以内。");
+    } else {
+        prompt += QString::fromUtf8("2. 是否存在异常或风险点\n");
+        prompt += QString::fromUtf8("3. 优化建议\n");
+        prompt += QString::fromUtf8("请用简洁的中文回答，控制在200字以内。");
+    }
 
     return prompt;
 }

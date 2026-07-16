@@ -122,7 +122,7 @@ class LidarTargetTracker;
  */
 class LidarCameraFusion {
 public:
-    static constexpr uint32_t kMaxLidarPoints = 540;   ///< N10Plus 单圈最大点数
+    static constexpr uint32_t kMaxLidarPoints = 1200;  ///< N10Plus 单圈最大点数
     static constexpr uint32_t kMaxDetections  = 100;   ///< 累积最大 bbox 数
     static constexpr uint32_t kMaxCameras     = 2;     ///< 最大相机数量
 

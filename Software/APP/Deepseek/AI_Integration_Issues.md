@@ -185,14 +185,63 @@ RKLLM_RUN_ERROR   = 3
 
 ---
 
+## 10. Lazy vs Eager 加载决策：全功能运行时 OOM
+
+**现象**: Release 编译下全功能开启（推流+YOLO+融合+录像），运行两次 AI 分析后 OOM（SIGKILL）。
+
+**原因**: 懒加载模式下，模型 `rkllm_init` + warmup 在用户首次点击 AI 分析时执行。此时 DDR 已被视频管线的 RGA/MPP/YOLO 占满，`dma_buf_alloc` 请求排队，内核 `free()` 同样排队等总线。多块 DMA 缓冲同时堆积 → VmRSS 虚假高水位 → OOM Killer。而热加载在 DDR 空闲时一次性分配并驻留，后续推理不再触发 `dma_buf_alloc`。
+
+**解决**: 恢复热加载模式：
+- `start()` 启动时 `initialize()` + warmup + `QThread::sleep(3)` 等 DDR 回收
+- DDR 空闲时抢占连续大块 workspace，后续推理永不分配不释放
+- 与 YOLO DMA 缓冲池预分配原理完全一致
+
+**教训**: 嵌入式平台 DDR 带宽是稀缺资源，大块 DMA 分配必须在启动早期、总线空闲时完成。懒加载虽然省内存，但把分配操作推迟到最坏的时间点。
+
+---
+
+## 11. Debug + ASan 编译导致内存翻倍触发 OOM
+
+**现象**: 去掉懒加载后仍然 OOM，VmRSS 明显偏高。
+
+**原因**: `build.sh` 使用 `-fsanitize=address` 编译，ASan 的 shadow memory (~12.5%)、redzone（每次 malloc 前后加保护区）、quarantine（默认 256MB，free 后不归还）在嵌入式 4GB 系统上把内存占用放大 2-3 倍。
+
+**解决**: `build.sh` 改回 `-DCMAKE_BUILD_TYPE=Release`，去掉所有 `-fsanitize=address` 和 `-static-libasan` 标志。
+
+---
+
+## 12. Prompt 增强：内存 + 每核 CPU + 目标距离 + 安全评估
+
+**新增 prompt 输入**:
+- 系统内存（`/proc/meminfo` MemTotal/MemAvailable）
+- 每核 CPU 占用（大核 A76 cpu0-3 / 小核 A55 cpu4-7，两次采样 /proc/stat 间隔 100ms）
+- 融合跟踪目标距离（小于 `warningExitDistMeters` 标记 ⚠ 危险）
+- 安全评估作为独立的第 4/2 项分析指令（有目标时提到第 2 位）
+
+**涉及文件**: `ai_report_worker.cpp` `buildPrompt_()`, `widget.cpp` `update_ai_status_snapshot_()`
+
+---
+
+## 13. AI 报告 UI 重构：主页 → 独立子页面
+
+**改动**: AI 报告从主页底部小文本框迁移到 QStackedWidget Page 4 独立子页面。
+- `widget.ui`: 新增 `pageAIReport` + `btnAIReport` 导航按钮
+- `widget.cpp`: `build_ai_report_page_()` 动态构建全屏页面
+- 主页 AI 元素（`aiControlBar`、`aiReportText`）全部隐藏
+- 触发分析自动跳转子页面
+
+---
+
 ## 架构决策
 
 | 决策 | 方案 | 原因 |
 |------|------|------|
 | rkllm 库加载方式 | `dlopen` 运行时加载 | 避免直接链接导致进程启动时崩溃 |
-| AI 初始化时机 | `QTimer::singleShot(500, ...)` 延迟初始化 | 避免阻塞 UI 启动，隔离崩溃影响 |
+| AI 初始化时机 | 热加载：`QTimer::singleShot(500, ...)` 延迟初始化 | 在 DDR 空闲时预分配 workspace，避免运行时拥堵 OOM |
 | 组件封装方式 | 独立静态库 `deepseek_ai_lib` | 与 web-control 一致，解耦 SentinelQT |
 | 状态同步 | `std::atomic<bool>` + `QMutex` | 主线程写快照 / Worker 线程读，无锁竞争 |
+| LLM 推理 UI | 独立子页面 Page 4 | 与其他功能页面（融合管理/数据回溯）并列，统一交互模式 |
+| 内存管理 | 启动时预分配 + 常驻 + `sleep(3)` DDR 回收 | 避免运行时动态 DMA 分配导致 VmRSS 虚假高水位
 
 ---
 
@@ -203,9 +252,13 @@ RKLLM_RUN_ERROR   = 3
 | `Software/APP/Deepseek/include/deepseek_inference.h` | rkllm API 封装类声明 |
 | `Software/APP/Deepseek/src/deepseek_inference.cpp` | dlopen + dlsym + x8 ABI + 结构体偏移量修正 |
 | `Software/APP/Deepseek/include/ai_report_worker.h` | QObject Worker 声明（QThread 异步推理） |
-| `Software/APP/Deepseek/src/ai_report_worker.cpp` | Prompt 构建 + 推理调度 |
+| `Software/APP/Deepseek/src/ai_report_worker.cpp` | Prompt 构建 + 推理调度 + 热加载 + DDR 回收等待 |
+| `Software/APP/Deepseek/src/deepseek_inference.cpp` | dlopen + dlsym + x8 ABI + 结构体偏移量修正 |
 | `Software/APP/Deepseek/CMakeLists.txt` | 静态库构建（含 AUTOMOC + dlopen 配置） |
-| `Software/APP/SentinelQT/widget.h` | aiWorkerReady_ 原子标志等成员 |
-| `Software/APP/SentinelQT/widget.cpp` | AI 初始化、自动定时、状态快照、报告显示 |
-| `Software/APP/SentinelQT/widget.ui` | btnAIAnalysis 按钮 + aiReportText 显示区 |
+| `Software/APP/SentinelQT/widget.h` | aiWorkerReady_ + AI 子页面声明 |
+| `Software/APP/SentinelQT/widget.cpp` | AI 初始化、自动定时、状态快照、报告显示、子页面构建 |
+| `Software/APP/SentinelQT/widget.ui` | pageAIReport + btnAIReport + aiReportText |
 | `Software/APP/SentinelQT/config.ini` | [AI] 配置节 + ringBufferSlots 优化 |
+| `Software/APP/sentinel-streamer/src/sentinel_streamer.cpp` | TOCTOU 修复：recordClosePending / streamClosePending 原子标志委托 |
+| `Software/APP/sentinel-lslidarer/include/sentinel_lslidarer.h` | kPointsPerSweep 540→1200 |
+| `Software/APP/lidar-camera-fusion/include/lidar_camera_fusion.h` | kMaxLidarPoints 540→1200 |

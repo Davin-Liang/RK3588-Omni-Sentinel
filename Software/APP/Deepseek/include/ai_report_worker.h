@@ -15,19 +15,21 @@
  *   将耗时的 NPU 推理（~60~130 秒）从 Qt 主线程剥离，避免阻塞 UI 和相机预览。
  *   主线程每秒更新状态快照，用户触发（按钮/Web/定时器）时本线程生成报告。
  *
- * 线程模型（懒加载模式）：
+ * 线程模型（热加载模式）：
  * @code
  *   主线程                      AIReportWorker 子线程
  *   ────────                    ─────────────────
  *   updateStatus() [每秒]         start()
- *     ├─ 加锁写快照              └─ while(running_):
- *     └─ 解锁                        每 200ms 检测 pending_ 标志
+ *     ├─ 加锁写快照              ├─ inference_.initialize() → 加载模型到 NPU（~1GB）
+ *     └─ 解锁                    ├─ warmup inferSync() → 预分配 workspace（~500MB）
+ *                                ├─ QThread::sleep(3) → 等 DDR 回收
+ *                                └─ while(running_):
+ *                                     每 200ms 检测 pending_ 标志
  *                                          │ pending_ == true
- *   requestReport()                       │   ├─ [首次] inference_.initialize() → 加载模型
- *     └─ pending_ = true ──────────────→  │   ├─ buildPrompt_() → 读快照生成中文问题
- *                                          │   ├─ inference_.inferSync() → NPU 推理
+ *   requestReport()                       │   ├─ buildPrompt_() → 读快照生成中文问题
+ *     └─ pending_ = true ──────────────→  │   ├─ inference_.inferSync() → NPU 推理
  *                                          │   ├─ emit reportReady(result) → 主线程显示
- *                                          │   └─ pending_ = false (模型驻留，后续免加载)
+ *                                          │   └─ pending_ = false
  *   on_ai_report_ready_()  ←───── Qt::QueuedConnection ──┘
  *     └─ 显示报告到屏幕和 Web
  * @endcode
@@ -69,10 +71,9 @@ public slots:
     /**
      * @brief Worker 线程主入口（由 QThread::started 信号触发）
      *
-     * 懒加载模式：启动时仅进入轮询循环，不加载模型。
-     * 首次推理请求时自动调用 inference_.initialize() 加载模型到 NPU，
-     * 之后模型保持驻留，后续请求无需重新加载。
-     * 循环退出时 inference_.destroy() 释放 NPU 资源。
+     * 热加载模式：启动时加载模型 → 热身推理预分配 NPU workspace，
+     * 之后进入轮询循环等待推理请求。模型 + workspace 常驻 DDR，
+     * 后续推理不再触发 dma_buf_alloc，避免 DDR 拥堵时 OOM。
      */
     void start();
 
