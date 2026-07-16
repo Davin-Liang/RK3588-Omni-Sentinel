@@ -37,6 +37,7 @@ void PreviewWorker::start()
                        previewBuf->height,
                        QImage::Format_RGB888);
             emit frameReady(img.copy());
+            visioner_->release_preview(camNum_, previewBuf);
         } else {
             consecutiveFailures++;
             if (consecutiveFailures >= 5) {
@@ -47,8 +48,6 @@ void PreviewWorker::start()
                 consecutiveFailures = 0;
             }
         }
-
-        visioner_->release_preview(camNum_, previewBuf);
     }
 
     fprintf(stderr, "[PreviewWorker] start() exited\n");

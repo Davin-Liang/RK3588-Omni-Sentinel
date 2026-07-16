@@ -243,4 +243,14 @@
 
 4. **DBSCAN O(n²) 复杂度** — 540 点可忽略（~1.5M FLOPs），升级高线束雷达需空间索引加速。
 
+---
+
+## 21. kMaxLidarPoints=540 与 lslidarer 不同步导致 copy_slot 越界
+
+**现象**: ASan 报 `heap-buffer-overflow`，`memcpy` 写入 11148 bytes 到 6480-byte 区域。崩溃在 `RingBuffer::copy_slot()` → `SentinelLslidarer::get_latest_frame()` → `LidarCameraFusion::fusion_thread_()`。启动融合后立即触发。
+
+**原因**: lslidarer 的 `kPointsPerSweep` 从 540 扩容到 1200 后，`LidarCameraFusion` 的帧缓冲区 `lidarPointsBuf_` 仍按 `kMaxLidarPoints = 540` 分配（6480 bytes = 540 × 12）。`copy_slot()` 将新帧的点数据（~929 个点 = 11148 bytes）`memcpy` 到 540 点的缓冲区 → 越界。
+
+**解决**: `lidar_camera_fusion.h` 和 `lidar_target_tracker.h` 的 `kMaxLidarPoints` 从 540 同步更新为 1200。三个组件（lslidarer / fusion / tracker）共用同一个点容量常量，任意一方改动必须同步。
+
 5. **YOLO 检测到但 LiDAR 看不到的目标无法跟踪** — 单线雷达扫描面有限，超出扫描面的目标即使 YOLO 检测到也无法形成 LiDAR cluster。

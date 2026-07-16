@@ -39,6 +39,38 @@ struct SentinelYoloInferConfig {
     float nmsThreshold = 0.45f;  ///< NMS IoU 阈值
     int waitTimeoutMs = 200;     ///< 获取 NPU 小图的超时时间；<=0 时使用 wait_get_npu 阻塞等待
     bool pushEmptyResult = true; ///< 无目标帧是否仍向两个队列推送空 vector，用于保持 OSD 帧同步
+
+    /**
+     * @brief NPU 核心掩码（仅 RK3588 生效）
+     *
+     * 用于将 YOLO 推理绑定到指定 NPU 核心，避免与大模型抢占 NPU 资源。
+     * 默认 RKNN_NPU_CORE_2(4)：YOLO 独占 Core 2，Core 0/1 留给 DeepSeek LLM。
+     *
+     * 可选值（来自 rknn_api.h）：
+     *   RKNN_NPU_CORE_AUTO(0)   — 驱动自动分配
+     *   RKNN_NPU_CORE_0(1)      — 仅使用 Core 0
+     *   RKNN_NPU_CORE_1(2)      — 仅使用 Core 1
+     *   RKNN_NPU_CORE_2(4)      — 仅使用 Core 2
+     */
+    int npuCoreMask = 4;  // RKNN_NPU_CORE_2
+
+    /**
+     * @brief CPU 亲和性掩码（用于将推理线程绑定到指定 CPU 核心）
+     *
+     * 通过 pthread_setaffinity_np 将 YOLO 推理线程限制在指定 CPU 核心上运行，
+     * 避免抢占大核影响 UI 渲染、相机采集等延迟敏感任务。
+     *
+     * RK3588 CPU 布局（8 核）：
+     *   0x0F (15)  = CPU 0-3  (4×A55 小核) — 推荐：YOLO 推理线程绑小核
+     *   0xF0 (240) = CPU 4-7  (4×A76 大核) — 推荐：UI、相机采集线程
+     *   0xFF (255) = CPU 0-7  (全部核心)   — 不限制
+     *   0          = 不设置亲和性（默认）
+     *
+     * 注意：
+     *   - 只影响 YOLO 推理线程的前/后处理 CPU 时间，不影响 NPU 硬件推理性能
+     *   - NPU 是独立硬件加速器，其核心分配由 npuCoreMask 控制
+     */
+    int cpuAffinityMask = 0;  // 0 = 不绑定，交由内核调度
 };
 
 /**

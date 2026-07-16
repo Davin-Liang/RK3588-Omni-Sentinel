@@ -101,3 +101,16 @@ while (lidar.available_frames() == 0) {
 **原因**: `demo.cpp` 中为演示全圈点云效果，显式设置了 `config.angleDisableMin = 0; config.angleDisableMax = 0;`，覆盖了 `LidarConfig` 默认的 90°-240° 屏蔽区间。这导致 demo 输出行为与 README 中标注的"角度屏蔽 90°-240°"描述不一致。
 
 **解决**: demo 中保留全圈输出的设计意图（验证后方 20° 点的代码依赖全圈数据），但需在 DEMO-INSTRUCTIONS.md 中明确说明 demo 关闭了角度屏蔽，与默认产品配置不同。生产环境使用默认配置即可自动启用 90°-240° 屏蔽。
+
+---
+
+## 8. kPointsPerSweep=540 导致 heap-buffer-overflow
+
+**现象**: ASan 报 `heap-buffer-overflow`，WRITE of size 4 at address 0 bytes to the right of 64800-byte region，崩溃在 `reader_loop_()` → `sweepBuf[sweepCount].x = ...`。
+
+**原因**: `kPointsPerSweep = 540` 基于 `ceil(5400Hz / 10Hz) = 540` 计算，但高分辨率模式下实际每圈点数可达 ~1100。`reader_loop_()` 在累积一圈点时 `sweepCount` 超过 540 但无越界检查，写入 `RingBuffer` 分配区域末尾之后 4 字节。
+
+**解决**:
+- `kPointsPerSweep`: 540 → 1200
+- `reader_loop_()` 三处点累积循环加入 `sweepCount >= LidarConfig::kPointsPerSweep` 防溢出检查
+- 下游 `lidar-camera-fusion` 的 `kMaxLidarPoints` 同步更新为 1200

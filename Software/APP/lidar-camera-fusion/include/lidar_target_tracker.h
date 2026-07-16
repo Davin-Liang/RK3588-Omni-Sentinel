@@ -11,7 +11,7 @@ class LidarTargetTracker {
 public:
     static constexpr uint32_t kMaxTracks      = 50;
     static constexpr uint32_t kMaxDetections  = 200;
-    static constexpr uint32_t kMaxLidarPoints = 540;
+    static constexpr uint32_t kMaxLidarPoints = 1200;
     static constexpr uint32_t kMaxClusters    = 32;
 
     LidarTargetTracker();
