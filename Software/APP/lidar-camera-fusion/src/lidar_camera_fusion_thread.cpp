@@ -157,6 +157,7 @@ void LidarCameraFusion::fusion_thread_()
         // ---- 步骤 4：累积融合 + 同步记录 bbox ----
         reset();
         YoloBBox allBboxes[kMaxDetections];
+        uint32_t bboxCamIdx[kMaxDetections];
         uint32_t totalBboxes = 0;
         for (uint32_t c = 0; c < camCount_; ++c) {
             if (!fakeDetections_[c].empty()) {
@@ -166,6 +167,7 @@ void LidarCameraFusion::fusion_thread_()
                 // 同步 append bbox，保证与 FusionResult 顺序 100% 一致
                 for (const auto& b : fakeDetections_[c]) {
                     if (totalBboxes < kMaxDetections) {
+                        bboxCamIdx[totalBboxes] = c;
                         allBboxes[totalBboxes++] = b;
                     }
                 }
@@ -175,7 +177,8 @@ void LidarCameraFusion::fusion_thread_()
         // ---- 步骤 4.5：目标跟踪 ----
         if (trackingEnabled_ && tracker_) {
             tracker_->update(result_, lidarPointsBuf_, frame.pointsCount,
-                             allBboxes, totalBboxes, frame.timestampNs);
+                             allBboxes, totalBboxes, frame.timestampNs,
+                             bboxCamIdx);
         }
 
         // ---- 跟踪状态日志 ----

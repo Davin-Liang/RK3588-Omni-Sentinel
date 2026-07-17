@@ -25,7 +25,7 @@ SentinelQT 进程
 │   └── try_get_npu → RKNN infer → push(fusionQueue + osdQueue) → release_npu
 │
 ├── FusionWorker 子线程
-│   └── 100ms 轮询 copy_tracked_targets() → 变化去重 → emit trackingUpdated()
+│   └── 100ms 轮询 copy_tracked_targets() → emit trackingUpdated()（无条件推送）
 │
 ├── SentinelLslidarer 内部线程 (reader)
 │   └── SerialPort::read_packet() → RingBuffer (10Hz)
@@ -80,7 +80,7 @@ static void streamer_callback_(int camNum, StreamerEvent event, const char* deta
 
 - **创建**: `FusionWorker(fusion_)` 构造于主线程，`moveToThread(fusionThread_)` 移至子线程
 - **启动**: `QThread::started` → `FusionWorker::start()` 槽（DirectConnection）
-- **轮询循环**: 100ms 间隔调用 `fusion_->copy_tracked_targets()`，对比上次快照（id/posX/posY/state），仅变化时 emit `trackingUpdated(QVector<TrackedTarget>)`
+- **轮询循环**: 100ms 间隔调用 `fusion_->copy_tracked_targets()`，无条件 emit `trackingUpdated(QVector<TrackedTarget>)`（已去掉变化去重逻辑，确保 Web 俯视图刷新流畅不冻结）
 - **退出**: `stop()` 设置 `std::atomic<bool> running_ = false` → 最多 100ms 内响应
 
 ### 2.5 LidarCameraFusion 内部线程
@@ -293,7 +293,7 @@ WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQ
 - **告警层**：红色脉冲圈（基于帧计数器正弦缩放动画）
 - **图例**：右下角半透明方框（中文标识）
 
-通过 `set_targets()` 更新数据，FusionWorker 仅在目标变化时 emit 信号触发重绘（避免无效 repaint）。
+通过 `set_targets()` 更新数据，FusionWorker 每 100ms 无条件 emit 信号触发重绘（确保画面流畅不冻结）。
 
 ### 3.8 虚拟数字键盘 (VirtualKeyboard)
 

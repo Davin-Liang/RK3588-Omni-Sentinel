@@ -257,7 +257,8 @@ public:
                          uint32_t pointCount,
                          const YoloBBox* bboxes,
                          uint32_t bboxCount,
-                         uint64_t timestampNs);
+                         uint64_t timestampNs,
+                         const uint32_t* bboxCamIdx = nullptr);
 
     /**
      * @brief  注册距离告警回调。

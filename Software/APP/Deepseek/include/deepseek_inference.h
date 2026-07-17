@@ -85,6 +85,9 @@ public:
      */
     void destroy();
 
+    /** @brief C 回调友元声明，允许 raw_callback_ 访问私有成员 */
+    friend void raw_callback_(void* result, void* userdata, int state);
+
 private:
     // ---- 以下三个方法由 C 回调 raw_callback_() 在 rkllm_run 执行期间调用 ----
     // rkllm_run 是阻塞的，所以它们在 inferSync 的调用线程中执行，无多线程竞争。

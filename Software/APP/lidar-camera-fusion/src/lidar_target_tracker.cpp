@@ -75,13 +75,15 @@ bool LidarTargetTracker::update(const FusionResult&,
                                  uint32_t pointCount,
                                  const YoloBBox* bboxes,
                                  uint32_t bboxCount,
-                                 uint64_t timestampNs)
+                                 uint64_t timestampNs,
+                                 const uint32_t* bboxCamIdx)
 {
     if (!lidarPoints && pointCount > 0) return false;
 
     if (timestampNs == lastLidarTimestampNs_ && lastLidarTimestampNs_ != 0)
         return true;
     lastLidarTimestampNs_ = timestampNs;
+    bboxCamIdx_ = bboxCamIdx;
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -407,6 +409,9 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
     detectionCount_ = 0;
     uint32_t nc = rawClusterCount_;
 
+    static uint32_t projLogFrame = 0;
+    ++projLogFrame;
+
     // 筛选 confirmed 簇
     bool confirmed[kMaxClusters] = {};
     for (uint32_t ci = 0; ci < nc; ++ci) {
@@ -433,8 +438,13 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
         bboxCluster_[bb] = 0xFFFFFFFF;
 
     float bboxBestScore[50];
-    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb)
+    float bboxClosestDist[50];      // 深度优先仲裁：每个 bbox 最近候选簇的距离
+    uint32_t bboxClosestCi[50];     // 深度优先仲裁：每个 bbox 最近候选簇的索引
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
         bboxBestScore[bb] = -1.0f;
+        bboxClosestDist[bb] = 1e9f;
+        bboxClosestCi[bb] = 0xFFFFFFFF;
+    }
 
     for (uint32_t ci = 0; ci < nc; ++ci) {
         if (!confirmed[ci]) continue;  // 只有持久化确认的簇才参与 bbox 认领
@@ -454,12 +464,29 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
                      + cfg.tLidarToCam[7];
             float cZ = cfg.tLidarToCam[8] * cx + cfg.tLidarToCam[9] * cy
                      + cfg.tLidarToCam[11];
-            if (cZ <= 0.0f) continue;
+            if (cZ <= 0.0f) {
+                if (false)
+                    fprintf(stderr, "[ProjCluster] ci=%u pos(%.2f,%.2f) dist=%.2fm cam%u BEHIND\n",
+                            ci, cx, cy, centroidDist, cc);
+                continue;
+            }
 
             float u = cfg.fx * cX / cZ + cfg.cx;
             float v = cfg.fy * cY / cZ + cfg.cy;
 
+            if (false) {
+                bool inImage = (u >= 0.0f && u < static_cast<float>(cfg.imgWidth) &&
+                                v >= 0.0f && v < static_cast<float>(cfg.imgHeight));
+                fprintf(stderr, "[ProjCluster] ci=%u pos(%.2f,%.2f) dist=%.2fm cam%u "
+                        "pix(%.0f,%.0f) %s img=%ux%u\n",
+                        ci, cx, cy, centroidDist, cc, u, v,
+                        inImage ? "IN" : "OUT", cfg.imgWidth, cfg.imgHeight);
+            }
+
             for (uint32_t bb = 0; bb < bboxCount; ++bb) {
+                // bbox 只能匹配同相机的投影，避免 cam0 的簇被 cam1 的 bbox 误认领
+                if (bboxCamIdx_ && bboxCamIdx_[bb] != cc) continue;
+
                 float pixelDist = 0.0f;
 
                 if (u >= static_cast<float>(bboxes[bb].x1) &&
@@ -488,6 +515,10 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
                 if (score > bboxBestScore[bb]) {
                     bboxBestScore[bb] = score;
                     bboxCluster_[bb] = ci;
+                }
+                if (centroidDist < bboxClosestDist[bb]) {
+                    bboxClosestDist[bb] = centroidDist;
+                    bboxClosestCi[bb] = ci;
                 }
             }
         }
@@ -547,6 +578,7 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
             // 重新计算对 bb 的 score
             float sc = -1.0f;
             for (uint32_t cc = 0; cc < camCfgCount_; ++cc) {
+                if (bboxCamIdx_ && bboxCamIdx_[bb] != cc) continue;  // bbox 只能匹配同相机
                 const CameraConfig& cfg = camCfg_[cc];
                 float cX = cfg.tLidarToCam[0]*cx + cfg.tLidarToCam[1]*cy + cfg.tLidarToCam[3];
                 float cY = cfg.tLidarToCam[4]*cx + cfg.tLidarToCam[5]*cy + cfg.tLidarToCam[7];
@@ -572,11 +604,41 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
         }
     }
 
+    // ---- 深度优先仲裁：bbox 同时匹配远近两个簇时，优先选最近的 ----
+    for (uint32_t bb = 0; bb < bboxCount && bb < 50; ++bb) {
+        uint32_t bestCi = bboxCluster_[bb];
+        uint32_t closestCi = bboxClosestCi[bb];
+        if (bestCi == 0xFFFFFFFF || closestCi == 0xFFFFFFFF) continue;
+        if (bestCi == closestCi) continue;
+
+        float bestDist, closestDist;
+        bestDist = std::sqrt(clusterCentroidX_[bestCi] * clusterCentroidX_[bestCi]
+                           + clusterCentroidY_[bestCi] * clusterCentroidY_[bestCi]);
+        closestDist = bboxClosestDist[bb];
+
+        // 最近簇至少比得分最高簇近 0.5m，且未被其他 bbox 认领 → 选最近的
+        if (bestDist - closestDist > 0.5f && !claimedByBbox_[closestCi]) {
+            bboxCluster_[bb] = closestCi;
+            claimedByBbox_[bestCi] = false;
+            claimedByBbox_[closestCi] = true;
+            bboxBestScore[bb] = 1.0f / (1.0f + closestDist);  // 用最近簇的近似分
+            fprintf(stderr, "[BboxClaim] cam%u bbox[%u] box(%.0f,%.0f) "
+                    "depth-wins: ci=%u(%.2fm) over ci=%u(%.2fm)\n",
+                    bboxCamIdx_ ? bboxCamIdx_[bb] : 0u, bb,
+                    (bboxes[bb].x1+bboxes[bb].x2)*0.5f,
+                    (bboxes[bb].y1+bboxes[bb].y2)*0.5f,
+                    closestCi, closestDist, bestCi, bestDist);
+        }
+    }
+
     // 输出 bbox detection
     for (uint32_t bb = 0; bb < bboxCount; ++bb) {
         uint32_t ci = bboxCluster_[bb];
         if (ci == 0xFFFFFFFF || ci >= nc) {
-            fprintf(stderr, "[BboxClaim] bbox[%u] -> NONE\n", bb);
+            fprintf(stderr, "[BboxClaim] cam%u bbox[%u] box(%.0f,%.0f) -> NONE\n",
+                    bboxCamIdx_ ? bboxCamIdx_[bb] : 0u, bb,
+                    (bboxes[bb].x1+bboxes[bb].x2)*0.5f,
+                    (bboxes[bb].y1+bboxes[bb].y2)*0.5f);
             continue;
         }
         if (detectionCount_ >= kMaxDetections) break;
@@ -593,8 +655,11 @@ void LidarTargetTracker::bbox_claim_(const YoloBBox* bboxes, uint32_t bboxCount,
         ++detectionCount_;
 
         float d = std::sqrt(det.x * det.x + det.y * det.y);
-        fprintf(stderr, "[BboxClaim] bbox[%u] -> ci=%u dist=%.2fm pts=%u score=%.3f\n",
-                bb, ci, d, det.pointCount, bboxBestScore[bb]);
+        fprintf(stderr, "[BboxClaim] cam%u bbox[%u] box(%.0f,%.0f) -> ci=%u dist=%.2fm pts=%u score=%.3f\n",
+                bboxCamIdx_ ? bboxCamIdx_[bb] : 0u, bb,
+                (bboxes[bb].x1+bboxes[bb].x2)*0.5f,
+                (bboxes[bb].y1+bboxes[bb].y2)*0.5f,
+                ci, d, det.pointCount, bboxBestScore[bb]);
     }
 
     // 输出 orphan detection
@@ -926,17 +991,18 @@ void LidarTargetTracker::update_snapshot_()
             vis.radius     = clusterHistory_[hi].radius;
             vis.pointCount = clusterHistory_[hi].pointCount;
 
+            // 通过 clusterBboxMatch_ 索引映射精确判断是否被认领
+            // 不再用距离猜测（深度仲裁后 bboxCluster_ 可能指向不同簇，距离法会误判）
             bool orphan = true;
             uint32_t bbIdx = 0xFFFFFFFF;
             for (uint32_t bb = 0; bb < 50; ++bb) {
-                if (bboxCluster_[bb] != 0xFFFFFFFF) {
-                    float dx = vis.cx - clusterCentroidX_[bboxCluster_[bb]];
-                    float dy = vis.cy - clusterCentroidY_[bboxCluster_[bb]];
-                    if (dx * dx + dy * dy < 0.01f) {
-                        orphan = false;
-                        bbIdx = bb;
-                        break;
-                    }
+                uint32_t ci = bboxCluster_[bb];
+                if (ci == 0xFFFFFFFF || ci >= kMaxClusters) continue;
+                int32_t matchedHi = clusterBboxMatch_[ci];
+                if (matchedHi >= 0 && static_cast<uint32_t>(matchedHi) == hi) {
+                    orphan = false;
+                    bbIdx = bb;
+                    break;
                 }
             }
             vis.bboxIdx  = bbIdx;

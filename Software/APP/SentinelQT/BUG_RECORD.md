@@ -332,3 +332,23 @@
 - `widget.cpp`: `build_ai_report_page_()` 动态构建标题栏、操作栏、全屏 QTextEdit、倒计时标签
 - 主页面 AI 元素（`aiControlBar`、`aiReportText`）全部 `setVisible(false)` + `setMaximumHeight(0)`
 - 触发分析自动跳转 Page 4，报告只显示在子页面
+
+---
+
+## 34. 合并分支时 Cam1 外参 T0-T15 被误删
+
+**现象**: 融合跟踪无法创建新 track，`[BboxClaim] cam1 bbox[0] -> NONE`，`[OSD_pts] cam1 bbox[0] 0 points`。Web 俯视图只显示聚类圆，无跟踪目标。cam0 正常。
+
+**原因**: commit `f147216`（"将YOLO推理任务绑定到NPU２核"）在添加 `[AI]` 配置节时，误删了 `[Fusion]` 节中 Cam1 的 16 个外参 `Cam1T0` ~ `Cam1T15`。代码读取时默认值为 0.0f，全零矩阵导致 cX=cY=cZ=0 → 所有 LiDAR 点判为 BEHIND → bbox 匹配不到任何簇。
+
+**解决**: 从 commit `67a0c5e` 恢复 Cam1 外参值到 config.ini。同时检查确认 Cam0 外参未被影响。
+
+---
+
+## 35. FusionWorker 目标变化去重导致俯视图画面"冻住"
+
+**现象**: Web 俯视图和 Qt TopDownView 画面断续，目标静止时画面不刷新，恢复运动时位置突变。用户感觉"卡卡的"。
+
+**原因**: `fusion_worker.cpp` 中 `FusionWorker::start()` 在 100ms 轮询 `copy_tracked_targets()` 后，对比上次快照的 id/posX/posY/state，仅变化时才 emit `trackingUpdated`。目标短暂丢失或静止时前端无数据推送，画面冻结在最后一帧。
+
+**解决**: 去掉变化去重逻辑，每 100ms 无条件推送当前快照。改动在 `fusion_worker.cpp`：删除 `lastSnapshot` 比较代码块，轮询后直接构建 `QVector` 并 emit。

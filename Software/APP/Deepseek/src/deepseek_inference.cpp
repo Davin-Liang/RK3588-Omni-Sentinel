@@ -175,7 +175,7 @@ struct RKLLMResultLocal {
 // 此函数在 rkllm_run() 内部被同步调用（不是异步线程），
 // 因此可以直接访问 DeepSeekInference 对象的成员，无需额外线程同步。
 // ============================================================================
-static void raw_callback_(void* result, void* userdata, int state)
+void raw_callback_(void* result, void* userdata, int state)
 {
     DeepSeekInference* self = static_cast<DeepSeekInference*>(userdata);
     if (!self) return;

@@ -254,3 +254,36 @@
 **解决**: `lidar_camera_fusion.h` 和 `lidar_target_tracker.h` 的 `kMaxLidarPoints` 从 540 同步更新为 1200。三个组件（lslidarer / fusion / tracker）共用同一个点容量常量，任意一方改动必须同步。
 
 5. **YOLO 检测到但 LiDAR 看不到的目标无法跟踪** — 单线雷达扫描面有限，超出扫描面的目标即使 YOLO 检测到也无法形成 LiDAR cluster。
+
+---
+
+## 22. bbox_claim 跨相机投影导致 cam0 簇被 cam1 bbox 误认领
+
+**现象**: `[BboxClaim] cam1 bbox[0] -> ci=8 dist=1.46m`，但 ci=8 质心 pos(-0.43,-1.20) 在 cam0 视角里，不在 USB 相机（cam1）视野内。cam1 正确的簇反而没被认领。同时 OSD 点云投影 cam1 bbox 点数为 0。
+
+**原因**: `bbox_claim_()` 中，对每个簇用**所有相机配置**投影，然后匹配**所有 bbox**（不分相机来源）。cam1 外参不准，但 cam0 外参准确，cam0 视角的簇用 cam0 投影后可能落入 cam1 bbox → 误认领。cam1 自己的正确簇因外参不准投影偏移而落选。
+
+**解决**: 
+- 在 `update()` 中传入 `bboxCamIdx` 数组，记录每个 bbox 的来源相机
+- `bbox_claim_()` 投影循环中添加 `if (bboxCamIdx_ && bboxCamIdx_[bb] != cc) continue;`，确保 bbox 只匹配同相机的投影。补选循环同样处理
+- 修复了 `lidar_camera_fusion_thread.cpp` 中构建 `allBboxes` 时同步构建 `bboxCamIdx`
+
+---
+
+## 23. bbox_claim 评分公式导致近距簇被远距簇"偷走"bbox
+
+**现象**: 人和椅子一前一后时（人近椅子远），椅子簇质心恰好投影在 bbox 内得分高，人的簇因投影稍偏得分低，导致椅子被跟踪、人被忽略。
+
+**原因**: 评分公式 `score = 1/(1+dist) × proximityFactor` 中，`proximityFactor`（像素邻近度）权重过大。远距簇质心若恰好投在 bbox 内（pixelDist=0），即使距离很远也能靠满分 proximityFactor 赢过近距簇。
+
+**解决**: 增加**深度优先仲裁**。在冲突解决后，比较每个 bbox 的得分最高簇和距离最近簇：若最近簇比得分最高簇近 ≥ 0.5m 且未被其他 bbox 认领，则强制选最近簇。同时追踪 `bboxClosestDist` / `bboxClosestCi` 数组辅助判定。日志标记 `[BboxClaim] depth-wins`。
+
+---
+
+## 24. 聚类可视化 orphan 判定用距离法误判
+
+**现象**: 网页俯视图上已认领的聚类圆频繁在"已认领"和"孤儿"之间跳变，有时跟踪目标旁边不显示聚类圈。深度优先仲裁（#23）后该现象加剧。
+
+**原因**: `update_snapshot_()` 中判定 cluster 是否被 bbox 认领用的是距离比较：`dx²+dy² < 0.01`（0.1m 阈值）。但 cluster 质心帧间跳动常超 0.1m，且深度仲裁后会换 `bboxCluster_[bb]` 指向，导致 bbox 匹配的新簇和历史记录旧簇的质心距离超阈值 → 误判为孤儿。
+
+**解决**: 改用 `clusterBboxMatch_` 索引法。`persist_clusters_()` 阶段已建立 `ci→hi`（当前簇索引→历史槽位）的精确映射。`update_snapshot_()` 直接查表：遍历所有 bbox，找到其认领的簇 ci，通过 `clusterBboxMatch_[ci]` 获取对应历史槽 hi，若 hi 匹配当前历史槽则为非孤儿。消除距离阈值依赖。
