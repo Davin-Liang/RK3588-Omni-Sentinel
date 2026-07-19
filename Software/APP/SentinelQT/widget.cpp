@@ -2189,6 +2189,10 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
         if (path == "/api/v1/backtrack/auto-status") return web_auto_backtrack_status_();
         if (path == "/api/v1/ai/report") return web_ai_report_();
+        if (path == "/api/v1/thermal/status") {
+            if (thermalCtrl_) return thermalCtrl_->status_json();
+            return R"({"ok":false,"error":"thermal not available"})";
+        }
         return R"({"ok":false,"error":"unknown GET path"})";
     }
 
@@ -3134,13 +3138,13 @@ std::string Widget::get_hw_json_() const
     if (thermalCtrl_) {
         j["temp"] = thermalCtrl_->currentTempC();
         j["thermalLevel"] = thermalCtrl_->currentLevel();
-        j["cpuBigFreq"] = thermalCtrl_->cpuBigFreq();
-        j["npuFreq"] = thermalCtrl_->npuFreq();
+        nlohmann::json tf;
+        tf["cpuLittle"] = thermalCtrl_->cpuLittleFreq();
+        tf["cpuBig"]    = thermalCtrl_->cpuBigFreq();
+        tf["npu"]       = thermalCtrl_->npuFreq();
+        j["thermalFreq"] = tf;
     } else {
         j["temp"] = -1;
-        j["thermalLevel"] = "";
-        j["cpuBigFreq"] = -1;
-        j["npuFreq"] = -1;
     }
 
     // RGA
