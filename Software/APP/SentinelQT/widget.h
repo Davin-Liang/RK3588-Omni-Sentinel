@@ -28,6 +28,8 @@ class TopDownView;
 class VirtualKeyboard;
 class WebServer;
 class AIReportWorker;
+class ThermalController;
+struct ThermalConfig;
 class QThread;
 class QTimer;
 class QTableWidget;
@@ -160,6 +162,10 @@ private:
     VisionEisConfig     visualEisCfg_[2];
     ImuOnlyEisConfig    imuOnlyEisCfg_[2];
     uint32_t            imuAssistWindowMs_ = 200;
+
+    // ---- Thermal ----
+    ThermalConfig         thermalCfg_;
+    ThermalController*    thermalCtrl_ = nullptr;
 
     // ---- AI 分析 ----
     AIReportWorker*     aiReportWorker_;

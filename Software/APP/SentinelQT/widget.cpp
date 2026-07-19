@@ -14,6 +14,7 @@
 #include "nvme_worker.h"
 #include "NVMeDataManager.h"
 #include "ai_report_worker.h"
+#include "thermal_controller.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -266,6 +267,8 @@ Widget::Widget(QWidget *parent)
     ui->setupUi(this);
 
     load_config_();
+
+    thermalCtrl_ = new (std::nothrow) ThermalController(thermalCfg_);
 
     // Resolution combo — CAM0
     int res0 = recordResolution_[0];
@@ -577,6 +580,8 @@ Widget::~Widget()
     }
     delete streamer_;
     deinit_eis_();
+    delete thermalCtrl_;
+    thermalCtrl_ = nullptr;
     delete visioner_;
     delete ui;
 }
@@ -717,6 +722,33 @@ void Widget::load_config_()
             init_eis_();
         }
     }
+
+    // ---- Thermal ----
+    thermalCfg_.enabled       = config_.value("Thermal/enabled", true).toBool();
+    thermalCfg_.intervalSec   = config_.value("Thermal/intervalSec", 2).toInt();
+    thermalCfg_.restoreOnExit = config_.value("Thermal/restoreOnExit", true).toBool();
+
+    thermalCfg_.warmThreshold = config_.value("Thermal/warmThreshold", 65).toInt();
+    thermalCfg_.warmRecover   = config_.value("Thermal/warmRecover", 60).toInt();
+    thermalCfg_.hotThreshold  = config_.value("Thermal/hotThreshold", 75).toInt();
+    thermalCfg_.hotRecover    = config_.value("Thermal/hotRecover", 70).toInt();
+    thermalCfg_.critThreshold = config_.value("Thermal/critThreshold", 85).toInt();
+    thermalCfg_.critRecover   = config_.value("Thermal/critRecover", 80).toInt();
+
+    thermalCfg_.cpuBigNormal   = config_.value("Thermal/cpuBigNormal",   2304000).toInt();
+    thermalCfg_.cpuBigWarm     = config_.value("Thermal/cpuBigWarm",     1800000).toInt();
+    thermalCfg_.cpuBigHot      = config_.value("Thermal/cpuBigHot",      1200000).toInt();
+    thermalCfg_.cpuBigCritical = config_.value("Thermal/cpuBigCritical", 800000).toInt();
+
+    thermalCfg_.cpuLittleNormal   = config_.value("Thermal/cpuLittleNormal",   1800000).toInt();
+    thermalCfg_.cpuLittleWarm     = config_.value("Thermal/cpuLittleWarm",     1400000).toInt();
+    thermalCfg_.cpuLittleHot      = config_.value("Thermal/cpuLittleHot",      1000000).toInt();
+    thermalCfg_.cpuLittleCritical = config_.value("Thermal/cpuLittleCritical", 600000).toInt();
+
+    thermalCfg_.npuNormal   = config_.value("Thermal/npuNormal",   1000000000).toInt();
+    thermalCfg_.npuWarm     = config_.value("Thermal/npuWarm",      800000000).toInt();
+    thermalCfg_.npuHot      = config_.value("Thermal/npuHot",       600000000).toInt();
+    thermalCfg_.npuCritical = config_.value("Thermal/npuCritical",  300000000).toInt();
 }
 
 // ---- Camera init ----
@@ -1057,27 +1089,43 @@ void Widget::update_hw_usage_()
         fclose(fp);
     }
 
-    fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
-    if (fp) {
-        int raw;
-        if (fscanf(fp, "%d", &raw) == 1) tempC = raw / 1000;
-        fclose(fp);
+    // Temperature and level from ThermalController
+    if (thermalCtrl_) {
+        thermalCtrl_->tick();
     }
 
+    tempC = thermalCtrl_ ? thermalCtrl_->currentTempC() : -1;
+    const char* level = thermalCtrl_ ? thermalCtrl_->currentLevel() : "";
+    int cpuBigKHz = thermalCtrl_ ? thermalCtrl_->cpuBigFreq() : -1;
+    int npuHz = thermalCtrl_ ? thermalCtrl_->npuFreq() : -1;
+
     QString text;
+    // 温度 + 等级
     text += tempC >= 0 ? QString("%1°C").arg(tempC) : "--°C";
-    text += "  ";
-    text += cpuUsage >= 0 ? QString("CPU%1").arg(cpuUsage, 3) : "CPU --";
-    text += "  ";
+    if (level && level[0] != '\0') {
+        text += QString(" %1").arg(level);
+    }
+    text += " ";
+    // CPU
+    text += cpuUsage >= 0 ? QString("CPU%1%").arg(cpuUsage, 3) : "CPU --";
+    if (cpuBigKHz > 0) {
+        text += QString(" %1G").arg(cpuBigKHz / 1000000.0, 0, 'f', 1);
+    }
+    text += " ";
+    // RGA
     text += QString("RGA%1/%2/%3")
                 .arg(rgaCores[0] >= 0 ? QString::number(rgaCores[0]) : "-")
                 .arg(rgaCores[1] >= 0 ? QString::number(rgaCores[1]) : "-")
                 .arg(rgaCores[2] >= 0 ? QString::number(rgaCores[2]) : "-");
-    text += "  ";
+    text += " ";
+    // NPU
     text += QString("NPU%1/%2/%3")
                 .arg(npuCores[0] >= 0 ? QString::number(npuCores[0]) : "-")
                 .arg(npuCores[1] >= 0 ? QString::number(npuCores[1]) : "-")
                 .arg(npuCores[2] >= 0 ? QString::number(npuCores[2]) : "-");
+    if (npuHz > 0) {
+        text += QString(" %1G").arg(npuHz / 1e9, 0, 'f', 1);
+    }
 
     ui->hwLabel->setText(text);
 
@@ -3082,15 +3130,17 @@ std::string Widget::get_hw_json_() const
         j["cpu"] = -1;
     }
 
-    // Temperature
-    fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
-    if (fp) {
-        int raw;
-        if (fscanf(fp, "%d", &raw) == 1) j["temp"] = raw / 1000;
-        else j["temp"] = -1;
-        fclose(fp);
+    // Temperature and level from ThermalController
+    if (thermalCtrl_) {
+        j["temp"] = thermalCtrl_->currentTempC();
+        j["thermalLevel"] = thermalCtrl_->currentLevel();
+        j["cpuBigFreq"] = thermalCtrl_->cpuBigFreq();
+        j["npuFreq"] = thermalCtrl_->npuFreq();
     } else {
         j["temp"] = -1;
+        j["thermalLevel"] = "";
+        j["cpuBigFreq"] = -1;
+        j["npuFreq"] = -1;
     }
 
     // RGA
