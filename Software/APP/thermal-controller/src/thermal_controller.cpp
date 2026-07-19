@@ -145,16 +145,17 @@ void ThermalController::evaluate_and_apply_()
 
     if (!cfg_.enabled) return;  // 只监控不控制
 
-    // 等级变化时写入新频率上限
-    if (level_ != prevLevel) {
-        fprintf(stderr, "[Thermal] level change: %s -> %s (T=%d°C)\n",
-                kLevelNames[prevLevel], kLevelNames[level_], t);
+    // 只在等级变化（或首次）时写入频率上限
+    if (level_ != prevLevel || tickCount_ == cfg_.intervalSec) {
+        if (level_ != prevLevel) {
+            fprintf(stderr, "[Thermal] level change: %s -> %s (T=%d°C)\\n",
+                    kLevelNames[prevLevel], kLevelNames[level_], t);
+        }
+        write_max_freq_(kPolicy0MaxFreq, get_level_freq_(cfg_.cpuLittleNormal, cfg_.cpuLittleWarm, cfg_.cpuLittleHot, cfg_.cpuLittleCritical), "CPU little");
+        write_max_freq_(kPolicy4MaxFreq, get_level_freq_(cfg_.cpuBigNormal, cfg_.cpuBigWarm, cfg_.cpuBigHot, cfg_.cpuBigCritical), "CPU big(p4)");
+        write_max_freq_(kPolicy6MaxFreq, get_level_freq_(cfg_.cpuBigNormal, cfg_.cpuBigWarm, cfg_.cpuBigHot, cfg_.cpuBigCritical), "CPU big(p6)");
+        write_max_freq_(kNpuMaxFreq,     get_level_freq_(cfg_.npuNormal, cfg_.npuWarm, cfg_.npuHot, cfg_.npuCritical), "NPU");
     }
-
-    write_max_freq_(kPolicy0MaxFreq, get_level_freq_(cfg_.cpuLittleNormal, cfg_.cpuLittleWarm, cfg_.cpuLittleHot, cfg_.cpuLittleCritical), "CPU little");
-    write_max_freq_(kPolicy4MaxFreq, get_level_freq_(cfg_.cpuBigNormal, cfg_.cpuBigWarm, cfg_.cpuBigHot, cfg_.cpuBigCritical), "CPU big(p4)");
-    write_max_freq_(kPolicy6MaxFreq, get_level_freq_(cfg_.cpuBigNormal, cfg_.cpuBigWarm, cfg_.cpuBigHot, cfg_.cpuBigCritical), "CPU big(p6)");
-    write_max_freq_(kNpuMaxFreq,     get_level_freq_(cfg_.npuNormal, cfg_.npuWarm, cfg_.npuHot, cfg_.npuCritical), "NPU");
 }
 
 void ThermalController::tick()

@@ -21,12 +21,12 @@ struct ThermalConfig {
     int cpuBigNormal   = 2304000;
     int cpuBigWarm     = 1800000;
     int cpuBigHot      = 1200000;
-    int cpuBigCritical = 800000;
+    int cpuBigCritical = 816000;
 
     // CPU A55 各等级频率上限 (kHz)
     int cpuLittleNormal   = 1800000;
-    int cpuLittleWarm     = 1400000;
-    int cpuLittleHot      = 1000000;
+    int cpuLittleWarm     = 1416000;
+    int cpuLittleHot      = 1008000;
     int cpuLittleCritical = 600000;
 
     // NPU 各等级频率上限 (Hz)
