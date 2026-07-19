@@ -230,6 +230,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
         <span class="fusion-status" id="fusionHdrStatus">关闭</span>
         <span class="spacer"></span>
         <button class="btn" id="btnFusionToggle" style="padding:5px 14px">启用融合</button>
+        <button class="btn btn-on" id="btnClusterVis" style="padding:5px 14px">隐藏聚类</button>
       </div>
       <div class="fusion-body" style="flex:1">
         <div class="fusion-canvas-wrap" id="fusionCanvasWrap"><canvas id="fusionCanvas"></canvas></div>
@@ -325,7 +326,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
 let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
-let trackingTargets=[],trackingClusters=[],radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
+let trackingTargets=[],trackingClusters=[],showClusters=true,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
 function connectWS(){
@@ -464,6 +465,7 @@ function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('
 
 // ===== Fusion =====
 document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop');fusionEnabled=!1;trackingTargets=[];trackingClusters=[];updateFusionStatus();drawRadar()}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
+document.getElementById('btnClusterVis').onclick=function(){showClusters=!showClusters;this.textContent=showClusters?'隐藏聚类':'显示聚类';this.className='btn '+(showClusters?'btn-on':'btn-off');drawRadar()};
 function updateFusionStatus(){const f=trackingTargets.filter(t=>t.state==='FusionTracking').length,p=trackingTargets.filter(t=>t.state==='PureRadarTracking').length,l=trackingTargets.filter(t=>t.state==='Lost').length,w=trackingTargets.filter(t=>t.warningActive).length;document.getElementById('fusionHdrStatus').textContent='目标:'+trackingTargets.length+' 融合:'+f+' 纯雷达:'+p+' 丢失:'+l+' 告警:'+w+' | '+(fusionEnabled?'运行中':'关闭')}
 
 // ===== Radar =====
@@ -482,7 +484,7 @@ function drawRadar(){
   // Targets
   trackingTargets.forEach(t=>{const px=cx+t.posY*scale,py=cy-t.posX*scale;if(px<0||px>w||py<0||py>h)return;let fill,border;switch(t.state){case'FusionTracking':fill='#3fb950';border='#2ea043';break;case'PureRadarTracking':fill='#d29922';border='#b08800';break;case'Tentative':fill='#4493f8';border='#3572c8';break;case'Lost':fill='#da3633';border='#b02624';break;default:fill='#8b949e';border='#6e7681'}if(t.warningActive){ctx.beginPath();ctx.arc(px,py,12+4*Math.sin(Date.now()/200),0,Math.PI*2);ctx.strokeStyle='rgba(218,54,51,0.6)';ctx.lineWidth=2;ctx.stroke()}ctx.beginPath();ctx.arc(px,py,7,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=border;ctx.lineWidth=1.5;ctx.stroke();if(Math.abs(t.velX)>0.01||Math.abs(t.velY)>0.01){const speed=Math.sqrt(t.velX*t.velX+t.velY*t.velY),len=Math.min(speed*8,22),vx=-t.velY/speed*len,vy=-t.velX/speed*len,ex=px+vx,ey=py+vy;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(ex,ey);ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.stroke();const a=Math.atan2(vy,vx);ctx.beginPath();ctx.moveTo(ex,ey);ctx.lineTo(ex-6*Math.cos(a-0.5),ey-6*Math.sin(a-0.5));ctx.lineTo(ex-6*Math.cos(a+0.5),ey-6*Math.sin(a+0.5));ctx.closePath();ctx.fillStyle='rgba(255,255,255,0.8)';ctx.fill()}ctx.fillStyle='#fff';ctx.font='bold 13px Arial';ctx.fillText(t.id,px+9,py-4);ctx.fillText(t.distanceMeters.toFixed(1)+'m',px+9,py+8)});
   // Cluster circles
-  if(trackingClusters&&trackingClusters.length>0){trackingClusters.forEach(c=>{const cpx=cx+c.cy*scale,cpy=cy-c.cx*scale,cr=c.radius*scale;if(cpx<0||cpx>w||cpy<0||cpy>h)return;const a=0.25;if(c.isOrphan){ctx.fillStyle='rgba(68,147,248,'+a+')';ctx.strokeStyle='rgba(68,147,248,0.5)'}else{ctx.fillStyle='rgba(63,185,80,'+a+')';ctx.strokeStyle='rgba(63,185,80,0.5)'}ctx.beginPath();ctx.arc(cpx,cpy,Math.min(cr,60),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='rgba(255,255,255,0.6)';ctx.font='11px Arial';ctx.fillText(c.pointCount,cpx+cr+2,cpy+3)})}
+  if(showClusters&&trackingClusters&&trackingClusters.length>0){trackingClusters.forEach(c=>{const cpx=cx+c.cy*scale,cpy=cy-c.cx*scale,cr=c.radius*scale;if(cpx<0||cpx>w||cpy<0||cpy>h)return;const a=0.25;if(c.isOrphan){ctx.fillStyle='rgba(68,147,248,'+a+')';ctx.strokeStyle='rgba(68,147,248,0.5)'}else{ctx.fillStyle='rgba(63,185,80,'+a+')';ctx.strokeStyle='rgba(63,185,80,0.5)'}ctx.beginPath();ctx.arc(cpx,cpy,Math.min(cr,60),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='rgba(255,255,255,0.6)';ctx.font='11px Arial';ctx.fillText(c.pointCount,cpx+cr+2,cpy+3)})}
   // Legend
   const lx=w-125,ly=h-65;ctx.fillStyle='rgba(26,26,46,0.88)';ctx.beginPath();ctx.roundRect(lx-5,ly-5,130,70,6);ctx.fill();[['视觉雷达融合','#3fb950'],['纯雷达跟踪','#d29922'],['待确认','#4493f8'],['跟踪丢失中','#da3633']].forEach(([l,c],i)=>{const y=ly+i*16;ctx.beginPath();ctx.arc(lx+4,y+4,4,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();ctx.fillStyle='#e6edf3';ctx.font='13px Arial';ctx.fillText(l,lx+14,y+7)})
 }
