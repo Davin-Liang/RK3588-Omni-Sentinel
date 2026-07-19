@@ -42,7 +42,7 @@ CPU governor 保持 `schedutil`，NPU governor 保持 `rknpu_ondemand`。温控�
 Normal:  T < warmThreshold           → 全速 (max = 硬件上限)
 Warm:    T > warmThreshold  → 降频    → T < warmRecover  → 恢复
 Hot:     T > hotThreshold   → 降频    → T < hotRecover   → 恢复
-Critical: T > critThreshold → 极限降频 → T < critThreshold - 5°C → 恢复
+Critical: T > critThreshold → 极限降频 → T < critRecover → 恢复
            ↑ 同时触发内核 thermal trip point (soc-thermal: 75/85°C) 硬保底
 ```
 
@@ -54,7 +54,8 @@ Critical: T > critThreshold → 极限降频 → T < critThreshold - 5°C → �
 | `warmRecover` | 60°C | 退出 Warm 的温度（回滞 5°C） |
 | `hotThreshold` | 75°C | 进入 Hot 的温度 |
 | `hotRecover` | 70°C | 退出 Hot 的温度（回滞 5°C） |
-| `critThreshold` | 85°C | 进入 Critical 的温度（退出 80°C，回滞 5°C） |
+| `critThreshold` | 85°C | 进入 Critical 的温度 |
+| `critRecover` | 80°C | 退出 Critical 的温度（回滞 5°C） |
 
 ### 默认频率上限
 
@@ -102,6 +103,7 @@ struct ThermalConfig {
     int hotThreshold  = 75;
     int hotRecover    = 70;
     int critThreshold = 85;
+    int critRecover   = 80;
 
     // CPU A76 各等级频率上限 (kHz)
     int cpuBigNormal   = 2304000;
@@ -142,7 +144,14 @@ public:
 
 private:
     ThermalConfig cfg_;
-    // 内部实现：sysfs 读写 + 策略评估
+    int  tickCount_ = 0;
+    int  tempC_ = -1;
+    int  level_ = 0;          // 0=Normal, 1=Warm, 2=Hot, 3=Critical
+    int  cpuBigFreq_ = -1;    // kHz, 缓存 policy4 cur_freq
+    int  npuFreq_ = -1;       // Hz, 缓存 npu cur_freq
+
+    void read_sensors_();
+    void evaluate_and_apply_();
 };
 ```
 
@@ -170,25 +179,53 @@ private:
 
 ```
 现:  45°C  CPU 30  RGA 5/2/1  NPU 80/75/60
-新:  45°C  Warm  CPU 30% 1.8G  RGA 5/2/1  NPU 80% 0.8G
+新:  45°C  Warm  CPU 30% 1.8G  RGA 5/2/1  NPU 80/75/60 0.8G
 ```
 
 - 温度后追加策略等级（Normal/Warm/Hot/Critical），若 280px 吃紧则缩写为 N/W/H/C
 - CPU 利用率后追加当前大核频率（简写 `1.8G`）
-- NPU 利用率后追加当前频率（简写 `0.8G`）
+- NPU 利用率后追加当前频率（简写 `0.8G`），加 `%`
 - 各字段间用一个空格分隔（原来用两个），节省 4px 宽度
+
+### 数据源分工
+
+温控类和 QT 各自负责不同的 sysfs 读取，避免同一秒内重复读同一个文件：
+
+| 数据 | 读取者 | 原因 |
+|------|--------|------|
+| 温度 (`thermal_zone0/temp`) | **ThermalController** `tick()` | 策略决策需要，缓存后 getter 取出 |
+| CPU 频率 (`policy4/cur_freq`) | **ThermalController** `tick()` | 策略需要感知当前频率，缓存后 getter 取出 |
+| NPU 频率 (`npu/cur_freq`) | **ThermalController** `tick()` | 同上 |
+| 策略等级 | **ThermalController** `tick()` | 策略评估产出 |
+| CPU 利用率 (`/proc/stat`) | QT `update_hw_usage_()` | 温控类不需要，QT 继续原有 delta 计算 |
+| RGA 利用率 (`rkrga/load`) | QT `update_hw_usage_()` | 温控类不需要 |
+| NPU 利用率 (`rknpu/load`) | QT `update_hw_usage_()` | 温控类不需要 |
+
+`tick()` 每次内置读取 temp + cur_freq（轻量 fopen/fscanf），无论是否执行策略评估。策略评估按 `intervalSec` 间隔执行，但缓存值每次 tick 都刷新。
 
 ### 定时器集成
 
 - 复用现有 `clockTimer_`（1 秒），`update_hw_usage_()` 中调用 `thermalCtrl_->tick()`
 - `tick()` 内部用间隔计数，每 `intervalSec` 秒执行一次策略评估和频率写入
-- 频率/温度采集每次 tick 都做（轻量 `fopen`/`fscanf`）
+- 温度和频率采集每次 tick 都做（轻量 `fopen`/`fscanf`），getter 返回缓存值
 
 ### 生命周期
 
-- **构造**: `Widget` 构造时读取 `config.ini [Thermal]`，若 `enabled=true` 则创建 `ThermalController`
+- **构造**: `Widget` 构造时读取 `config.ini [Thermal]`，若 `enabled=true` 则创建 `ThermalController`。构造函数内立即将所有 `max_freq` 写回硬件上限（Normal 值），确保启动时从干净的全速状态开始（即使上次异常退出未恢复也能兜底）
 - **运行**: `update_hw_usage_()` 中调用 `tick()`，标题栏显示
 - **析构**: `ThermalController` 析构时若 `restoreOnExit=true`，将所有 `max_freq` 写回硬件上限值，确保程序退出后系统恢复全速
+
+### enabled=false 行为
+
+温控关闭时，ThermalController 仍读 sysfs 取温度和频率（标题栏正常显示），但跳过策略评估和频率写入：
+
+| | 读温度/频率 | 标题栏显示 | 写频率上限 |
+|------|:-:|:-:|:-:|
+| `enabled=true` | ✅ | ✅ | ✅ |
+| `enabled=false` | ✅ | ✅ | ❌ |
+| 不创建实例 | ❌ | 保持旧格式 | ❌ |
+
+`enabled=false` 时等级字段不显示（没有策略就没有等级），频率照常显示实际值。
 
 ### REST API（只读）
 
@@ -234,6 +271,7 @@ warmRecover=60
 hotThreshold=75
 hotRecover=70
 critThreshold=85
+critRecover=80
 
 # CPU A76 (big core, policy4 + policy6) 各等级频率上限 (kHz)
 cpuBigNormal=2304000
@@ -257,7 +295,8 @@ npuCritical=300000000
 ### 配置读取与校验
 
 - 所有参数通过 INI 文件解析，带默认值兜底
-- `warmThreshold < hotThreshold < critThreshold` 做合理性校验，颠倒则打日志并使用默认值
+- 温度阈值需满足 `warmRecover < warmThreshold < hotRecover < hotThreshold < critRecover < critThreshold`，否则打日志并使用默认值
+- 各等级频率值满足 `Normal ≥ Warm ≥ Hot ≥ Critical`（非递增则打日志使用默认值）
 - 频率值校验在可用档位范围内，超出则 clamp 到最近有效值
 - 校验失败不阻止程序启动，打印 stderr 警告后使用默认值
 
