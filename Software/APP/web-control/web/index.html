@@ -162,9 +162,12 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
   <div id="logo">RK3588 Omni Sentinel</div>
   <div id="hwStats">
     <span>🌡 <span class="val" id="hwTemp">--°C</span></span>
+    <span class="val" id="hwLevel" style="display:none"></span>
     <span>CPU <span class="val" id="hwCpu">--</span>%</span>
+    <span class="val" id="hwCpuFreq" style="display:none"></span>
     <span>RGA <span class="val" id="hwRga">-/-/-</span></span>
     <span>NPU <span class="val" id="hwNpu">-/-/-</span></span>
+    <span class="val" id="hwNpuFreq" style="display:none"></span>
   </div>
   <div id="clock"></div>
   <button class="btn btn-accent" id="themeBtn" title="切换配色">🎨</button>
@@ -362,7 +365,15 @@ function dismissAlert(id){
 
 // ===== UI Update =====
 function updateUI(data){
-  if(data.hw&&data.hw.ok){const h=data.hw;document.getElementById('hwTemp').textContent=(h.temp>=0?h.temp:'--')+'°C';document.getElementById('hwCpu').textContent=h.cpu>=0?h.cpu:'--';if(h.rga&&h.rga.length)document.getElementById('hwRga').textContent=h.rga.map(v=>v>=0?v:'-').join('/');if(h.npu&&h.npu.length)document.getElementById('hwNpu').textContent=h.npu.map(v=>v>=0?v:'-').join('/')}
+  if(data.hw&&data.hw.ok){const h=data.hw;document.getElementById('hwTemp').textContent=(h.temp>=0?h.temp:'--')+'°C';document.getElementById('hwCpu').textContent=h.cpu>=0?h.cpu:'--';if(h.rga&&h.rga.length)document.getElementById('hwRga').textContent=h.rga.map(v=>v>=0?v:'-').join('/');if(h.npu&&h.npu.length)document.getElementById('hwNpu').textContent=h.npu.map(v=>v>=0?v:'-').join('/');
+    // Thermal level
+    const lvEl=document.getElementById('hwLevel');if(h.thermalLevel){lvEl.textContent=h.thermalLevel;lvEl.style.display=''}else{lvEl.style.display='none'}
+    // Thermal freq
+    if(h.thermalFreq){const tf=h.thermalFreq;
+      const cfEl=document.getElementById('hwCpuFreq');if(tf.cpuBig>0){cfEl.textContent=(tf.cpuBig/1e6).toFixed(1)+'G';cfEl.style.display=''}else{cfEl.style.display='none'}
+      const nfEl=document.getElementById('hwNpuFreq');if(tf.npu>0){nfEl.textContent=(tf.npu/1e9).toFixed(1)+'G';nfEl.style.display=''}else{nfEl.style.display='none'}
+    }
+  }
 
   for(let i=0;i<2;i++){const d=data['cam'+i];if(!d)continue;
     Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
