@@ -34,9 +34,20 @@ ThermalController::ThermalController(const ThermalConfig& cfg)
         cfg_ = ThermalConfig{};  // 回退默认值
     }
     if (cfg_.enabled) {
-        startup_restore_();
-        fprintf(stderr, "[Thermal] started, interval=%ds\n", cfg_.intervalSec);
-    } else {
+        FILE* probe = fopen(kPolicy0MaxFreq, "w");
+        if (!probe) {
+            fprintf(stderr, "[Thermal] sysfs not writable (%s), disabling\n",
+                    kPolicy0MaxFreq);
+            cfg_.enabled = false;
+        } else {
+            fclose(probe);
+            startup_restore_();
+        }
+        if (cfg_.enabled) {
+            fprintf(stderr, "[Thermal] started, interval=%ds\n", cfg_.intervalSec);
+        }
+    }
+    if (!cfg_.enabled) {
         fprintf(stderr, "[Thermal] disabled — monitoring only\n");
     }
 }
