@@ -107,6 +107,11 @@ if(NOT TARGET deepseek_ai_lib)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Deepseek ${CMAKE_CURRENT_BINARY_DIR}/deepseek_build)
 endif()
 
+# Thermal Controller
+if(NOT TARGET thermal_controller_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../thermal-controller ${CMAKE_CURRENT_BINARY_DIR}/thermal_build)
+endif()
+
 find_package(Threads REQUIRED)
 
 set(TS_FILES SentinelQT_zh_CN.ts)
@@ -139,6 +144,7 @@ target_include_directories(SentinelQT PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../NVMe-SSD/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../Deepseek/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../thermal-controller/include
     ${LIBRGA_INCLUDES}
 )
 
@@ -157,6 +163,7 @@ target_link_libraries(SentinelQT PRIVATE
     icm45686_eis_lib
     icm45686_user_lib
     nvme_data_manager_lib
+    thermal_controller_lib
 )
 
 if(Qt5LinguistTools_FOUND)
