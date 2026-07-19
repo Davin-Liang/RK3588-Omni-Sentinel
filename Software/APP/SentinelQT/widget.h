@@ -28,8 +28,7 @@ class TopDownView;
 class VirtualKeyboard;
 class WebServer;
 class AIReportWorker;
-class ThermalController;
-struct ThermalConfig;
+#include "thermal_controller.h"
 class QThread;
 class QTimer;
 class QTableWidget;
