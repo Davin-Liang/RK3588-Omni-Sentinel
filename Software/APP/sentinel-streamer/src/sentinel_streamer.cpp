@@ -79,6 +79,12 @@ struct StreamerContext {
     // 录像帧环形缓冲池
     RecordBufferPool* recordPool;
 
+    // 预分配编解码帧/包，避免 encode_and_mux 每次 malloc/free（推理期间 DDR 拥堵 OOM）
+    AVFrame*   encFrame{nullptr};    // 复用编码帧（数据缓存在内部 buffer 中）
+    AVPacket*  encPkt{nullptr};     // 复用编码包
+    int        encFrameW{0};         // encFrame 当前宽度（检测分辨率变化）
+    int        encFrameH{0};         // encFrame 当前高度
+
     // EIS 防抖参数
     int eisMargin;           ///< 裁切边距（像素），默认 32
 
@@ -347,6 +353,10 @@ static void stream_thread_func_(StreamerContext* ctx)
 {
     fprintf(stderr, "[SentinelStreamer] cam=%d stream thread started\n", ctx->camNum);
 
+    // 预分配编码帧/包，避免每帧 av_frame_alloc/av_packet_alloc 的 malloc/free
+    // 在 LLM 推理期间 DDR 拥堵时，这些高频 alloc/free 会堆积导致 VmRSS 假性冲高 OOM
+    AVPacket* encPkt = av_packet_alloc();
+
     uint64_t firstTsUs = ctx->baselineTsUs;
     uint64_t lastLogTs = 0;
     int frameCount = 0;
@@ -454,15 +464,17 @@ static void stream_thread_func_(StreamerContext* ctx)
         bool srcAlready720p = (origBuf->width == 1280 && origBuf->height == 720);
         if (ctx->recordEnabled.load(std::memory_order_acquire) && ctx->recordEncCtx) {
             if (ctx->recordResolution == RecordResolution::RES_1080P) {
+                ensure_enc_frame(&ctx->encFrame, origBuf->width, origBuf->height);
                 encode_and_mux(ctx->recordEncCtx,
                                origBuf->virtAddr, origBuf->width, origBuf->height,
-                               recPts,
-                               nullptr, ctx->mp4Ctx);
+                               recPts, nullptr, ctx->mp4Ctx,
+                               ctx->encFrame, encPkt);
             } else if (ctx->recordResolution == RecordResolution::RES_720P && srcAlready720p) {
+                ensure_enc_frame(&ctx->encFrame, origBuf->width, origBuf->height);
                 encode_and_mux(ctx->recordEncCtx,
                                origBuf->virtAddr, origBuf->width, origBuf->height,
-                               recPts,
-                               nullptr, ctx->mp4Ctx);
+                               recPts, nullptr, ctx->mp4Ctx,
+                               ctx->encFrame, encPkt);
             }
         }
 
@@ -489,10 +501,11 @@ static void stream_thread_func_(StreamerContext* ctx)
                     draw_lidar_points_(scaleBuf->virtAddr, 1280, 720, srcW, srcH, lidarBoxes, 0, 0);
                 }
             }
+            ensure_enc_frame(&ctx->encFrame, 1280, 720);
             encode_and_mux(ctx->streamEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
-                           pts,
-                           ctx->ffmpegPipe, nullptr);
+                           pts, ctx->ffmpegPipe, nullptr,
+                           ctx->encFrame, encPkt);
         }
 
         // ----------------------------------------------------------------
@@ -503,19 +516,22 @@ static void stream_thread_func_(StreamerContext* ctx)
             !srcAlready720p &&
             ctx->recordEncCtx)
         {
+            // encFrame 在步骤 5a 已 ensure 为 720p，直接复用
             encode_and_mux(ctx->recordEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
-                           recPts,
-                           nullptr, ctx->mp4Ctx);
+                           recPts, nullptr, ctx->mp4Ctx,
+                           ctx->encFrame, encPkt);
         }
 
         // ----------------------------------------------------------------
         // 步骤 5c: EIS 录制调试 — 无防抖第二路编码
         // ----------------------------------------------------------------
         if (scaleBufNoEis && ctx->recordEncCtxNoEis && ctx->mp4CtxNoEis) {
+            // 复用步骤 5a 已 ensure 的 720p encFrame
             encode_and_mux(ctx->recordEncCtxNoEis,
                            scaleBufNoEis->virtAddr, 1280, 720,
-                           recPts, nullptr, ctx->mp4CtxNoEis);
+                           recPts, nullptr, ctx->mp4CtxNoEis,
+                           ctx->encFrame, encPkt);
         }
 
         if (scaleBufNoEis) {
@@ -552,6 +568,9 @@ static void stream_thread_func_(StreamerContext* ctx)
             lastLogTs = tsUs;
         }
     }
+
+    // 清理预分配的编码帧/包
+    av_packet_free(&encPkt);
 
     fprintf(stderr, "[SentinelStreamer] cam=%d stream thread stopped\n", ctx->camNum);
 }
@@ -660,6 +679,8 @@ bool SentinelStreamer::remove_camera(int camNum)
         delete ctx->recordPool;
         ctx->recordPool = nullptr;
     }
+
+    av_frame_free(&ctx->encFrame);
 
     delete ctx;
     contexts_[camNum] = nullptr;

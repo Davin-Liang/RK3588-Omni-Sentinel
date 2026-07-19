@@ -20,6 +20,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QTextStream>
 #include <chrono>
 #include <thread>
 #include <QThread>
@@ -476,7 +477,7 @@ Widget::Widget(QWidget *parent)
     ui->aiControlBar->setMaximumHeight(0);
 
     aiAutoTimer_      = nullptr;
-    aiAutoIntervalSec_ = 300;
+    aiAutoIntervalSec_ = 1800;
     aiCountdownSec_   = -1;
     aiAutoEnabled_    = false;
     aiWorkerReady_.store(false);
@@ -488,7 +489,7 @@ Widget::Widget(QWidget *parent)
         aiCfg.modelPath = config_.value("AI/modelPath",
             "/root/Deepseek/Llama-3.2-1B-Instruct_W8A8_rk3588.rkllm").toString().toStdString();
         aiCfg.maxNewTokens  = config_.value("AI/maxNewTokens",  512).toInt();
-        aiCfg.maxContextLen = config_.value("AI/maxContextLen", 2048).toInt();
+        aiCfg.maxContextLen = config_.value("AI/maxContextLen", 512).toInt();
         aiCfg.temperature   = config_.value("AI/temperature",   0.7f).toFloat();
         aiReportWorker_ = new AIReportWorker();
         aiReportWorker_->setConfig(aiCfg);
@@ -496,9 +497,11 @@ Widget::Widget(QWidget *parent)
         aiReportWorker_->moveToThread(aiReportThread_);
         connect(aiReportWorker_, &AIReportWorker::reportReady, this, &Widget::on_ai_report_ready_);
         connect(aiReportWorker_, &AIReportWorker::error, this, [this](const QString& msg) {
-            aiReportText_->setVisible(true);
-            aiReportText_->setHtml(
-                QString("<html><body style='color:#f85149;'>AI 错误: %1</body></html>").arg(msg));
+            if (aiReportPageText_) {
+                aiReportPageText_->setHtml(
+                    QString::fromUtf8("<html><body style='color:#f85149; font-size:14px;'>"
+                    "<b>AI 错误</b><br><br>%1</body></html>").arg(msg));
+            }
         });
         connect(aiReportThread_, &QThread::started, aiReportWorker_, &AIReportWorker::start);
         aiReportThread_->start();
@@ -4102,9 +4105,11 @@ void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
 void Widget::on_btn_ai_analysis_()
 {
     if (!aiReportWorker_) {
-        aiReportText_->setVisible(true);
-        aiReportText_->setHtml(
-            QString::fromUtf8("<html><body style='color:#f85149;'>AI 模块未初始化</body></html>"));
+        if (aiReportPageText_) {
+            aiReportPageText_->setHtml(
+                QString::fromUtf8("<html><body style='color:#f85149; font-size:14px;'>"
+                "<b>AI 模块未初始化</b></body></html>"));
+        }
         return;
     }
 
@@ -4142,6 +4147,21 @@ void Widget::on_ai_report_ready_(const QString& report)
     fprintf(stderr, "========================================\n");
     fprintf(stderr, "%s\n", report.toUtf8().constData());
     fprintf(stderr, "========================================\n\n");
+
+    // 保存报告到文件（追加模式，带时间戳分隔）
+    if (!aiReportFile_.isEmpty()) {
+        QFile file(aiReportFile_);
+        if (file.open(QIODevice::Append | QIODevice::Text)) {
+            QTextStream out(&file);
+            out.setCodec("UTF-8");
+            out << "========================================\n";
+            out << "  AI 系统状态分析报告  "
+                << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+            out << "========================================\n";
+            out << report << "\n\n";
+            file.close();
+        }
+    }
 
     // 将报告中的换行转为 HTML，过滤 <think> 标签用灰色显示
     QString html = report;

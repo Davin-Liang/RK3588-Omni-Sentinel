@@ -24,6 +24,24 @@ AIReportWorker::~AIReportWorker() { stop(); }
 // ============================================================================
 void AIReportWorker::setConfig(const DeepSeekInference::Config& cfg) { config_ = cfg; }
 
+// 读取进程自身的 VmRSS（kB），用于诊断推理期间的内存增长
+static int read_vmrss_kb_()
+{
+    int vmrss = -1;
+    FILE* fp = fopen("/proc/self/status", "r");
+    if (fp) {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                sscanf(line + 6, "%d", &vmrss);
+                break;
+            }
+        }
+        fclose(fp);
+    }
+    return vmrss;
+}
+
 // ============================================================================
 // start() — Worker 线程的主入口（热加载模式）
 //
@@ -63,11 +81,19 @@ void AIReportWorker::start()
         if (pending_.load()) {
             fprintf(stderr, "[AIReportWorker] processing report request...\n");
 
+            int vmrssBefore = read_vmrss_kb_();
+            fprintf(stderr, "[AIReportWorker] VmRSS before inference: %d kB (%.0f MB)\n",
+                    vmrssBefore, vmrssBefore / 1024.0);
+
             QString prompt = buildPrompt_();
             std::string promptStr = prompt.toStdString();
             fprintf(stderr, "[AIReportWorker] prompt length: %zu chars\n", promptStr.size());
 
             std::string result = inference_.inferSync(promptStr, 60000);
+
+            int vmrssAfter = read_vmrss_kb_();
+            fprintf(stderr, "[AIReportWorker] VmRSS after inference: %d kB (%.0f MB), delta=%+d kB\n",
+                    vmrssAfter, vmrssAfter / 1024.0, vmrssAfter - vmrssBefore);
 
             if (result.empty()) {
                 fprintf(stderr, "[AIReportWorker] inference returned empty result\n");
@@ -76,6 +102,10 @@ void AIReportWorker::start()
                 fprintf(stderr, "[AIReportWorker] inference done, result length: %zu\n", result.size());
                 emit reportReady(QString::fromStdString(result));
             }
+
+            // 推理结束后等待 DDR 回收临时缓冲，避免多次推理间 VmRSS 假性堆积
+            fprintf(stderr, "[AIReportWorker] waiting 2s for DDR reclaim after inference...\n");
+            QThread::sleep(2);
 
             pending_.store(false);
         }
@@ -90,6 +120,10 @@ void AIReportWorker::start()
     fprintf(stderr, "[AIReportWorker] stopped\n");
 }
 
+// ============================================================================
+// stop() — 通知 Worker 线程退出
+// 析构时会先调 stop() 再 wait() join 线程，确保推理循环安全退出
+// ============================================================================
 // ============================================================================
 // stop() — 通知 Worker 线程退出
 // 析构时会先调 stop() 再 wait() join 线程，确保推理循环安全退出
