@@ -6,7 +6,7 @@
 |_| \_\_|\_\____/____/ \___/ \___/    \___/|_| |_| |_|_| |_|_|    |____/ \___|_| |_|\__|_|_| |_|\___|_|
 ```
 
-基于瑞芯微 **RK3588** 的边缘端多传感器融合平台。集成激光雷达驱动、相机视觉管线、NPU YOLO 推理、传感器融合跟踪、RTSP 推流录像（含 OSD 叠加）、IMU 电子防抖、嵌入式触控界面七大组件，全部脱离 ROS，以 C++14 静态库形式存在，通过 **DMA-BUF** 在 NPU / RGA / V4L2 硬件加速器之间实现零拷贝数据流转。
+基于瑞芯微 **RK3588** 的边缘端多传感器融合平台。集成激光雷达驱动、相机视觉管线、NPU YOLO 推理、传感器融合跟踪、RTSP 推流录像（含 OSD 叠加）、IMU 电子防抖、温控调频、嵌入式触控界面八大组件，全部脱离 ROS，以 C++14 静态库形式存在，通过 **DMA-BUF** 在 NPU / RGA / V4L2 硬件加速器之间实现零拷贝数据流转。
 
 ---
 
@@ -60,7 +60,8 @@
 | **SentinelYoloInfer** | `Software/APP/sentinel-yolo-infer/` | RKNN YOLOv8 NPU 推理，双队列输出（融合+OSD），DMA-BUF 零拷贝 | sentinel-visioner, rknpu2, lidar-camera-fusion (类型) |
 | **LidarCameraFusion** | `Software/APP/lidar-camera-fusion/` | 视觉-雷达数据融合，Alpha-Beta 多目标跟踪，四态生命周期管理 | sentinel-lslidarer (仅头文件) |
 | **SentinelStreamer** | `Software/APP/sentinel-streamer/` | RTSP 推流 + MP4 录像 + OSD 叠加，MPP 硬件编码 H.264，双编码器独立架构 | sentinel-visioner, librga, ffmpeg |
-| **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 推流/录像/暂停/OSD 控制 + 融合管理 | sentinel-visioner, sentinel-streamer, sentinel-yolo-infer, Qt5 |
+| **ThermalController** | `Software/APP/thermal-controller/` | RK3588 温控调频，4 级回滞策略，CPU 3簇 + NPU max_freq 上限调节，config.ini 配置 | 无外部依赖（仅 C++14 + POSIX） |
+| **SentinelQT** | `Software/APP/SentinelQT/` | Qt5 Widgets 嵌入式触控 HMI，双路预览 + 推流/录像/暂停/OSD 控制 + 融合管理 | sentinel-visioner, sentinel-streamer, sentinel-yolo-infer, thermal-controller, Qt5 |
 | **icm45686-eis-app-parameterized** | `Software/APP/icm45686-eis-app-parameterized/` | ICM45686 电子防抖（参数化版），ImuConfig/EisCameraConfig 双相机独立配置，平滑内置 Stabilizer，Web 热修改参数，录制双输出（防抖/未防抖对照） | 仅 libpthread + libm |
 | **DmaBufferPool** | `Software/APP/dma-buffer-pool/` | DMA 内存池，O(1) 空闲链表分配/归还 | librga, libdrm |
 
@@ -94,7 +95,8 @@ cd ../sentinel-visioner           && ./build.sh   # 视觉管线（依赖 dma-bu
 cd ../lidar-camera-fusion         && ./build.sh   # 融合跟踪（依赖 lslidarer 头文件）
 cd ../sentinel-yolo-infer         && ./build.sh   # YOLO NPU 推理（依赖 visioner + rknpu2）
 cd ../sentinel-streamer           && ./build.sh   # 推流录像 + OSD（依赖 visioner）
-cd ../SentinelQT                  && ./build.sh   # 触控界面（依赖 visioner + streamer）
+cd ../thermal-controller          && ./build.sh   # 温控调频（无依赖）
+cd ../SentinelQT                  && ./build.sh   # 触控界面（依赖 visioner + streamer + thermal-controller）
 ```
 
 **编译产物**:
@@ -123,6 +125,7 @@ sudo ./SentinelQT -platform eglfs      # 启动触控界面
 | `sentinel-yolo-infer/` | [README](Software/APP/sentinel-yolo-infer/README.md) · [实现](Software/APP/sentinel-yolo-infer/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/sentinel-yolo-infer/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/sentinel-yolo-infer/BUG_RECORD.md) |
 | `lidar-camera-fusion/` | [README](Software/APP/lidar-camera-fusion/README.md) · [实现](Software/APP/lidar-camera-fusion/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/lidar-camera-fusion/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/lidar-camera-fusion/BUG_RECORD.md) |
 | `sentinel-streamer/` | [README](Software/APP/sentinel-streamer/README.md) · [实现](Software/APP/sentinel-streamer/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/sentinel-streamer/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/sentinel-streamer/BUG_RECORD.md) |
+| `thermal-controller/` | [README](Software/APP/thermal-controller/README.md) · [实现](Software/APP/thermal-controller/docs/IMPLEMENTATION.md) · [Bug记录](Software/APP/thermal-controller/BUG_RECORD.md) |
 | `SentinelQT/` | [README](Software/APP/SentinelQT/README.md) · [实现](Software/APP/SentinelQT/docs/IMPLEMENTATION.md) · [学习指南](Software/APP/SentinelQT/docs/LEARNING_GUIDE.md) · [Bug记录](Software/APP/SentinelQT/BUG_RECORD.md) |
 
 ---
@@ -166,6 +169,7 @@ RK3588-Omni-Sentinel/
 │       ├── sentinel-yolo-infer/       # YOLOv8 RKNN NPU 推理
 │       ├── lidar-camera-fusion/       # 视觉-雷达融合跟踪
 │       ├── sentinel-streamer/         # RTSP 推流 + MP4 录像 + OSD
+│       ├── thermal-controller/        # RK3588 温控调频
 │       └── SentinelQT/                # Qt5 嵌入式触控 HMI
 └── Hardware/                          # 硬件驱动层
     └── Driver/
