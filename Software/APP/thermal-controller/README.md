@@ -23,7 +23,7 @@
 ## 构建
 
 ```bash
-cd thermal-controller && ./build.sh  # 或通过 SentinelQT 一起编译
+cd thermal-controller && ./build.sh
 ```
 
 ## 依赖
