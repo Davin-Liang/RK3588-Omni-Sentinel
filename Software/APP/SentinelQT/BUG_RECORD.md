@@ -352,3 +352,28 @@
 **原因**: `fusion_worker.cpp` 中 `FusionWorker::start()` 在 100ms 轮询 `copy_tracked_targets()` 后，对比上次快照的 id/posX/posY/state，仅变化时才 emit `trackingUpdated`。目标短暂丢失或静止时前端无数据推送，画面冻结在最后一帧。
 
 **解决**: 去掉变化去重逻辑，每 100ms 无条件推送当前快照。改动在 `fusion_worker.cpp`：删除 `lastSnapshot` 比较代码块，轮询后直接构建 `QVector` 并 emit。
+
+---
+
+## 36. widget.h 前向声明导致 incomplete type 编译错误
+
+**现象**: 交叉编译时报错 `field 'thermalCfg_' has incomplete type 'ThermalConfig'`
+
+**原因**: `widget.h` 用前向声明 `struct ThermalConfig;` 但将 `ThermalConfig thermalCfg_` 声明为值成员。前向声明只提供类型名，不自带大小信息，编译器无法计算对象布局。
+
+**解决**: 将前向声明替换为 `#include "thermal_controller.h"`，让完整类型定义在 `widget.h` 编译时可见。
+
+---
+
+## 37. 温控频率写入值不在可用频率列表中导致刷屏
+
+**现象**: 温度进入 Warm 后每 2 秒重复打印同一条频率写入日志：
+```
+[Thermal] CPU little max_freq: 1416000 -> 1400000
+```
+
+**原因**: `cpuLittleWarm=1400000` 不在 policy0 A55 可用频率列表中（最近值为 1416000）。内核将写入值自动 clamp 到最近可用频率。`write_max_freq_()` 读回 1416000，与目标 1400000 不等，每周期重复写入——死循环刷屏。
+
+**解决**:
+1. `evaluate_and_apply_()` 的 4 次 `write_max_freq_()` 调用移入等级变化守卫内（`level_ != prevLevel || tickCount_ == intervalSec`），不再每周期无条件写
+2. 修正默认配置值到合法频率：`cpuLittleWarm 1400000→1416000`、`cpuLittleHot 1000000→1008000`、`cpuBigCritical 800000→816000`

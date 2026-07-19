@@ -14,6 +14,7 @@ SentinelQT 进程
 │   ├── SentinelStreamer streamer_         // 推流/录像 + OSD
 │   ├── SentinelLslidarer lidar_           // 激光雷达驱动
 │   ├── LidarCameraFusion fusion_          // 视觉-雷达融合引擎
+│   ├── ThermalController thermalCtrl_     // 温控调频引擎
 │   ├── TopDownView topDownView_           // 鸟瞰俯视图组件
 │   ├── VirtualKeyboard virtualKeyboard_   // 触屏数字键盘
 │   └── QTimer × 3 (clock + record + fusionStatus)
@@ -168,16 +169,35 @@ RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止
 
 ### 3.4 硬件监控
 
-每秒由 `clockTimer_` 触发 `update_hw_usage_()`：
+每秒由 `clockTimer_` 触发 `update_hw_usage_()`，ThermalController 接管温度和频率读
+取，QT 继续读取利用率：
 
-| 指标 | 数据源 | 解析方式 |
-|------|--------|----------|
-| CPU | `/proc/stat` | 相邻采样 total/idle 差分，`100 - idleDelta*100/totalDelta` |
-| RGA | `/sys/kernel/debug/rkrga/load` | 逐行 `sscanf("load = %d%%")` 取 3 核 |
-| NPU | `/sys/kernel/debug/rknpu/load` | `sscanf("Core0: %d%%, Core1: %d%%, Core2: %d%%")` |
-| 温度 | `/sys/class/thermal/thermal_zone0/temp` | 整数值 / 1000 ℃ |
+| 指标 | 数据源 | 读取者 | 格式 |
+|------|--------|--------|------|
+| CPU 利用率 | `/proc/stat` | QT | 相邻采样差分 |
+| CPU 频率 | `policy4/scaling_cur_freq` | ThermalController | `thermalCtrl_->cpuBigFreq()` |
+| RGA | `/sys/kernel/debug/rkrga/load` | QT | 逐行 `sscanf("load = %d%%")` 取 3 核 |
+| NPU 利用率 | `/sys/kernel/debug/rknpu/load` | QT | 3 核百分比 |
+| NPU 频率 | `fdab0000.npu/cur_freq` | ThermalController | `thermalCtrl_->npuFreq()` |
+| 温度 | `/sys/class/thermal/thermal_zone0/temp` | ThermalController | `thermalCtrl_->currentTempC()` |
+| 策略等级 | — | ThermalController | Normal/Warm/Hot/Critical |
 
-### 3.5 按钮复用式设计
+### 3.5 ThermalController 集成
+
+`thermal-controller` 静态库通过 `ThermalController` 类提供温控调频。Widget 构造时创
+建实例，`update_hw_usage_()` 中每 1 秒调用 `tick()`：
+
+1. `tick()` 内置 `read_sensors_()`：读 temp + 3 个 `cur_freq`，缓存到成员变量
+2. 每 `intervalSec` 秒执行 `evaluate_and_apply_()`：4 级回滞策略评估
+3. 仅在等级变化（或首次）时调用 `write_max_freq_()` 写 5 个 sysfs 频率上限节点
+（policy0/policy4/policy6 + NPU max_freq）
+4. 启动时 `startup_restore_()` 恢复全速；退出时 `restoreOnExit` 可选恢复
+
+REST API：`GET /api/v1/thermal/status`（返回 `ThermalController::status_json()`）
+WebSocket 推送：`get_hw_json_()` 中通过 `thermalCtrl_` 获取温度、等级、
+`thermalFreq{cpuLittle, cpuBig, npu}`，附加到状态 JSON
+
+### 3.6 按钮复用式设计
 
 每个控制按钮（推流/录像）为单一 `QPushButton`，点击时根据 `is_streaming()/is_recording()` 判断当前状态执行启/停操作。`update_button_states_()` 动态切换文字和样式：
 
@@ -186,7 +206,7 @@ RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止
 - 录像停止时: "启动录像" 蓝色 `#1f6feb`
 - 录像进行时: "停止录像" 红色 `#da3633`
 
-### 3.6 YOLO 推理生命周期管理
+### 3.7 YOLO 推理生命周期管理
 
 `SentinelYoloInfer* yoloInfer_` 采用懒加载模式，由 OSD 按钮或融合启用触发创建，两路都不需要时自动销毁。
 
@@ -204,11 +224,11 @@ RK3588 ISP 驱动在 STREAMOFF 后仅靠 STREAMON 无法恢复，因此不停止
 
 创建时两路 inference thread 都启动（`create_infer_thread(0)` + `create_infer_thread(1)`），与当前使用的相机数无关。
 
-### 3.7 OSD 双端控制同步
+### 3.8 OSD 双端控制同步
 
 OSD 状态通过 WebSocket `status` JSON 推送 `osdEnabled` 字段到 Web 前端，确保 Qt 桌面按钮和 Web 按钮状态一致。Web 端 OSD API 路由（`/api/v1/cam/{0,1}/osd/start|stop`）需在 `web_server.cpp` 显式注册（cpp-httplib HTTP 路由不经过 Widget 的 fallback handler）。
 
-### 3.8 EIS 电子防抖集成
+### 3.9 EIS 电子防抖集成
 
 通过回调注入模式将 ICM45686 EIS 算法集成到 sentinel-visioner 采集管线，QT 和 Web 界面各相机独立控制。
 
@@ -230,7 +250,7 @@ Widget 拥有:
 
 **status JSON**: 含 `eisEnabled` 字段，WebSocket 推送同步。
 
-### 3.9 Web 远程控制集成
+### 3.10 Web 远程控制集成
 
 WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQueuedConnection` 与 Qt 主线程安全通信。
 
@@ -262,7 +282,7 @@ WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQ
 
 界面修改分辨率/融合参数时通过 `config_.setValue()` 即时写回文件。
 
-### 3.6 融合参数管理
+### 3.11 融合参数管理
 
 **配置加载**：`load_lidar_config_()` 和 `load_fusion_config_()` 从 `config.ini` 读取全部参数到 `fusionTrackerCfg_`（TrackerConfig）和 `fusionCamCfg_[2]`（CameraConfig）。细节参数（`minDtSec`、`requireClassIdMatch` 等）仅从 config.ini 读取，UI 不暴露。
 
@@ -283,7 +303,7 @@ WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQ
 
 禁用时逆序释放，`lidar_->stop()` 在从未 start 时幂等（内部检查 `running_` 标志和 `readerThread_.joinable()`）。
 
-### 3.7 鸟瞰俯视图 (TopDownView)
+### 3.12 鸟瞰俯视图 (TopDownView)
 
 自定义 `QWidget::paintEvent` 实现：
 
@@ -295,11 +315,11 @@ WebServer 在 SentinelQT 进程内运行独立 `std::thread`，通过 `BlockingQ
 
 通过 `set_targets()` 更新数据，FusionWorker 每 100ms 无条件 emit 信号触发重绘（确保画面流畅不冻结）。
 
-### 3.8 虚拟数字键盘 (VirtualKeyboard)
+### 3.13 虚拟数字键盘 (VirtualKeyboard)
 
 4×4 网格 QPushButton 布局：`[7 8 9 .] [4 5 6 -] [1 2 3 ←] [0 Del Done]`。默认隐藏，Widget::eventFilter 检测 param QLineEdit 的 FocusIn 事件自动弹出（`show_for(QLineEdit*)`），点击 Done 隐藏并清除焦点。`←` 退格、Del 删除、数字/小数点/负号在光标位置插入。
 
-### 3.9 标题栏硬件监控格式
+### 3.14 标题栏硬件监控格式
 
 为适应共享标题栏的有限宽度（hwLabel 280px，11px 字体），硬件监控文本采用紧凑格式：
 `45°C  CPU30  RGA5/2/1  NPU80/75/60`（去除了 `%` 符号，CPU 使用 `%1` 3 位右对齐）。

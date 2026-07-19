@@ -93,6 +93,11 @@ NVMe-SSD (NVMe 高速存储 + 视频回溯)
   ├── NVMeDataManager (生产者-消费者模式, 独立 writer 线程, 预分配内存池)
   └── RecordBufferPool 下游消费 (NV12 帧直存, 绕过 swscale 零开销编码)
 
+thermal-controller (RK3588 温控调频组件)
+  ├── 无外部依赖 (仅 C++14 + POSIX 文件 I/O)
+  ├── 读取 soc-thermal + CPU/NPU cur_freq，4 级回滞策略
+  └── 写 cpufreq/devfreq max_freq 设频率上限（不接管 governor）
+
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
   ├── sentinel-yolo-infer (NPU 推理实例管理，懒加载创建/销毁)
@@ -102,8 +107,9 @@ SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
   ├── icm45686-eis-app-parameterized (IMU 电子防抖, 参数化 API, 回调注入 sentinel-visioner NPU 路径)
+  ├── thermal-controller (温控调频, CPU 3簇 + NPU max_freq 上限调节)
   ├── Qt5 Widgets (QStackedWidget 四页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [NVMe] 等)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [Thermal] [NVMe] 等)
 ```
 
 ### web-control — Web 远程控制组件
@@ -195,6 +201,18 @@ SentinelQT (QT5 嵌入式触控界面)
 - **配置**: `SentinelYoloInferConfig` 含 modelPath、boxThreshold、nmsThreshold、waitTimeoutMs、pushEmptyResult
 
 唯一公共头文件: `include/SentinelYoloInfer.h`，API 类: `SentinelYoloInfer`
+
+### thermal-controller — RK3588 温控调频组件
+
+用户态温度监控 + 主动频率限制组件。读取 RK3588 soc-thermal 温度 + CPU/NPU 当前频率，通过 4 级回滞策略（Normal/Warm/Hot/Critical）动态写入 `scaling_max_freq` / `devfreq max_freq` 设频率天花板。不接管 governor（保持 `schedutil` / `rknpu_ondemand`），只调上限。
+
+- **ThermalController**: 核心类，由调用方 1 秒定时器驱动 `tick()`。内置温度/频率 sysfs 读取 + 策略评估 + max_freq 写入。均在调用线程同步执行，无独立线程
+- **4 级回滞**: Normal(<65°C) → Warm(>65°C, <60°C 恢复) → Hot(>75°C, <70°C 恢复) → Critical(>85°C, <80°C 恢复)。每级不同 CPU A76/A55/NPU 频率上限
+- **写入优化**: 仅在等级变化（或首次）时写入，写完跳过与目标值相同的情况；启动时恢复全速，退出时可配恢复
+- **配置**: `config.ini [Thermal]` 节，全部 28 个参数可配置，重启生效。`enabled=false` 时只监控不控制
+- **REST API**: `GET /api/v1/thermal/status` 返回温度/等级/频率 JSON
+
+唯一公共头文件: `include/thermal_controller.h`，API 类: `ThermalController`
 
 ### sentinel-visioner — 多路视觉流水线
 
