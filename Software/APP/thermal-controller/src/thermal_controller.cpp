@@ -86,3 +86,126 @@ int ThermalController::get_level_freq_(int normalVal, int warmVal, int hotVal, i
         default: return normalVal;
     }
 }
+
+void ThermalController::read_sensors_()
+{
+    // 温度
+    int raw = read_int_sysfs_(kThermalZone0);
+    tempC_ = (raw > 0) ? raw / 1000 : -1;
+
+    // 当前频率 (只读)
+    cpuLittleFreq_ = read_int_sysfs_(kPolicy0CurFreq);  // kHz
+    cpuBigFreq_    = read_int_sysfs_(kPolicy4CurFreq);  // kHz
+    npuFreq_       = read_int_sysfs_(kNpuCurFreq);      // Hz
+}
+
+void ThermalController::evaluate_and_apply_()
+{
+    if (tempC_ < 0) return;  // 传感器读取失败
+
+    int prevLevel = level_;
+    int t = tempC_;
+
+    // 策略评估 — 4 级 + 回滞
+    if (t >= cfg_.critThreshold) {
+        level_ = 3;
+    } else if (t >= cfg_.hotThreshold) {
+        if (level_ == 3) { if (t >= cfg_.critRecover) level_ = 3; else level_ = 2; }
+        else level_ = 2;
+    } else if (t >= cfg_.warmThreshold) {
+        if (level_ == 3) {
+            if (t >= cfg_.critRecover) level_ = 3; else if (t >= cfg_.hotRecover) level_ = 2; else level_ = 1;
+        } else if (level_ == 2) {
+            if (t >= cfg_.hotRecover) level_ = 2; else level_ = 1;
+        } else {
+            level_ = 1;
+        }
+    } else {
+        if (level_ == 3) {
+            if (t >= cfg_.critRecover) level_ = 3; else if (t >= cfg_.hotRecover) level_ = 2; else if (t >= cfg_.warmRecover) level_ = 1; else level_ = 0;
+        } else if (level_ == 2) {
+            if (t >= cfg_.hotRecover) level_ = 2; else if (t >= cfg_.warmRecover) level_ = 1; else level_ = 0;
+        } else if (level_ == 1) {
+            if (t >= cfg_.warmRecover) level_ = 1; else level_ = 0;
+        } else {
+            level_ = 0;
+        }
+    }
+
+    if (!cfg_.enabled) return;  // 只监控不控制
+
+    // 等级变化时写入新频率上限
+    if (level_ != prevLevel) {
+        fprintf(stderr, "[Thermal] level change: %s -> %s (T=%d°C)\n",
+                kLevelNames[prevLevel], kLevelNames[level_], t);
+    }
+
+    write_max_freq_(kPolicy0MaxFreq, get_level_freq_(cfg_.cpuLittleNormal, cfg_.cpuLittleWarm, cfg_.cpuLittleHot, cfg_.cpuLittleCritical), "CPU little");
+    write_max_freq_(kPolicy4MaxFreq, get_level_freq_(cfg_.cpuBigNormal, cfg_.cpuBigWarm, cfg_.cpuBigHot, cfg_.cpuBigCritical), "CPU big(p4)");
+    write_max_freq_(kPolicy6MaxFreq, get_level_freq_(cfg_.cpuBigNormal, cfg_.cpuBigWarm, cfg_.cpuBigHot, cfg_.cpuBigCritical), "CPU big(p6)");
+    write_max_freq_(kNpuMaxFreq,     get_level_freq_(cfg_.npuNormal, cfg_.npuWarm, cfg_.npuHot, cfg_.npuCritical), "NPU");
+}
+
+void ThermalController::tick()
+{
+    read_sensors_();
+    tickCount_++;
+    if (cfg_.enabled && (tickCount_ % cfg_.intervalSec == 0)) {
+        evaluate_and_apply_();
+    }
+}
+
+const char* ThermalController::currentLevel() const
+{
+    if (!cfg_.enabled) return "";  // disabled 时不显示等级
+    return kLevelNames[level_];
+}
+
+std::string ThermalController::status_json() const
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+        R"({"ok":true,"enabled":%s,"level":"%s","temp":%d,)"
+        R"("freq":{"cpuLittle":%d,"cpuBig":%d,"npu":%d}})",
+        cfg_.enabled ? "true" : "false",
+        cfg_.enabled ? kLevelNames[level_] : "",
+        tempC_,
+        cpuLittleFreq_ > 0 ? cpuLittleFreq_ : 0,
+        cpuBigFreq_ > 0 ? cpuBigFreq_ : 0,
+        npuFreq_ > 0 ? npuFreq_ : 0);
+    return std::string(buf);
+}
+
+bool ThermalController::validate_config_() const
+{
+    const ThermalConfig& c = cfg_;
+
+    // 温度阈值链校验
+    if (!(c.warmRecover < c.warmThreshold &&
+          c.warmThreshold < c.hotRecover &&
+          c.hotRecover < c.hotThreshold &&
+          c.hotThreshold < c.critRecover &&
+          c.critRecover < c.critThreshold)) {
+        fprintf(stderr, "[Thermal] threshold chain invalid: "
+                "warmRecover(%d) < warm(%d) < hotRecover(%d) < hot(%d) < critRecover(%d) < crit(%d)\n",
+                c.warmRecover, c.warmThreshold, c.hotRecover,
+                c.hotThreshold, c.critRecover, c.critThreshold);
+        return false;
+    }
+
+    // 频率单调性校验
+    if (!(c.cpuBigNormal >= c.cpuBigWarm && c.cpuBigWarm >= c.cpuBigHot && c.cpuBigHot >= c.cpuBigCritical)) {
+        fprintf(stderr, "[Thermal] cpuBig freq non-monotonic\n");
+        return false;
+    }
+    if (!(c.cpuLittleNormal >= c.cpuLittleWarm && c.cpuLittleWarm >= c.cpuLittleHot && c.cpuLittleHot >= c.cpuLittleCritical)) {
+        fprintf(stderr, "[Thermal] cpuLittle freq non-monotonic\n");
+        return false;
+    }
+    if (!(c.npuNormal >= c.npuWarm && c.npuWarm >= c.npuHot && c.npuHot >= c.npuCritical)) {
+        fprintf(stderr, "[Thermal] npu freq non-monotonic\n");
+        return false;
+    }
+
+    return true;
+}
