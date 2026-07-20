@@ -28,11 +28,13 @@ set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;${FFMPEG_ROOT}/lib")
 # 编译 NVMeDataManager 静态库
 add_library(nvme_data_manager_lib STATIC
     src/NVMeDataManager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/lodepng/lodepng.cpp
 )
 
 # 设置头文件包含路径
 target_include_directories(nvme_data_manager_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/lodepng
     ${FFMPEG_ROOT}/include
 )
 
