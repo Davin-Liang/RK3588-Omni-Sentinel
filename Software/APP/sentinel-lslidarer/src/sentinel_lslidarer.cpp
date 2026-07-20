@@ -284,6 +284,24 @@ void SentinelLslidarer::reader_loop_() {
             ringBuffer_->commit_write(sweepEndNs, sweepCount);
             ++sweepCount_;
 
+            // 首圈打印
+            if (sweepCount_ == 1) {
+                std::fprintf(stderr, "[LidarSweep] first sweep detected (points=%u)\n",
+                             sweepCount);
+            }
+
+            if (sweepCount_ % 10 == 0) {
+                static uint64_t lastSweepReportNs = 0;
+                uint64_t now = sweepEndNs;
+                if (lastSweepReportNs > 0) {
+                    double intervalMs = static_cast<double>(now - lastSweepReportNs) / 1e6;
+                    std::fprintf(stderr, "[LidarSweep] 10 sweeps in %.0f ms (%.1f Hz), total=%lu\n",
+                                 intervalMs, 10000.0 / intervalMs,
+                                 static_cast<unsigned long>(sweepCount_));
+                }
+                lastSweepReportNs = now;
+            }
+
             // 重置，开始新一圈
             sweepBuf   = ringBuffer_->begin_write();
             sweepCount = 0;
