@@ -377,3 +377,13 @@
 **解决**:
 1. `evaluate_and_apply_()` 的 4 次 `write_max_freq_()` 调用移入等级变化守卫内（`level_ != prevLevel || tickCount_ == intervalSec`），不再每周期无条件写
 2. 修正默认配置值到合法频率：`cpuLittleWarm 1400000→1416000`、`cpuLittleHot 1000000→1008000`、`cpuBigCritical 800000→816000`
+
+---
+
+## 38. NvmeWorker 存 lidar_ 值拷贝导致雷达运行时启停不感知
+
+**现象**: NVMe 初始化后自动启动雷达，但回溯热力图始终无 LiDAR 数据（`no LiDAR points in window`）。即使融合已启动、雷达正常运行，NvmeWorker 也不写入雷达帧。
+
+**原因**: `NvmeWorker` 构造时接受 `SentinelLslidarer*` 通过值拷贝存入 `lidar_`。Widget 在构造阶段调用 `init_nvme_()`，此时 `lidar_ = nullptr`。NvmeWorker 永久保存了这个 nullptr，后续 `init_nvme_()` 中自动启动雷达后 `lidar_` 已非空，但 NvmeWorker 内部指针不变。
+
+**解决**: 改为存储 `SentinelLslidarer**`（指向 Widget 的 `lidar_` 成员）。每次 `start()` 轮询循环中解引用 `*lidarPtr_` 获取最新值。雷达启停后自动生效，无需额外通知。同时将 `deinit_nvme_()` 移到 `delete lidar_` 之前，避免 NvmeWorker 访问已释放的 lidar 对象。
