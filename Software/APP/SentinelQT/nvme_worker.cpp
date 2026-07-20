@@ -8,13 +8,13 @@
 
 NvmeWorker::NvmeWorker(SentinelStreamer* streamer,
                        NVMeDataManager* nvme,
-                       SentinelLslidarer* lidar,
+                       SentinelLslidarer** lidarPtr,
                        int numCameras,
                        QObject* parent)
     : QObject(parent)
     , streamer_(streamer)
     , nvme_(nvme)
-    , lidar_(lidar)
+    , lidarPtr_(lidarPtr)
     , numCameras_(numCameras)
     , lastLidarTs_(0)
 {
@@ -45,10 +45,12 @@ void NvmeWorker::start()
         }
 
         // 雷达数据写入（与视频帧同步存储）
-        if (lidar_ != nullptr) {
+        // lidarPtr_ 指向 Widget::lidar_，每次解引用获取最新指针值
+        SentinelLslidarer* lidar = (lidarPtr_ != nullptr) ? *lidarPtr_ : nullptr;
+        if (lidar != nullptr) {
             LidarFrame frame;
             frame.points = lidarPointsBuf_;
-            if (lidar_->get_latest_frame(frame)) {
+            if (lidar->get_latest_frame(frame)) {
                 if (frame.timestampNs != lastLidarTs_) {
                     nvme_->write_lidar_points_to_disk(
                         reinterpret_cast<const uint8_t*>(frame.points),

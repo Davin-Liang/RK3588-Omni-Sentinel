@@ -3505,7 +3505,7 @@ void Widget::init_nvme_()
         return;
     }
 
-    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, lidar_, 2);
+    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, &lidar_, 2);
     nvme_thread_ = new QThread(this);
     nvme_worker_->moveToThread(nvme_thread_);
 

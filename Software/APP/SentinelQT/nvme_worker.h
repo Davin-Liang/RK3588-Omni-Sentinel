@@ -18,7 +18,7 @@ class NvmeWorker : public QObject
 public:
     explicit NvmeWorker(SentinelStreamer* streamer,
                         NVMeDataManager* nvme,
-                        SentinelLslidarer* lidar,
+                        SentinelLslidarer** lidarPtr,
                         int numCameras,
                         QObject* parent = nullptr);
 
@@ -32,7 +32,7 @@ signals:
 private:
     SentinelStreamer* streamer_;
     NVMeDataManager* nvme_;
-    SentinelLslidarer* lidar_;
+    SentinelLslidarer** lidarPtr_;
     int numCameras_;
     std::atomic<bool> running_{false};
 
