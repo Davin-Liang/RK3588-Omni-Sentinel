@@ -75,11 +75,25 @@ public:
                                    int camera_id = -1,
                                    bool input_is_nv12 = false);
 
+    // 导出雷达热力图 PNG（回溯窗口内所有 LiDAR 点按时间着色叠加）
+    bool export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
+                                   const std::string& output_path,
+                                   double time_window_sec = 5.0);
+
     // 获取统计信息
     size_t get_queue_size() const;
     size_t get_buffer_usage() const;
 
 private:
+    // 热力图渲染辅助
+    struct LidarPointRecord {
+        float x, y, intensity;
+        uint64_t timestamp_ns;
+    };
+    void render_heatmap_pixels_(const std::vector<LidarPointRecord>& points,
+                                 int imgW, int imgH,
+                                 std::vector<uint8_t>& rgba);
+
     // 线程函数
     void writer_thread();
 
