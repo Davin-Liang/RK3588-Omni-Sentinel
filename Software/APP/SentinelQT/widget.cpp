@@ -3517,6 +3517,15 @@ void Widget::init_nvme_()
             });
 
     nvme_thread_->start();
+
+    // 为 NVMe 回溯独立启动雷达（不依赖融合是否开启）
+    if (lidar_ && !lidar_->is_running()) {
+        lidar_->load_config(lidarCfg_);
+        if (lidar_->start()) {
+            fprintf(stderr, "[SentinelQT] NVMe: LiDAR auto-started for backtrack\n");
+        }
+    }
+
     set_status_("NVMe 回溯已启动", "#2ea043");
 }
 
