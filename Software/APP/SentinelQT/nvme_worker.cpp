@@ -1,5 +1,6 @@
 #include "nvme_worker.h"
 #include "sentinel_streamer.h"
+#include "sentinel_lslidarer.h"
 #include "NVMeDataManager.h"
 
 #include <QThread>
@@ -7,12 +8,15 @@
 
 NvmeWorker::NvmeWorker(SentinelStreamer* streamer,
                        NVMeDataManager* nvme,
+                       SentinelLslidarer* lidar,
                        int numCameras,
                        QObject* parent)
     : QObject(parent)
     , streamer_(streamer)
     , nvme_(nvme)
+    , lidar_(lidar)
     , numCameras_(numCameras)
+    , lastLidarTs_(0)
 {
 }
 
@@ -36,6 +40,22 @@ void NvmeWorker::start()
                     cam == 0);
 
                 streamer_->release_record_frame(cam, data);
+                gotAny = true;
+            }
+        }
+
+        // 雷达数据写入（与视频帧同步存储）
+        if (lidar_ != nullptr) {
+            LidarFrame frame;
+            frame.points = lidarPointsBuf_;
+            if (lidar_->get_latest_frame(frame)) {
+                if (frame.timestampNs != lastLidarTs_) {
+                    nvme_->write_lidar_points_to_disk(
+                        reinterpret_cast<const uint8_t*>(frame.points),
+                        frame.pointsCount * sizeof(LidarPoint),
+                        frame.timestampNs);
+                    lastLidarTs_ = frame.timestampNs;
+                }
                 gotAny = true;
             }
         }

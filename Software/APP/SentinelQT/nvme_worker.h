@@ -6,6 +6,8 @@
 #include <cstdint>
 
 class SentinelStreamer;
+class SentinelLslidarer;
+struct LidarPoint;
 class NVMeDataManager;
 
 class NvmeWorker : public QObject
@@ -15,6 +17,7 @@ class NvmeWorker : public QObject
 public:
     explicit NvmeWorker(SentinelStreamer* streamer,
                         NVMeDataManager* nvme,
+                        SentinelLslidarer* lidar,
                         int numCameras,
                         QObject* parent = nullptr);
 
@@ -28,8 +31,13 @@ signals:
 private:
     SentinelStreamer* streamer_;
     NVMeDataManager* nvme_;
+    SentinelLslidarer* lidar_;
     int numCameras_;
     std::atomic<bool> running_{false};
+
+    // 雷达轮询缓冲与去重 (1200 = kPointsPerSweep 理论最大值)
+    LidarPoint lidarPointsBuf_[1200];
+    uint64_t lastLidarTs_;
 };
 
 #endif // NVME_WORKER_H
