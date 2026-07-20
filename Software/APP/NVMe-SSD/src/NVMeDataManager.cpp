@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>
+#include <ctime>
+#include <cstdio>
 #include "lodepng.h"
 
 extern "C" {
@@ -55,6 +57,143 @@ void hsl_to_rgb(float h, float s, float l,
     r = static_cast<uint8_t>(hue2rgb(p, q, hNorm + 1.0f/3.0f) * 255.0f);
     g = static_cast<uint8_t>(hue2rgb(p, q, hNorm) * 255.0f);
     b = static_cast<uint8_t>(hue2rgb(p, q, hNorm - 1.0f/3.0f) * 255.0f);
+}
+
+// ---- 5x7 位图字体 (ASCII 32-126) ----
+// 每个字符 5 列 × 7 行，5 字节，bit 0=顶行
+static const uint8_t kFont5x7[95][5] = {
+    {0x00,0x00,0x00,0x00,0x00}, // 32 ' '
+    {0x00,0x00,0x5F,0x00,0x00}, // 33 '!'
+    {0x00,0x07,0x00,0x07,0x00}, // 34 '"'
+    {0x14,0x7F,0x14,0x7F,0x14}, // 35 '#'
+    {0x24,0x2A,0x7F,0x2A,0x12}, // 36 '$'
+    {0x23,0x13,0x08,0x64,0x62}, // 37 '%'
+    {0x36,0x49,0x55,0x22,0x50}, // 38 '&'
+    {0x00,0x05,0x03,0x00,0x00}, // 39 '''
+    {0x00,0x1C,0x22,0x41,0x00}, // 40 '('
+    {0x00,0x41,0x22,0x1C,0x00}, // 41 ')'
+    {0x08,0x2A,0x1C,0x2A,0x08}, // 42 '*'
+    {0x08,0x08,0x3E,0x08,0x08}, // 43 '+'
+    {0x00,0x50,0x30,0x00,0x00}, // 44 ','
+    {0x08,0x08,0x08,0x08,0x08}, // 45 '-'
+    {0x00,0x60,0x60,0x00,0x00}, // 46 '.'
+    {0x20,0x10,0x08,0x04,0x02}, // 47 '/'
+    {0x3E,0x51,0x49,0x45,0x3E}, // 48 '0'
+    {0x00,0x42,0x7F,0x40,0x00}, // 49 '1'
+    {0x42,0x61,0x51,0x49,0x46}, // 50 '2'
+    {0x21,0x41,0x45,0x4B,0x31}, // 51 '3'
+    {0x18,0x14,0x12,0x7F,0x10}, // 52 '4'
+    {0x27,0x45,0x45,0x45,0x39}, // 53 '5'
+    {0x3C,0x4A,0x49,0x49,0x30}, // 54 '6'
+    {0x01,0x71,0x09,0x05,0x03}, // 55 '7'
+    {0x36,0x49,0x49,0x49,0x36}, // 56 '8'
+    {0x06,0x49,0x49,0x29,0x1E}, // 57 '9'
+    {0x00,0x36,0x36,0x00,0x00}, // 58 ':'
+    {0x00,0x56,0x36,0x00,0x00}, // 59 ';'
+    {0x00,0x08,0x14,0x22,0x41}, // 60 '<'
+    {0x14,0x14,0x14,0x14,0x14}, // 61 '='
+    {0x41,0x22,0x14,0x08,0x00}, // 62 '>'
+    {0x02,0x01,0x51,0x09,0x06}, // 63 '?'
+    {0x32,0x49,0x79,0x41,0x3E}, // 64 '@'
+    {0x7E,0x11,0x11,0x11,0x7E}, // 65 'A'
+    {0x7F,0x49,0x49,0x49,0x36}, // 66 'B'
+    {0x3E,0x41,0x41,0x41,0x22}, // 67 'C'
+    {0x7F,0x41,0x41,0x22,0x1C}, // 68 'D'
+    {0x7F,0x49,0x49,0x49,0x41}, // 69 'E'
+    {0x7F,0x09,0x09,0x01,0x01}, // 70 'F'
+    {0x3E,0x41,0x41,0x51,0x32}, // 71 'G'
+    {0x7F,0x08,0x08,0x08,0x7F}, // 72 'H'
+    {0x00,0x41,0x7F,0x41,0x00}, // 73 'I'
+    {0x20,0x40,0x41,0x3F,0x01}, // 74 'J'
+    {0x7F,0x08,0x14,0x22,0x41}, // 75 'K'
+    {0x7F,0x40,0x40,0x40,0x40}, // 76 'L'
+    {0x7F,0x02,0x04,0x02,0x7F}, // 77 'M'
+    {0x7F,0x04,0x08,0x10,0x7F}, // 78 'N'
+    {0x3E,0x41,0x41,0x41,0x3E}, // 79 'O'
+    {0x7F,0x09,0x09,0x09,0x06}, // 80 'P'
+    {0x3E,0x41,0x51,0x21,0x5E}, // 81 'Q'
+    {0x7F,0x09,0x19,0x29,0x46}, // 82 'R'
+    {0x46,0x49,0x49,0x49,0x31}, // 83 'S'
+    {0x01,0x01,0x7F,0x01,0x01}, // 84 'T'
+    {0x3F,0x40,0x40,0x40,0x3F}, // 85 'U'
+    {0x1F,0x20,0x40,0x20,0x1F}, // 86 'V'
+    {0x7F,0x20,0x18,0x20,0x7F}, // 87 'W'
+    {0x63,0x14,0x08,0x14,0x63}, // 88 'X'
+    {0x03,0x04,0x78,0x04,0x03}, // 89 'Y'
+    {0x61,0x51,0x49,0x45,0x43}, // 90 'Z'
+    {0x00,0x00,0x7F,0x41,0x41}, // 91 '['
+    {0x02,0x04,0x08,0x10,0x20}, // 92 '\'
+    {0x41,0x41,0x7F,0x00,0x00}, // 93 ']'
+    {0x04,0x02,0x01,0x02,0x04}, // 94 '^'
+    {0x40,0x40,0x40,0x40,0x40}, // 95 '_'
+    {0x00,0x01,0x02,0x04,0x00}, // 96 '`'
+    {0x20,0x54,0x54,0x54,0x78}, // 97 'a'
+    {0x7F,0x48,0x44,0x44,0x38}, // 98 'b'
+    {0x38,0x44,0x44,0x44,0x20}, // 99 'c'
+    {0x38,0x44,0x44,0x48,0x7F}, // 100 'd'
+    {0x38,0x54,0x54,0x54,0x18}, // 101 'e'
+    {0x08,0x7E,0x09,0x01,0x02}, // 102 'f'
+    {0x08,0x14,0x54,0x54,0x3C}, // 103 'g'
+    {0x7F,0x08,0x04,0x04,0x78}, // 104 'h'
+    {0x00,0x44,0x7D,0x40,0x00}, // 105 'i'
+    {0x20,0x40,0x44,0x3D,0x00}, // 106 'j'
+    {0x00,0x7F,0x10,0x28,0x44}, // 107 'k'
+    {0x00,0x41,0x7F,0x40,0x00}, // 108 'l'
+    {0x7C,0x04,0x18,0x04,0x78}, // 109 'm'
+    {0x7C,0x08,0x04,0x04,0x78}, // 110 'n'
+    {0x38,0x44,0x44,0x44,0x38}, // 111 'o'
+    {0x7C,0x14,0x14,0x14,0x08}, // 112 'p'
+    {0x08,0x14,0x14,0x18,0x7C}, // 113 'q'
+    {0x7C,0x08,0x04,0x04,0x08}, // 114 'r'
+    {0x48,0x54,0x54,0x54,0x20}, // 115 's'
+    {0x04,0x3F,0x44,0x40,0x20}, // 116 't'
+    {0x3C,0x40,0x40,0x20,0x7C}, // 117 'u'
+    {0x1C,0x20,0x40,0x20,0x1C}, // 118 'v'
+    {0x3C,0x40,0x30,0x40,0x3C}, // 119 'w'
+    {0x44,0x28,0x10,0x28,0x44}, // 120 'x'
+    {0x0C,0x50,0x50,0x50,0x3C}, // 121 'y'
+    {0x44,0x64,0x54,0x4C,0x44}, // 122 'z'
+    {0x00,0x08,0x36,0x41,0x00}, // 123 '{'
+    {0x00,0x00,0x7F,0x00,0x00}, // 124 '|'
+    {0x00,0x41,0x36,0x08,0x00}, // 125 '}'
+    {0x08,0x04,0x08,0x10,0x08}, // 126 '~'
+};
+
+// 在 RGBA 缓冲的 (x,y) 处绘制一个 2x 放大的 ASCII 字符 (白色)
+static void draw_char_rgba(uint8_t* rgba, int imgW, int imgH,
+                           int x, int y, char ch, int scale) {
+    if (ch < 32 || ch > 126) return;
+    const uint8_t* glyph = kFont5x7[ch - 32];
+    for (int col = 0; col < 5; ++col) {
+        uint8_t bits = glyph[col];
+        for (int row = 0; row < 7; ++row) {
+            if (bits & (1 << row)) {
+                for (int sy = 0; sy < scale; ++sy) {
+                    for (int sx = 0; sx < scale; ++sx) {
+                        int px = x + col * scale + sx;
+                        int py = y + row * scale + sy;
+                        if (px >= 0 && px < imgW && py >= 0 && py < imgH) {
+                            size_t idx = (static_cast<size_t>(py) * imgW + px) * 4;
+                            rgba[idx] = 255;     // R
+                            rgba[idx+1] = 255;   // G
+                            rgba[idx+2] = 255;   // B
+                            rgba[idx+3] = 255;   // A
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 在 RGBA 缓冲的 (x,y) 处绘制一行 2x 放大的 ASCII 文本 (白色)
+static void draw_text_rgba(uint8_t* rgba, int imgW, int imgH,
+                           int x, int y, const std::string& text, int scale) {
+    int cx = x;
+    for (char ch : text) {
+        draw_char_rgba(rgba, imgW, imgH, cx, y, ch, scale);
+        cx += 6 * scale;  // 5px 字符 + 1px 间距
+    }
 }
 
 } // namespace
@@ -195,10 +334,59 @@ bool NVMeDataManager::write_to_nvme(const Header* header, const uint8_t* data,
 
 void NVMeDataManager::render_heatmap_pixels_(
         const std::vector<LidarPointRecord>& points,
+        const HeatmapInfo& info,
         int imgW, int imgH,
         std::vector<uint8_t>& rgba) {
 
     if (points.empty()) return;
+
+    // --- 顶部信息栏（黑色半透明背景 + 白色文字 2x 放大）---
+    {
+        int barHeight = 54;
+        int barY = 0;
+        // 半透明黑色背景
+        for (int py = barY; py < barY + barHeight && py < imgH; ++py) {
+            for (int px = 0; px < imgW; ++px) {
+                size_t idx = (static_cast<size_t>(py) * imgW + px) * 4;
+                uint8_t& r = rgba[idx];
+                uint8_t& g = rgba[idx+1];
+                uint8_t& b = rgba[idx+2];
+                r = static_cast<uint8_t>(r / 4);
+                g = static_cast<uint8_t>(g / 4);
+                b = static_cast<uint8_t>(b / 4);
+                rgba[idx+3] = 200;  // semi-opaque
+            }
+        }
+        // 白色文字
+        int scale = 2;
+        int textY = 3;
+        draw_text_rgba(rgba.data(), imgW, imgH, 10, textY,
+                       "LiDAR Heatmap", scale);
+        textY += 8 * scale;  // 7px font * scale
+
+        // 格式化时间戳
+        uint64_t ns = info.triggerTimestampNs;
+        time_t sec = static_cast<time_t>(ns / 1000000000ULL);
+        int ms = static_cast<int>((ns / 1000000ULL) % 1000);
+        struct tm tmbuf;
+        char timeBuf[64];
+        if (gmtime_r(&sec, &tmbuf)) {
+            snprintf(timeBuf, sizeof(timeBuf),
+                     "%04d-%02d-%02d %02d:%02d:%02d.%03d UTC",
+                     tmbuf.tm_year + 1900, tmbuf.tm_mon + 1, tmbuf.tm_mday,
+                     tmbuf.tm_hour, tmbuf.tm_min, tmbuf.tm_sec, ms);
+        } else {
+            snprintf(timeBuf, sizeof(timeBuf), "ts=%llu", (unsigned long long)ns);
+        }
+
+        char line1[128];
+        snprintf(line1, sizeof(line1), "Window: %.1fs  |  Frames: %d  |  Points: %zu",
+                 info.timeWindowSec, info.frameCount, info.totalPoints);
+        draw_text_rgba(rgba.data(), imgW, imgH, 10, textY, line1, scale);
+        textY += 8 * scale;
+        draw_text_rgba(rgba.data(), imgW, imgH, 10, textY,
+                       std::string("Trigger: ") + timeBuf, scale);
+    }
 
     // --- 计算渲染范围 ---
     float minX = points[0].x, maxX = points[0].x;
@@ -350,6 +538,7 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
     }
 
     std::vector<LidarPointRecord> allPoints;
+    int lidarFrameCnt = 0;
     off_t offset = 0;
     Header header;
 
@@ -387,6 +576,7 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
 
                     // 时间窗口过滤
                     if (frameTs >= start_ns && frameTs <= end_ns) {
+                        ++lidarFrameCnt;
                         const LidarPointDisk* pts =
                             reinterpret_cast<const LidarPointDisk*>(buf.data() + pos);
                         for (uint32_t i = 0; i < frameCount; ++i) {
@@ -416,7 +606,12 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
     // 2. 渲染 RGBA 像素缓冲
     const int kImgSize = 1200;
     std::vector<uint8_t> rgba(static_cast<size_t>(kImgSize) * kImgSize * 4, 0);
-    render_heatmap_pixels_(allPoints, kImgSize, kImgSize, rgba);
+    HeatmapInfo info;
+    info.timeWindowSec    = time_window_sec;
+    info.frameCount       = lidarFrameCnt;
+    info.totalPoints      = allPoints.size();
+    info.triggerTimestampNs = trigger_timestamp_ns;
+    render_heatmap_pixels_(allPoints, info, kImgSize, kImgSize, rgba);
 
     // 3. 编码 PNG 并写盘
     unsigned error = lodepng::encode(output_path, rgba, kImgSize, kImgSize);
@@ -426,20 +621,8 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
         return false;
     }
 
-    size_t frameCount = 0;
-    if (!allPoints.empty()) {
-        uint64_t lastTs = allPoints[0].timestamp_ns;
-        frameCount = 1;
-        for (const auto& p : allPoints) {
-            if (p.timestamp_ns != lastTs) {
-                frameCount++;
-                lastTs = p.timestamp_ns;
-            }
-        }
-    }
-
-    fprintf(stderr, "[NVMeDataManager] heatmap saved: %s (%zu points, %zu frames)\n",
-            output_path.c_str(), allPoints.size(), frameCount);
+    fprintf(stderr, "[NVMeDataManager] heatmap saved: %s (%zu points, %d frames)\n",
+            output_path.c_str(), allPoints.size(), lidarFrameCnt);
     return true;
 }
 

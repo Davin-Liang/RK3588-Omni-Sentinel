@@ -93,7 +93,14 @@ private:
         float x, y;
         uint64_t timestamp_ns;
     };
+    struct HeatmapInfo {
+        double timeWindowSec;
+        int frameCount;
+        size_t totalPoints;
+        uint64_t triggerTimestampNs;
+    };
     void render_heatmap_pixels_(const std::vector<LidarPointRecord>& points,
+                                 const HeatmapInfo& info,
                                  int imgW, int imgH,
                                  std::vector<uint8_t>& rgba);
 
