@@ -946,14 +946,14 @@ void LidarTargetTracker::check_warnings_(uint64_t nowNs)
             if (dist < config_.warningEnterDistMeters) {
                 track.warningActive = true;
                 track.lastWarningNs = nowNs;
-                warningCb_(track, warningUserData_);
+                if (warningCb_) warningCb_(track, warningUserData_);
             }
         } else {
             if (dist > config_.warningExitDistMeters) {
                 track.warningActive = false;
             } else if ((nowNs - track.lastWarningNs) > config_.warningCooldownNs) {
                 track.lastWarningNs = nowNs;
-                warningCb_(track, warningUserData_);
+                if (warningCb_) warningCb_(track, warningUserData_);
             }
         }
     }
