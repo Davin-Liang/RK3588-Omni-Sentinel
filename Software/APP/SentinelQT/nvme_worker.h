@@ -5,9 +5,10 @@
 #include <atomic>
 #include <cstdint>
 
+#include "sentinel_lslidarer.h"  // LidarPoint 完整定义，数组声明需要
+
 class SentinelStreamer;
 class SentinelLslidarer;
-struct LidarPoint;
 class NVMeDataManager;
 
 class NvmeWorker : public QObject
