@@ -87,7 +87,7 @@ public:
 private:
     // 热力图渲染辅助
     struct LidarPointRecord {
-        float x, y, intensity;
+        float x, y;
         uint64_t timestamp_ns;
     };
     void render_heatmap_pixels_(const std::vector<LidarPointRecord>& points,

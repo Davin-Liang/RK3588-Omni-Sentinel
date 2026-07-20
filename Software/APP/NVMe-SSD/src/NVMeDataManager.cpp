@@ -27,6 +27,9 @@ struct LidarPointDisk {
     float intensity;
 };
 
+static_assert(sizeof(LidarPointDisk) == 3 * sizeof(float),
+              "LidarPointDisk size must match LidarPoint {float x, y, intensity}");
+
 // hue: 0-360, sat: 0-1, light: 0-1  →  RGB 各分量 0-255
 void hsl_to_rgb(float h, float s, float l,
                 uint8_t& r, uint8_t& g, uint8_t& b) {
@@ -215,9 +218,6 @@ void NVMeDataManager::render_heatmap_pixels_(
     // 10% 边距 + 最小范围 ±10m
     float marginX = std::max((maxX - minX) * 0.1f, 0.5f);
     float marginY = std::max((maxY - minY) * 0.1f, 0.5f);
-    float rangeMin = std::max(std::max(maxX - minX, maxY - minY) * 1.0f, 20.0f);
-    (void)rangeMin;  // 保留用于最小范围约束
-
     float viewMinX = minX - marginX;
     float viewMaxX = maxX + marginX;
     float viewMinY = minY - marginY;
@@ -372,7 +372,6 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
                         LidarPointRecord r;
                         r.x = pts[i].x;
                         r.y = pts[i].y;
-                        r.intensity = pts[i].intensity;
                         r.timestamp_ns = header.timestamp_ns;
                         allPoints.push_back(r);
                     }

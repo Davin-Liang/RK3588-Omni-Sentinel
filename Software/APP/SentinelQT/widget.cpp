@@ -567,10 +567,10 @@ Widget::~Widget()
     if (lidar_) {
         lidar_->stop();
     }
+    deinit_nvme_();
+
     delete fusion_;
     delete lidar_;
-
-    deinit_nvme_();
 
     for (int i = 0; i < 2; ++i) {
         if (visioner_) {
