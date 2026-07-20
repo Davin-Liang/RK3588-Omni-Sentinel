@@ -339,6 +339,9 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
                       ? (trigger_timestamp_ns - window_ns) : 0;
     uint64_t end_ns = trigger_timestamp_ns;
 
+    // 0. 将内存缓冲区中的残留雷达数据刷入磁盘
+    flush();
+
     // 1. 扫描 NVMe 收集 LiDAR 记录
     int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
     if (read_fd < 0) {
@@ -360,21 +363,42 @@ bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
         size_t record_size = record_payload + padding;
 
         if (header.data_type == static_cast<uint8_t>(DataType::LIDAR) &&
-            header.timestamp_ns >= start_ns && header.timestamp_ns <= end_ns) {
+            // flush() 块 header ts=0，允许通过；每帧的真实 ts 在帧头中
+            (header.timestamp_ns == 0 ||
+             (header.timestamp_ns >= start_ns && header.timestamp_ns <= end_ns))) {
 
-            size_t pointCount = header.data_size / sizeof(LidarPointDisk);
-            if (pointCount > 0 && pointCount <= 1200) {
-                std::vector<uint8_t> buf(header.data_size);
-                n = pread(read_fd, buf.data(), header.data_size, offset + sizeof(Header));
-                if (n == static_cast<ssize_t>(header.data_size)) {
-                    const LidarPointDisk* pts = reinterpret_cast<const LidarPointDisk*>(buf.data());
-                    for (size_t i = 0; i < pointCount; ++i) {
-                        LidarPointRecord r;
-                        r.x = pts[i].x;
-                        r.y = pts[i].y;
-                        r.timestamp_ns = header.timestamp_ns;
-                        allPoints.push_back(r);
+            std::vector<uint8_t> buf(header.data_size);
+            n = pread(read_fd, buf.data(), header.data_size, offset + sizeof(Header));
+            if (n == static_cast<ssize_t>(header.data_size)) {
+                // 解析帧头: [pointsCount:u32][timestampNs:u64][LidarPointDisk * N] ...
+                size_t pos = 0;
+                while (pos + 12 <= static_cast<size_t>(header.data_size)) {
+                    uint32_t frameCount;
+                    uint64_t frameTs;
+                    std::memcpy(&frameCount, buf.data() + pos, sizeof(frameCount));
+                    std::memcpy(&frameTs, buf.data() + pos + sizeof(frameCount),
+                               sizeof(frameTs));
+                    pos += 12;  // 帧头: 4 + 8
+
+                    size_t framePointsSize = static_cast<size_t>(frameCount) * sizeof(LidarPointDisk);
+                    if (frameCount == 0 || pos + framePointsSize > static_cast<size_t>(header.data_size)) {
+                        break;  // 帧头损坏或结束
                     }
+
+                    // 时间窗口过滤
+                    if (frameTs >= start_ns && frameTs <= end_ns) {
+                        const LidarPointDisk* pts =
+                            reinterpret_cast<const LidarPointDisk*>(buf.data() + pos);
+                        for (uint32_t i = 0; i < frameCount; ++i) {
+                            LidarPointRecord r;
+                            r.x = pts[i].x;
+                            r.y = pts[i].y;
+                            r.timestamp_ns = frameTs;
+                            allPoints.push_back(r);
+                        }
+                    }
+
+                    pos += framePointsSize;
                 }
             }
         }
@@ -486,38 +510,45 @@ bool NVMeDataManager::write_lidar_points_to_disk(const uint8_t* points_data, siz
                                           uint64_t timestamp_ns) {
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
-    // 检查缓冲池空间
-    if (lidar_buffer_pos_ + points_size > lidar_buffer_.size()) {
-        // 缓冲池满了，需要刷入队列
-        if (!lidar_buffer_pos_) {
-            std::cerr << "Lidar buffer is empty but still full, possible logic error" << std::endl;
-            return false;
+    // 每帧前加 12 字节帧头: [pointsCount:u32][timestampNs:u64]
+    static constexpr size_t kFrameHeaderSize = sizeof(uint32_t) + sizeof(uint64_t);
+    size_t totalFrameSize = kFrameHeaderSize + points_size;
+
+    // 检查缓冲池空间（含帧头）
+    if (lidar_buffer_pos_ + totalFrameSize > lidar_buffer_.size()) {
+        // 缓冲池不够放当前帧，先刷已有数据到队列
+        if (lidar_buffer_pos_ > 0) {
+            auto block = std::make_shared<DataBlock>();
+            prepare_header(block->header, DataType::LIDAR, timestamp_ns,
+                          static_cast<uint32_t>(lidar_buffer_pos_));
+            block->data.assign(lidar_buffer_.data(),
+                              lidar_buffer_.data() + lidar_buffer_pos_);
+            block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
+
+            data_queue_.push(std::move(block));
+            queue_cv_.notify_one();
+
+            // 重置缓冲池位置
+            lidar_buffer_pos_ = 0;
         }
 
-        // 直接创建 DataBlock（一次拷贝，无包头拼接）
-        auto block = std::make_shared<DataBlock>();
-        prepare_header(block->header, DataType::LIDAR, timestamp_ns,
-                      static_cast<uint32_t>(lidar_buffer_pos_));
-        block->data.assign(lidar_buffer_.data(),
-                          lidar_buffer_.data() + lidar_buffer_pos_);
-        block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
-
-        data_queue_.push(std::move(block));
-        queue_cv_.notify_one();
-
-        // 重置缓冲池位置
-        lidar_buffer_pos_ = 0;
+        // 单帧超过整个缓冲池大小则拒绝
+        if (totalFrameSize > lidar_buffer_.size()) {
+            std::cerr << "Lidar frame too large for buffer: " << totalFrameSize << " bytes"
+                      << std::endl;
+            return false;
+        }
     }
 
-    // 写入新数据到缓冲池
-    if (lidar_buffer_pos_ + points_size <= lidar_buffer_.size()) {
-        std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_, points_data, points_size);
-        lidar_buffer_pos_ += points_size;
-        return true;
-    } else {
-        std::cerr << "Lidar data too large for buffer" << std::endl;
-        return false;
-    }
+    // 写入帧头 + 点数据
+    uint32_t count = static_cast<uint32_t>(points_size / sizeof(LidarPointDisk));
+    std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_, &count, sizeof(count));
+    std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_ + sizeof(count),
+               &timestamp_ns, sizeof(timestamp_ns));
+    std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_ + kFrameHeaderSize,
+               points_data, points_size);
+    lidar_buffer_pos_ += totalFrameSize;
+    return true;
 }
 
 bool NVMeDataManager::write_imu_data_to_disk(const uint8_t* imu_data, size_t imu_size,
@@ -884,6 +915,46 @@ size_t NVMeDataManager::get_queue_size() const {
 
 size_t NVMeDataManager::get_buffer_usage() const {
     return lidar_buffer_pos_ + imu_buffer_pos_;
+}
+
+void NVMeDataManager::flush() {
+    // 将残留的 LiDAR/IMU 缓冲区数据推入队列
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+
+        if (lidar_buffer_pos_ > 0) {
+            auto block = std::make_shared<DataBlock>();
+            // 记录头时间戳用 0（语义：flush 导出，非真实帧时间戳）
+            prepare_header(block->header, DataType::LIDAR, 0,
+                          static_cast<uint32_t>(lidar_buffer_pos_));
+            block->data.assign(lidar_buffer_.data(),
+                              lidar_buffer_.data() + lidar_buffer_pos_);
+            block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
+            data_queue_.push(std::move(block));
+            lidar_buffer_pos_ = 0;
+        }
+
+        if (imu_buffer_pos_ > 0) {
+            auto block = std::make_shared<DataBlock>();
+            prepare_header(block->header, DataType::IMU, 0,
+                          static_cast<uint32_t>(imu_buffer_pos_));
+            block->data.assign(imu_buffer_.data(),
+                              imu_buffer_.data() + imu_buffer_pos_);
+            block->padding_size = calc_padding(sizeof(Header) + imu_buffer_pos_);
+            data_queue_.push(std::move(block));
+            imu_buffer_pos_ = 0;
+        }
+    }
+    queue_cv_.notify_one();
+
+    // 等待 writer 线程将队列排空（数据安全落盘后返回）
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (data_queue_.empty()) break;
+        }
+        usleep(1000);  // 1ms
+    }
 }
 
 void NVMeDataManager::writer_thread() {

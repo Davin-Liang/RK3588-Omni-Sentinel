@@ -84,6 +84,9 @@ public:
     size_t get_queue_size() const;
     size_t get_buffer_usage() const;
 
+    // 将累积缓冲区中的残留数据强制刷入磁盘队列，等待 writer 线程写完
+    void flush();
+
 private:
     // 热力图渲染辅助
     struct LidarPointRecord {
