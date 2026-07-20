@@ -3505,7 +3505,7 @@ void Widget::init_nvme_()
         return;
     }
 
-    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, 2);
+    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, lidar_, 2);
     nvme_thread_ = new QThread(this);
     nvme_worker_->moveToThread(nvme_thread_);
 
@@ -3583,6 +3583,20 @@ QStringList Widget::do_backtrack_(uint64_t triggerTsUs, int cameraId,
             savedFiles.append(fileName);
         } else {
             fprintf(stderr, "[SentinelQT] backtrack export failed for cam%d\n", cam);
+        }
+    }
+
+    // 导出雷达热力图 PNG
+    {
+        std::string pngName = (QString("backtrack_%1_%2_lidar.png")
+            .arg(label, tsStr)).toStdString();
+        std::string pngPath = dir.absoluteFilePath(QString::fromStdString(pngName))
+            .toStdString();
+
+        if (nvme_manager_->export_lidar_heatmap_png(triggerNs, pngPath, backSecs)) {
+            fprintf(stderr, "[SentinelQT] backtrack LiDAR heatmap saved: %s\n",
+                    pngPath.c_str());
+            savedFiles.append(QString::fromStdString(pngName));
         }
     }
 
