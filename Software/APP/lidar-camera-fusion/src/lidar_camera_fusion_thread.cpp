@@ -72,6 +72,9 @@ void LidarCameraFusion::fusion_thread_()
         }
         lastLidarTs = frame.timestampNs;
 
+        struct timespec tIterStart;
+        clock_gettime(CLOCK_MONOTONIC, &tIterStart);
+
         // ---- 步骤 2：新雷达帧到达，drain YOLO 队列取最新 ----
         for (uint32_t c = 0; c < camCount_; ++c) {
             if (detectionProvider_) {
@@ -198,13 +201,15 @@ void LidarCameraFusion::fusion_thread_()
             }
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t iterUs = (now.tv_sec - tIterStart.tv_sec) * 1000000LL
+                           + (now.tv_nsec - tIterStart.tv_nsec) / 1000LL;
             time_t sec = now.tv_sec;
             int ms = static_cast<int>(now.tv_nsec / 1000000);
             struct tm tmbuf;
             localtime_r(&sec, &tmbuf);
-            fprintf(stderr, "[Fusion] %02d:%02d:%02d.%03d #%lu yolo=%s bbox=%u det=%u pts=%u track=%u(F:%u P:%u L:%u T:%u)\n",
+            fprintf(stderr, "[Fusion] %02d:%02d:%02d.%03d #%lu iter=%lldus yolo=%s bbox=%u det=%u pts=%u track=%u(F:%u P:%u L:%u T:%u)\n",
                     tmbuf.tm_hour, tmbuf.tm_min, tmbuf.tm_sec, ms,
-                    (unsigned long)iterationCount,
+                    (unsigned long)iterationCount, (long long)iterUs,
                     hasYolo ? "Y" : "N", yoloBboxCount,
                     tracker_->get_detection_count(),
                     frame.pointsCount,
