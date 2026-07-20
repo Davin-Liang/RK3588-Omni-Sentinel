@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 
 // ============================================================================
 // 线程模式（依赖 SentinelLslidarer，与实际部署代码一同编译）
@@ -195,7 +196,14 @@ void LidarCameraFusion::fusion_thread_()
                 default: break;
                 }
             }
-            fprintf(stderr, "[Fusion] #%lu yolo=%s bbox=%u det=%u pts=%u track=%u(F:%u P:%u L:%u T:%u)\n",
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            time_t sec = now.tv_sec;
+            int ms = static_cast<int>(now.tv_nsec / 1000000);
+            struct tm tmbuf;
+            localtime_r(&sec, &tmbuf);
+            fprintf(stderr, "[Fusion] %02d:%02d:%02d.%03d #%lu yolo=%s bbox=%u det=%u pts=%u track=%u(F:%u P:%u L:%u T:%u)\n",
+                    tmbuf.tm_hour, tmbuf.tm_min, tmbuf.tm_sec, ms,
                     (unsigned long)iterationCount,
                     hasYolo ? "Y" : "N", yoloBboxCount,
                     tracker_->get_detection_count(),
