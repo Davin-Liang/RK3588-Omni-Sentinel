@@ -308,6 +308,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 <div id="playerOverlay">
   <button id="playerClose" onclick="closePlayer()">✕</button>
   <video id="playerVideo" controls autoplay></video>
+  <img id="playerImg" style="max-width:90%;max-height:80%;display:none">
 </div>
 
 <script>
@@ -527,8 +528,9 @@ async function saveFusionConfig(){
 
 // ===== Videos =====
 async function loadVideos(){const d=await api('GET','/videos',null,{silent:true});const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.slice(-30).forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
-function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
-function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.pause();video.src='';overlay.classList.remove('show')}
+function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');img.style.display='none';video.style.display='';video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
+function playImage(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');video.style.display='none';img.style.display='';img.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show')}
+function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');video.pause();video.src='';img.src='';overlay.classList.remove('show')}
 async function delVideo(p){if(confirm('确认删除?')){await api('DELETE','/videos',{path:decodeURIComponent(p)});loadVideos()}}
 
 // ===== Backtrack =====
@@ -560,9 +562,12 @@ async function loadBacktrackFiles() {
         const sizeKB = v.size ? (v.size / 1024).toFixed(1) + ' KB' : '--';
         const dur = v.duration || '--:--';
         const pp = encodeURIComponent(v.path || '');
+        const isPng = v.name && v.name.toLowerCase().endsWith('.png');
+        const playFn = isPng ? "playImage" : "playVideo";
+        const playBtn = isPng ? '🖼' : '▶';
         tr.innerHTML = '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + v.name + '">' + v.name + '</td>'
             + '<td>' + dur + '</td><td>' + sizeKB + '</td>'
-            + '<td><button class="btn-play" onclick="playVideo(\'' + pp + '\')">▶</button>'
+            + '<td><button class="btn-play" onclick="' + playFn + '(\'' + pp + '\')">' + playBtn + '</button>'
             + '<button class="btn-del" onclick="delBacktrackFile(\'' + encodeURIComponent(v.name) + '\')">删除</button></td>';
         tb.appendChild(tr);
     });

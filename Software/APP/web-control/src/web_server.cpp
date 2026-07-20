@@ -235,11 +235,16 @@ bool WebServer::start()
         size_t fileSize = fsize.tellg();
         fsize.close();
 
+        // 根据扩展名判断 Content-Type
+        bool is_png = (filePath.size() >= 4 &&
+                       filePath.compare(filePath.size() - 4, 4, ".png") == 0);
+        const char* contentType = is_png ? "image/png" : "video/mp4";
+
         // 用 cpp-httplib 的内容提供器流式输出
         // cpp-httplib 会据此自动处理 Range 请求
         res.set_content_provider(
             fileSize,          // Content-Length
-            "video/mp4",       // Content-Type
+            contentType,       // Content-Type
             [filePath](size_t offset, size_t length, httplib::DataSink& sink) -> bool {
                 std::ifstream f(filePath, std::ios::binary);
                 if (!f) return false;
