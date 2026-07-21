@@ -419,9 +419,15 @@ function updateEisQuality(i,q){
 }
 function handleEvent(data){
   if(data&&data.event==='eis_quality'){
-    const i=Number(data.cam||0);if(i===0||i===1){cam[i].eisEnabled=!!data.eisEnabled;updateEisQuality(i,data)}return''
+    // WebServer::push_event() 将业务字段封装在 detail 中。
+    const q=(data.detail&&typeof data.detail==='object')?data.detail:data;
+    const i=Number(q.cam||0);
+    if(i===0||i===1){cam[i].eisEnabled=!!q.eisEnabled;cam[i].eisQuality=q;updateEisQuality(i,q)}
+    return''
   }
-  const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''
+  const detail=(data&&data.detail&&typeof data.detail==='object')?data.detail:data;
+  const l='相机'+(((detail&&detail.cam)||0)+1);
+  switch(data&&data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return''
 }
 
 // ===== Buttons =====

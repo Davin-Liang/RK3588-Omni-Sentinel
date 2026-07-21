@@ -2639,6 +2639,7 @@ void Widget::deinit_eis_()
     for (int i = 0; i < 2; ++i) {
         eisEnabled_[i] = false;
         eisQualityEvaluator_[i].setEisEnabled(false);
+        eisQualityMetrics_[i] = eisQualityEvaluator_[i].latestMetrics();
         QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
         if (btn) {
             btn->setText(QString::fromUtf8("防抖关"));
@@ -2694,6 +2695,8 @@ void Widget::on_btn_eis_(int camNum)
 
         eisEnabled_[camNum] = true;
         eisQualityEvaluator_[camNum].setEisEnabled(true);
+        eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+        push_eis_quality_to_web_(camNum);
         btn->setText(QString::fromUtf8("防抖开"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
@@ -2705,6 +2708,8 @@ void Widget::on_btn_eis_(int camNum)
         }
         eisEnabled_[camNum] = false;
         eisQualityEvaluator_[camNum].setEisEnabled(false);
+        eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+        push_eis_quality_to_web_(camNum);
         btn->setText(QString::fromUtf8("防抖关"));
         btn->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; "
@@ -2735,6 +2740,8 @@ std::string Widget::web_eis_start_(int camNum)
 
     eisEnabled_[camNum] = true;
     eisQualityEvaluator_[camNum].setEisEnabled(true);
+    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+    push_eis_quality_to_web_(camNum);
     update_camera_button_states_(camNum);
     fprintf(stderr, "[SentinelQT] cam %d IMU-only EIS enabled via web\n", camNum);
     return R"({"ok":true})";
@@ -2748,6 +2755,8 @@ std::string Widget::web_eis_stop_(int camNum)
     }
     eisEnabled_[camNum] = false;
     eisQualityEvaluator_[camNum].setEisEnabled(false);
+    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+    push_eis_quality_to_web_(camNum);
     update_camera_button_states_(camNum);
     if (!eisEnabled_[0] && !eisEnabled_[1]) {
         deinit_eis_();
