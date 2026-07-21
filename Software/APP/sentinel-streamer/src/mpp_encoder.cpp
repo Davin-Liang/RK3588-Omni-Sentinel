@@ -204,24 +204,48 @@ void mp4_output_close(AVFormatContext** ctx)
 // 编码 + 复用
 // ============================================================================
 
+bool ensure_enc_frame(AVFrame** frame, int width, int height)
+{
+    if (*frame && (*frame)->width == width && (*frame)->height == height)
+        return true;  // 尺寸匹配，复用
+
+    // 尺寸变化或首次分配
+    av_frame_free(frame);
+    *frame = av_frame_alloc();
+    if (!*frame) return false;
+    (*frame)->format = AV_PIX_FMT_NV12;
+    (*frame)->width  = width;
+    (*frame)->height = height;
+    int ret = av_frame_get_buffer(*frame, 0);
+    if (ret < 0) {
+        av_frame_free(frame);
+        return false;
+    }
+    return true;
+}
+
 bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int height,
                     int64_t pts,
-                    FILE* streamPipe, AVFormatContext* mp4Ctx)
+                    FILE* streamPipe, AVFormatContext* mp4Ctx,
+                    AVFrame* encFrame, AVPacket* encPkt)
 {
     if (!encCtx || !virtAddr) return true;
 
-    AVFrame* frame = av_frame_alloc();
-    if (!frame) {
-        fprintf(stderr, "[MppEncoder] av_frame_alloc failed\n");
-        return false;
+    bool ownFrame = (encFrame == nullptr);
+    AVFrame* frame = encFrame;
+    if (ownFrame) {
+        frame = av_frame_alloc();
+        if (!frame) { fprintf(stderr, "[MppEncoder] av_frame_alloc failed\n"); return false; }
+        frame->format = AV_PIX_FMT_NV12;
+        frame->width  = width;
+        frame->height = height;
+        av_frame_get_buffer(frame, 0);
+    } else {
+        frame->pts = pts;
+        frame->width  = width;
+        frame->height = height;
     }
 
-    frame->format = AV_PIX_FMT_NV12;
-    frame->width  = width;
-    frame->height = height;
-    frame->pts    = pts;
-
-    av_frame_get_buffer(frame, 0);
     uint8_t* src = static_cast<uint8_t*>(virtAddr);
     size_t ySize  = static_cast<size_t>(width) * height;
     std::memcpy(frame->data[0], src, ySize);
@@ -232,7 +256,7 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
 
     int64_t sentPts = pts;
     int ret = avcodec_send_frame(encCtx, frame);
-    av_frame_free(&frame);
+    if (ownFrame) av_frame_free(&frame);
 
     if (ret < 0 && ret != AVERROR_EOF) {
         char errBuf[256];
@@ -241,7 +265,8 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
         return false;
     }
 
-    AVPacket* pkt = av_packet_alloc();
+    bool ownPkt = (encPkt == nullptr);
+    AVPacket* pkt = ownPkt ? av_packet_alloc() : encPkt;
     while (true) {
         ret = avcodec_receive_packet(encCtx, pkt);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
@@ -250,13 +275,11 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
         pkt->pts = sentPts;
         pkt->dts = sentPts;
 
-        // 推流：直接写 H.264 裸流到 ffmpeg 管道
         if (streamPipe && pkt->size > 0) {
             fwrite(pkt->data, 1, pkt->size, streamPipe);
             fflush(streamPipe);
         }
 
-        // 录像：av_write_frame 写 MP4
         if (mp4Ctx && pkt->size > 0) {
             pkt->stream_index = 0;
             av_write_frame(mp4Ctx, pkt);
@@ -264,7 +287,7 @@ bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int heigh
 
         av_packet_unref(pkt);
     }
-    av_packet_free(&pkt);
+    if (ownPkt) av_packet_free(&pkt);
 
     clock_gettime(CLOCK_MONOTONIC, &tEnc1);
     int64_t encUs = (tEnc1.tv_sec - tEnc0.tv_sec) * 1000000

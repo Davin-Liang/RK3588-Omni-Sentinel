@@ -54,6 +54,17 @@
 
 ---
 
+## 6. rga_scale_nv12_to_nv12_ 被 rga_convert_to_rgb_full_ 替代
+
+**现象**: 预览画面为 720p 低分辨率 NV12 格式，色彩空间与 QT 渲染不兼容，显示异常。
+
+**原因**: 早期预览管线使用 `rga_scale_nv12_to_nv12_` 将 1080p NV12 降级缩放到 720p NV12，走 RGA `imresize`。但 NV12 是 YUV 4:2:0 半平面格式，QT `QImage` 无法直接渲染，且 720p 分辨率损失了大量细节，预览质量差。
+
+**解决**: 废弃 `rga_scale_nv12_to_nv12_`，新增 `rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf)`，使用 RGA `improcess` 将 1080p NV12 一次转为 1080p RGB888（无缩放、无 letterbox），RGB888 可直接构造 `QImage(QImage::Format_RGB888)` 零开销渲染。更改后预览画面：全分辨率、全彩、与 QT 渲染管线完全兼容。
+
+---
+
+
 ## 7. USB 相机 NV12 预览/推流画面横向花屏（未解决）
 
 **现象**: USB 相机（/dev/video21，1280x720，NV12 原生输出）预览和推流画面出现横向花屏（水平条纹状撕裂），相机静止时较轻微，运动时明显加剧。ISP 相机（MIPI CSI）完全正常。USB 单独运行时问题仍在，排除两路 RGA 竞争。
@@ -102,15 +113,6 @@ DQBUF → sync_dma → imcopy(相机BUF → usbSafePool) → QBUF(立即归还�
 
 ---
 
-## 6. rga_scale_nv12_to_nv12_ 被 rga_convert_to_rgb_full_ 替代
-
-**现象**: 预览画面为 720p 低分辨率 NV12 格式，色彩空间与 QT 渲染不兼容，显示异常。
-
-**原因**: 早期预览管线使用 `rga_scale_nv12_to_nv12_` 将 1080p NV12 降级缩放到 720p NV12，走 RGA `imresize`。但 NV12 是 YUV 4:2:0 半平面格式，QT `QImage` 无法直接渲染，且 720p 分辨率损失了大量细节，预览质量差。
-
-**解决**: 废弃 `rga_scale_nv12_to_nv12_`，新增 `rga_convert_to_rgb_full_(int srcFd, int srcWidth, int srcHeight, DmaBuffer_t* dstBuf)`，使用 RGA `improcess` 将 1080p NV12 一次转为 1080p RGB888（无缩放、无 letterbox），RGB888 可直接构造 `QImage(QImage::Format_RGB888)` 零开销渲染。更改后预览画面：全分辨率、全彩、与 QT 渲染管线完全兼容。
-
----
 
 ## 8. V4L2 MPLANE 模式未设 planes 数组导致静默失败
 
@@ -192,3 +194,24 @@ buf.length = 1;
 **原因**: `calculate_eis_offset()` 每帧直接返回 IMU 积分的瞬时偏移值，无任何时间域平滑。
 
 **解决**: 采集线程中新增指数移动平均（EMA）低通滤波：`smoothed = alpha * current + (1-alpha) * prev`，平滑系数 `alpha` 通过 `set_eis_smooth_alpha()` 配置（默认 0.7），`config.ini` 中 `[EIS]` 节 `smoothAlpha` 键可调。
+
+---
+
+## 15. NpuPreview 合并队列拆分为三个独立队列
+
+**现象**: NPU 推理和预览消费者耦合在同一个 `wait_get_preview` API 上，任一消费者的阻塞或延迟都会影响另一方。release 时必须同时归还两个 buffer，任一消费者无法独立管理内存生命周期。
+
+**原因**: 早期设计将 NPU 推理小图和预览大图打包在 `NpuPreview` 结构体中，共用同一个 `previewTaskQueue` 队列。消费者通过 `wait_get_preview(camNum)` 返回 `{npuImage, previewImage}`，release 时调用 `release_preview(camNum, &task)` 同时归还两个 buffer。这导致 NPU 池空时预览停摆（#9），且无法在不同线程中独立消费 NPU 和预览数据。
+
+**解决**: 彻底移除 `NpuPreview` 结构体，将 `CameraContext` 中的队列拆分为三个完全独立的 `ThreadSafeQueue<DmaBuffer_t*>`：
+- `npuTaskQueue` — 独立 NPU 推理队列，API: `wait_get_npu` / `try_get_npu` / `release_npu`
+- `previewTaskQueue` — 独立预览队列，API: `wait_get_preview` / `try_get_preview` / `release_preview`
+- `processTaskQueue` — 推流/录像队列（无变化）
+
+每个队列有自己独立的 `wait`/`try`/`release` 方法组，消费者完全解耦。NPU 池空只影响 NPU 推理线程，预览照常产出。
+
+**影响范围**:
+- `CameraContext`: 移除 `ThreadSafeQueue<NpuPreview> previewTaskQueue`，新增 `ThreadSafeQueue<DmaBuffer_t*> npuTaskQueue`，`previewTaskQueue` 改为 `DmaBuffer_t*`
+- `SentinelVisioner` 公开 API: 移除 `NpuPreview wait_get_preview(camNum)` 和 `void release_preview(camNum, NpuPreview*)`，新增 `wait_get_npu` / `try_get_npu` / `release_npu` 和 `wait_get_preview` / `try_get_preview` / `release_preview`（返回 `DmaBuffer_t*`）
+- `capture_thread_func_`: 操作 A 和 B 拆分到独立 `if` 块，各自独立 push 和 release
+- 所有下游消费者: sentinel-yolo-infer、SentinelQT、web-control 的预览/NPU 拉取代码同步更新

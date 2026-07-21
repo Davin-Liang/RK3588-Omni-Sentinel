@@ -93,6 +93,11 @@ NVMe-SSD (NVMe 高速存储 + 视频回溯)
   ├── NVMeDataManager (生产者-消费者模式, 独立 writer 线程, 预分配内存池)
   └── RecordBufferPool 下游消费 (NV12 帧直存, 绕过 swscale 零开销编码)
 
+thermal-controller (RK3588 温控调频组件)
+  ├── 无外部依赖 (仅 C++14 + POSIX 文件 I/O)
+  ├── 读取 soc-thermal + CPU/NPU cur_freq，4 级回滞策略
+  └── 写 cpufreq/devfreq max_freq 设频率上限（不接管 governor）
+
 SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-visioner (预览帧获取 + RGA 预处理)
   ├── sentinel-yolo-infer (NPU 推理实例管理，懒加载创建/销毁)
@@ -102,8 +107,9 @@ SentinelQT (QT5 嵌入式触控界面)
   ├── sentinel-lslidarer (激光雷达驱动, 融合页启用时启动)
   ├── lidar-camera-fusion (视觉-雷达融合 + 多目标跟踪, 含内部线程)
   ├── icm45686-eis-app-parameterized (IMU 电子防抖, 参数化 API, 回调注入 sentinel-visioner NPU 路径)
+  ├── thermal-controller (温控调频, CPU 3簇 + NPU max_freq 上限调节)
   ├── Qt5 Widgets (QStackedWidget 四页布局)
-  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [NVMe] 等)
+  └── config.ini (运行时配置, 含 [Lidar] [Fusion] [WebServer] [Backtrack] [EIS] [Thermal] [NVMe] 等)
 ```
 
 ### web-control — Web 远程控制组件
@@ -157,7 +163,7 @@ SentinelQT (QT5 嵌入式触控界面)
 
 - **DBSCAN 聚类** (`dbscan_cluster_`): 2D 笛卡尔空间聚类（O(n²)，540点可忽略），BFS 扩张。替代旧 CDC 角度链聚类。参数 `dbscanEpsMeters` / `dbscanMinPoints` / `maxPointDistanceMeters` / `maxClusterDistanceMeters`
 - **时间证据累积** (`persist_clusters_`): DBSCAN 输出不直接变 detection，先做帧间 cluster 匹配（质心距离 < max(eps×2.5, 1.0m)）。连续出现 ≥ `clusterPersistenceFrames`(2) 帧才输出为正式 detection。槽位满时复用失效记录或淘汰最老记录
-- **bbox 认领评分** (`bbox_claim_`): 对每个 confirmed 簇，投影质心到各相机，计算 `score = 1/(1+dist) * proximityFactor(pixelDist)`。每 bbox 选最高分簇，冲突时一个簇只能被一个 bbox 认领（赢家通吃+补选）。点数 < `minBboxClaimPoints`(10) 的簇不参与竞争
+- **bbox 认领评分** (`bbox_claim_`): 对每个 confirmed 簇，投影质心到各相机，计算 `score = 1/(1+dist) * proximityFactor(pixelDist)`。**只匹配同相机 bbox**（通过 `bboxCamIdx` 数组区分来源），避免 cam0 簇被 cam1 bbox 误认领。每 bbox 选最高分簇，冲突时一个簇只能被一个 bbox 认领（赢家通吃+补选）。点数 < `minBboxClaimPoints`(10) 的簇不参与竞争。**深度优先仲裁**：得分最高簇若比最近候选簇远 ≥ 0.5m，且最近簇未被认领，则强制选最近簇
 - **Alpha-Beta 跟踪器** (`LidarTargetTracker`): 预测 → 评分制贪心最近邻关联（纯距离评分 `1/(1+d²)`，无 bboxIdx/classId 门控，不同检测类型用不同硬门限）→ 校正 → 5 状态生命周期
 - **5 状态生命周期** (`manage_lifecycle_`): Tentative(蓝) → FusionTracking(绿, YOLO+LiDAR) ⇄ PureRadarTracking(黄, 纯LiDAR) → Lost(红, 预测中) → Deleted。允许连续丢失 `maxFusionMisses`(2) 帧缓冲，单帧丢失不跳变
 - **孤儿检测**: 未被 bbox 认领的确认簇，仅匹配非 Tentative 非 Deleted 航迹续命（门限 `orphanAssocMaxDistMeters=0.5m`），不创建新 track
@@ -165,7 +171,7 @@ SentinelQT (QT5 嵌入式触控界面)
 - **LiDAR 帧去重**: `update()` 入口检查时间戳，相同则跳过；融合循环先取雷达帧再决定是否 drain YOLO
 - **maxTracks 淘汰**: 槽位满时自动淘汰最老的 Lost track 腾出空间
 - **OSD 快照**: `fuse_data()` 投影 LiDAR 点供推流画面显示（独立于 tracker 聚类），tracker 质心供距离标签
-- **聚类可视化**: 通过 `copy_cluster_vis()` 导出 ClusterVisData（质心+半径+类型），WebSocket 推送至前端 Canvas 渲染半透明圆
+- **聚类可视化**: 通过 `copy_cluster_vis()` 导出 ClusterVisData（质心+半径+类型），WebSocket 推送至前端 Canvas 渲染半透明圆。orphan 判定通过 `clusterBboxMatch_` 索引精确匹配，避免距离阈值误判
 - **外参变换**: 手写 4×4 齐次变换矩阵，针对 2D 激光雷达（z=0）优化
 - **预分配内存**: 全栈数组预分配，零运行时堆分配
 
@@ -195,6 +201,18 @@ SentinelQT (QT5 嵌入式触控界面)
 - **配置**: `SentinelYoloInferConfig` 含 modelPath、boxThreshold、nmsThreshold、waitTimeoutMs、pushEmptyResult
 
 唯一公共头文件: `include/SentinelYoloInfer.h`，API 类: `SentinelYoloInfer`
+
+### thermal-controller — RK3588 温控调频组件
+
+用户态温度监控 + 主动频率限制组件。读取 RK3588 soc-thermal 温度 + CPU/NPU 当前频率，通过 4 级回滞策略（Normal/Warm/Hot/Critical）动态写入 `scaling_max_freq` / `devfreq max_freq` 设频率天花板。不接管 governor（保持 `schedutil` / `rknpu_ondemand`），只调上限。
+
+- **ThermalController**: 核心类，由调用方 1 秒定时器驱动 `tick()`。内置温度/频率 sysfs 读取 + 策略评估 + max_freq 写入。均在调用线程同步执行，无独立线程
+- **4 级回滞**: Normal(<65°C) → Warm(>65°C, <60°C 恢复) → Hot(>75°C, <70°C 恢复) → Critical(>85°C, <80°C 恢复)。每级不同 CPU A76/A55/NPU 频率上限
+- **写入优化**: 仅在等级变化（或首次）时写入，写完跳过与目标值相同的情况；启动时恢复全速，退出时可配恢复
+- **配置**: `config.ini [Thermal]` 节，全部 28 个参数可配置，重启生效。`enabled=false` 时只监控不控制
+- **REST API**: `GET /api/v1/thermal/status` 返回温度/等级/频率 JSON
+
+唯一公共头文件: `include/thermal_controller.h`，API 类: `ThermalController`
 
 ### sentinel-visioner — 多路视觉流水线
 
@@ -255,6 +273,19 @@ SentinelQT (QT5 嵌入式触控界面)
 | `libdrm` | DRM 头文件 + `libdrm.so`（allocator 通过 dlopen 使用） |
 | `allocator` | DMA/DRM 底层分配器，CMake OBJECT 库（非 .a） |
 | `ffmpeg` | FFmpeg 动态库 (`libavcodec.so` 等，nyanmisaka/ffmpeg-rockchip 分支交叉编译) |
+
+### camera-calibrate — 相机标定工具
+
+独立命令行工具，基于原生 V4L2 API + OpenCV 实现棋盘格相机标定，支持 RK3588 ISP MPLANE 格式。
+
+- **原生 V4L2 捕获**: 绕过 OpenCV VideoCapture（不支持 MPLANE），直接使用 V4L2 MMAP/USERPTR 实现 MPLANE 设备的帧抓取
+- **NV12→BGR 转换**: CPU 端逐行去 stride padding 后 OpenCV 转换，兼容 RKISP stride≠width 的情况
+- **标定参数**: `CALIB_FIX_ASPECT_RATIO | CALIB_ZERO_TANGENT_DIST | CALIB_FIX_K2 | CALIB_FIX_K3`，固定 fx=fy，只用 k1 径向畸变，避免 CALIB_RATIONAL_MODEL 过拟合导致 fx 爆涨
+- **自动采集模式**: 检测到棋盘格新位置自动捕获，带 5 帧冷却和 40px 去重阈值，`--save-frames` 可保存原图+角点标注图
+- **NPU 内参输出**: 自动计算 NPU 640×640 letterbox 缩放后的 fx/fy/cx/cy，直接输出 config.ini 片段格式
+
+用法: `./camera_calibrate /dev/video11 25 --save-frames ./frames`
+构建: `cd camera-calibrate && ./build.sh`（依赖 `../3rdparty/opencv`）
 
 ### SentinelQT — QT5 嵌入式触控界面
 

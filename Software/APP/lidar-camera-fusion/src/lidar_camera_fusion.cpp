@@ -369,7 +369,8 @@ bool LidarCameraFusion::update_tracking(const FusionResult& fusionResult,
                                          uint32_t pointCount,
                                          const YoloBBox* bboxes,
                                          uint32_t bboxCount,
-                                         uint64_t timestampNs)
+                                         uint64_t timestampNs,
+                                         const uint32_t* bboxCamIdx)
 {
     if (!trackingEnabled_) {
         return true;
@@ -378,7 +379,7 @@ bool LidarCameraFusion::update_tracking(const FusionResult& fusionResult,
         return false;
     }
     return tracker_->update(fusionResult, lidarPoints, pointCount,
-                            bboxes, bboxCount, timestampNs);
+                            bboxes, bboxCount, timestampNs, bboxCamIdx);
 }
 
 void LidarCameraFusion::register_warning_callback(TrackingCallback cb,

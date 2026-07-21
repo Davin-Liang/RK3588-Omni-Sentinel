@@ -11,7 +11,7 @@ class LidarTargetTracker {
 public:
     static constexpr uint32_t kMaxTracks      = 50;
     static constexpr uint32_t kMaxDetections  = 200;
-    static constexpr uint32_t kMaxLidarPoints = 540;
+    static constexpr uint32_t kMaxLidarPoints = 1200;
     static constexpr uint32_t kMaxClusters    = 32;
 
     LidarTargetTracker();
@@ -29,7 +29,8 @@ public:
                 uint32_t pointCount,
                 const YoloBBox* bboxes,
                 uint32_t bboxCount,
-                uint64_t timestampNs);
+                uint64_t timestampNs,
+                const uint32_t* bboxCamIdx = nullptr);
 
     bool copy_snapshot(TrackedTarget* out, uint32_t maxCount,
                        uint32_t* outCount) const;
@@ -125,6 +126,9 @@ private:
 
     // ---- LiDAR 去重 ----
     uint64_t lastLidarTimestampNs_{0};
+
+    // ---- bbox 相机来源 ----
+    const uint32_t* bboxCamIdx_{nullptr};
 
     // ---- 关联缓冲区 ----
     int32_t trackMatches_[kMaxTracks];

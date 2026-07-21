@@ -162,9 +162,12 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
   <div id="logo">RK3588 Omni Sentinel</div>
   <div id="hwStats">
     <span>🌡 <span class="val" id="hwTemp">--°C</span></span>
+    <span class="val" id="hwLevel" style="display:none"></span>
     <span>CPU <span class="val" id="hwCpu">--</span>%</span>
+    <span class="val" id="hwCpuFreq" style="display:none"></span>
     <span>RGA <span class="val" id="hwRga">-/-/-</span></span>
     <span>NPU <span class="val" id="hwNpu">-/-/-</span></span>
+    <span class="val" id="hwNpuFreq" style="display:none"></span>
   </div>
   <div id="clock"></div>
   <button class="btn btn-accent" id="themeBtn" title="切换配色">🎨</button>
@@ -230,6 +233,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
         <span class="fusion-status" id="fusionHdrStatus">关闭</span>
         <span class="spacer"></span>
         <button class="btn" id="btnFusionToggle" style="padding:5px 14px">启用融合</button>
+        <button class="btn btn-on" id="btnClusterVis" style="padding:5px 14px">隐藏聚类</button>
       </div>
       <div class="fusion-body" style="flex:1">
         <div class="fusion-canvas-wrap" id="fusionCanvasWrap"><canvas id="fusionCanvas"></canvas></div>
@@ -304,6 +308,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 <div id="playerOverlay">
   <button id="playerClose" onclick="closePlayer()">✕</button>
   <video id="playerVideo" controls autoplay></video>
+  <img id="playerImg" style="max-width:90%;max-height:80%;display:none">
 </div>
 
 <script>
@@ -325,7 +330,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
 let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
-let trackingTargets=[],trackingClusters=[],radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
+let trackingTargets=[],trackingClusters=[],showClusters=true,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
 function connectWS(){
@@ -361,7 +366,15 @@ function dismissAlert(id){
 
 // ===== UI Update =====
 function updateUI(data){
-  if(data.hw&&data.hw.ok){const h=data.hw;document.getElementById('hwTemp').textContent=(h.temp>=0?h.temp:'--')+'°C';document.getElementById('hwCpu').textContent=h.cpu>=0?h.cpu:'--';if(h.rga&&h.rga.length)document.getElementById('hwRga').textContent=h.rga.map(v=>v>=0?v:'-').join('/');if(h.npu&&h.npu.length)document.getElementById('hwNpu').textContent=h.npu.map(v=>v>=0?v:'-').join('/')}
+  if(data.hw&&data.hw.ok){const h=data.hw;document.getElementById('hwTemp').textContent=(h.temp>=0?h.temp:'--')+'°C';document.getElementById('hwCpu').textContent=h.cpu>=0?h.cpu:'--';if(h.rga&&h.rga.length)document.getElementById('hwRga').textContent=h.rga.map(v=>v>=0?v:'-').join('/');if(h.npu&&h.npu.length)document.getElementById('hwNpu').textContent=h.npu.map(v=>v>=0?v:'-').join('/');
+    // Thermal level
+    const lvEl=document.getElementById('hwLevel');if(h.thermalLevel){lvEl.textContent=h.thermalLevel;lvEl.style.display=''}else{lvEl.style.display='none'}
+    // Thermal freq
+    if(h.thermalFreq){const tf=h.thermalFreq;
+      const cfEl=document.getElementById('hwCpuFreq');if(tf.cpuBig>0){cfEl.textContent=(tf.cpuBig/1e6).toFixed(1)+'G';cfEl.style.display=''}else{cfEl.style.display='none'}
+      const nfEl=document.getElementById('hwNpuFreq');if(tf.npu>0){nfEl.textContent=(tf.npu/1e9).toFixed(1)+'G';nfEl.style.display=''}else{nfEl.style.display='none'}
+    }
+  }
 
   for(let i=0;i<2;i++){const d=data['cam'+i];if(!d)continue;
     Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
@@ -464,6 +477,7 @@ function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('
 
 // ===== Fusion =====
 document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop');fusionEnabled=!1;trackingTargets=[];trackingClusters=[];updateFusionStatus();drawRadar()}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
+document.getElementById('btnClusterVis').onclick=function(){showClusters=!showClusters;this.textContent=showClusters?'隐藏聚类':'显示聚类';this.className='btn '+(showClusters?'btn-on':'btn-off');drawRadar()};
 function updateFusionStatus(){const f=trackingTargets.filter(t=>t.state==='FusionTracking').length,p=trackingTargets.filter(t=>t.state==='PureRadarTracking').length,l=trackingTargets.filter(t=>t.state==='Lost').length,w=trackingTargets.filter(t=>t.warningActive).length;document.getElementById('fusionHdrStatus').textContent='目标:'+trackingTargets.length+' 融合:'+f+' 纯雷达:'+p+' 丢失:'+l+' 告警:'+w+' | '+(fusionEnabled?'运行中':'关闭')}
 
 // ===== Radar =====
@@ -482,7 +496,7 @@ function drawRadar(){
   // Targets
   trackingTargets.forEach(t=>{const px=cx+t.posY*scale,py=cy-t.posX*scale;if(px<0||px>w||py<0||py>h)return;let fill,border;switch(t.state){case'FusionTracking':fill='#3fb950';border='#2ea043';break;case'PureRadarTracking':fill='#d29922';border='#b08800';break;case'Tentative':fill='#4493f8';border='#3572c8';break;case'Lost':fill='#da3633';border='#b02624';break;default:fill='#8b949e';border='#6e7681'}if(t.warningActive){ctx.beginPath();ctx.arc(px,py,12+4*Math.sin(Date.now()/200),0,Math.PI*2);ctx.strokeStyle='rgba(218,54,51,0.6)';ctx.lineWidth=2;ctx.stroke()}ctx.beginPath();ctx.arc(px,py,7,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle=border;ctx.lineWidth=1.5;ctx.stroke();if(Math.abs(t.velX)>0.01||Math.abs(t.velY)>0.01){const speed=Math.sqrt(t.velX*t.velX+t.velY*t.velY),len=Math.min(speed*8,22),vx=-t.velY/speed*len,vy=-t.velX/speed*len,ex=px+vx,ey=py+vy;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(ex,ey);ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=1.5;ctx.stroke();const a=Math.atan2(vy,vx);ctx.beginPath();ctx.moveTo(ex,ey);ctx.lineTo(ex-6*Math.cos(a-0.5),ey-6*Math.sin(a-0.5));ctx.lineTo(ex-6*Math.cos(a+0.5),ey-6*Math.sin(a+0.5));ctx.closePath();ctx.fillStyle='rgba(255,255,255,0.8)';ctx.fill()}ctx.fillStyle='#fff';ctx.font='bold 13px Arial';ctx.fillText(t.id,px+9,py-4);ctx.fillText(t.distanceMeters.toFixed(1)+'m',px+9,py+8)});
   // Cluster circles
-  if(trackingClusters&&trackingClusters.length>0){trackingClusters.forEach(c=>{const cpx=cx+c.cy*scale,cpy=cy-c.cx*scale,cr=c.radius*scale;if(cpx<0||cpx>w||cpy<0||cpy>h)return;const a=0.25;if(c.isOrphan){ctx.fillStyle='rgba(68,147,248,'+a+')';ctx.strokeStyle='rgba(68,147,248,0.5)'}else{ctx.fillStyle='rgba(63,185,80,'+a+')';ctx.strokeStyle='rgba(63,185,80,0.5)'}ctx.beginPath();ctx.arc(cpx,cpy,Math.min(cr,60),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='rgba(255,255,255,0.6)';ctx.font='11px Arial';ctx.fillText(c.pointCount,cpx+cr+2,cpy+3)})}
+  if(showClusters&&trackingClusters&&trackingClusters.length>0){trackingClusters.forEach(c=>{const cpx=cx+c.cy*scale,cpy=cy-c.cx*scale,cr=c.radius*scale;if(cpx<0||cpx>w||cpy<0||cpy>h)return;const a=0.25;if(c.isOrphan){ctx.fillStyle='rgba(68,147,248,'+a+')';ctx.strokeStyle='rgba(68,147,248,0.5)'}else{ctx.fillStyle='rgba(63,185,80,'+a+')';ctx.strokeStyle='rgba(63,185,80,0.5)'}ctx.beginPath();ctx.arc(cpx,cpy,Math.min(cr,60),0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle='rgba(255,255,255,0.6)';ctx.font='11px Arial';ctx.fillText(c.pointCount,cpx+cr+2,cpy+3)})}
   // Legend
   const lx=w-125,ly=h-65;ctx.fillStyle='rgba(26,26,46,0.88)';ctx.beginPath();ctx.roundRect(lx-5,ly-5,130,70,6);ctx.fill();[['视觉雷达融合','#3fb950'],['纯雷达跟踪','#d29922'],['待确认','#4493f8'],['跟踪丢失中','#da3633']].forEach(([l,c],i)=>{const y=ly+i*16;ctx.beginPath();ctx.arc(lx+4,y+4,4,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();ctx.fillStyle='#e6edf3';ctx.font='13px Arial';ctx.fillText(l,lx+14,y+7)})
 }
@@ -514,8 +528,9 @@ async function saveFusionConfig(){
 
 // ===== Videos =====
 async function loadVideos(){const d=await api('GET','/videos',null,{silent:true});const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.slice(-30).forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
-function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
-function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.pause();video.src='';overlay.classList.remove('show')}
+function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');img.style.display='none';video.style.display='';video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
+function playImage(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');video.style.display='none';img.style.display='';img.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show')}
+function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');video.pause();video.src='';img.src='';overlay.classList.remove('show')}
 async function delVideo(p){if(confirm('确认删除?')){await api('DELETE','/videos',{path:decodeURIComponent(p)});loadVideos()}}
 
 // ===== Backtrack =====
@@ -547,9 +562,12 @@ async function loadBacktrackFiles() {
         const sizeKB = v.size ? (v.size / 1024).toFixed(1) + ' KB' : '--';
         const dur = v.duration || '--:--';
         const pp = encodeURIComponent(v.path || '');
+        const isPng = v.name && v.name.toLowerCase().endsWith('.png');
+        const playFn = isPng ? "playImage" : "playVideo";
+        const playBtn = isPng ? '🖼' : '▶';
         tr.innerHTML = '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + v.name + '">' + v.name + '</td>'
             + '<td>' + dur + '</td><td>' + sizeKB + '</td>'
-            + '<td><button class="btn-play" onclick="playVideo(\'' + pp + '\')">▶</button>'
+            + '<td><button class="btn-play" onclick="' + playFn + '(\'' + pp + '\')">' + playBtn + '</button>'
             + '<button class="btn-del" onclick="delBacktrackFile(\'' + encodeURIComponent(v.name) + '\')">删除</button></td>';
         tb.appendChild(tr);
     });

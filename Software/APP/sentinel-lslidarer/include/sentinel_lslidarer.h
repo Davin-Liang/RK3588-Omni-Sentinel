@@ -65,8 +65,8 @@ struct LidarConfig {
     /// N10Plus: 每包角度组数（16 个角度 × 2 回波 = 32 点每包）
     static constexpr int kPacketPointsMax = 16;
 
-    /// N10Plus: 每圈理论最大点数 = ceil(5400 Hz / 10 Hz) = 540
-    static constexpr int kPointsPerSweep = 540;
+    /// N10Plus: 每圈理论最大点数。实际高分辨率模式下可达 ~1100 点/圈
+    static constexpr int kPointsPerSweep = 1200;
 
     /// 距离分辨率（米/计数值）
     static constexpr float kDistanceResolution = 0.001f;

@@ -28,6 +28,7 @@ class TopDownView;
 class VirtualKeyboard;
 class WebServer;
 class AIReportWorker;
+#include "thermal_controller.h"
 class QThread;
 class QTimer;
 class QTableWidget;
@@ -78,6 +79,8 @@ private slots:
     void on_btn_ai_analysis_();
     void on_ai_report_ready_(const QString& report);
     void on_ai_auto_tick_();
+    void on_btn_ai_report_page_();
+    void on_btn_back_from_ai_report_();
     void update_clock_();
     void update_hw_usage_();
     void update_record_info_(int camNum);
@@ -161,12 +164,19 @@ private:
     EisQualityEvaluator eisQualityEvaluator_[2];
     EisQualityMetrics   eisQualityMetrics_[2];
     int                 eisQualityFrameCounter_[2] = {0, 0};
+    int                 eisQualityWebPushCounter_[2] = {0, 0};
     void draw_eis_quality_overlay_(QImage& image, int camNum);
+    void push_eis_quality_to_web_(int camNum);
+
+    // ---- Thermal ----
+    ThermalConfig         thermalCfg_;
+    ThermalController*    thermalCtrl_ = nullptr;
 
     // ---- AI 分析 ----
     AIReportWorker*     aiReportWorker_;
     QThread*            aiReportThread_;
-    QTextEdit*          aiReportText_;
+    QTextEdit*          aiReportText_;       // 主页面小文本框（触发分析时显示状态）
+    QTextEdit*          aiReportPageText_;   // AI 报告子页面的全屏文本框
     QTimer*             aiAutoTimer_;
     int                 aiAutoIntervalSec_;
     int                 aiCountdownSec_;
@@ -246,6 +256,7 @@ private:
     QComboBox*          backtrackCamCombo_;
     QString             backtrackDir_;
     void build_backtrack_page_();
+    void build_ai_report_page_();
 
     // ---- 自动回溯 ----
     bool                    autoBacktrackEnabled_ = false;

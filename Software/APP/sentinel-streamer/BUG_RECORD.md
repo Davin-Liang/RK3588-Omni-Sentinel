@@ -276,6 +276,41 @@ ln -s $(which pkg-config) <sdk>/bin/aarch64-buildroot-linux-gnu-pkg-config
 
 ---
 
+## 28. stop_record / stop_stream 委托关闭同步 — 消除 TOCTOU use-after-free
+
+**现象**: 推流运行中停止录像（或反之），偶发 SIGSEGV。GDB 显示：
+
+- 崩溃在 `av_write_frame()` 或 `0x0000007f846852f4`（无符号）
+- `corrupted size vs. prev_size` → `Aborted`
+- 堆栈损坏（`Backtrace stopped: previous frame identical to this frame (corrupt stack?)`）
+
+日志特征：`DEBUG: closing record MP4...` 之后立即崩溃。
+
+**原因**: 此前修复（#8、#11）仅在 `recordEnabled = false` 后 sleep 100ms 再关闭编码器，但这不是同步保证——DDR 拥堵时 MPP 编码延迟可能远超 100ms。根本问题是 **TOCTOU 竞态**：
+
+```text
+主线程 stop_record()              Stream 线程 stream_thread_func_()
+────────────────────              ─────────────────────────────────
+recordEnabled = false             
+mp4_output_close(&mp4Ctx) ←──→    recordEnabled.load() → true（已过检！）
+  → avformat_free_context()       encode_and_mux(encCtx, ..., mp4Ctx)
+  → mp4Ctx 内存已释放               → av_write_frame(mp4Ctx)  ← UAF!
+```
+
+`stop_stream()` 同样存在竞态：`ffmpegPipe` 被主线程 `pclose()` 时，stream 线程可能正 `fwrite()` 往该管道写数据。
+
+`atomic` + `memory_order` 只保证标志本身的可见性，不保护"检查通过后、实际使用前"这个窗口。
+
+**解决**: 改用**原子标志委托模式**——主线程不直接释放资源，而是设标志请求 stream 线程在安全点自行关闭：
+
+1. `StreamerContext` 新增 `std::atomic<bool> recordClosePending` 和 `streamClosePending`
+2. Stream 线程在循环顶部（`wait_get_orig_copy_buffer` 之前，保证不在任何 `encode_and_mux` 调用中）检查标志，有请求则自行关闭对应资源并重置标志
+3. `stop_record()` / `stop_stream()` 主线程：设标志 → 自旋等待（最长 5 秒，10ms 间隔）→ 超时降级为强制关闭 + WARNING
+
+关键原则：**任何输出上下文/编码器/管道，只能由持有它的线程在安全点关闭**。跨线程关闭必然存在 TOCTOU 窗口。
+
+---
+
 ## 27. EIS 调试双输出 — 无防抖 RGA scale 必须在 origBuf release 之前
 
 **现象**: 计划在 worker 循环尾部（step 5c）做无防抖的第二路 RGA scale，但 origBuf 在 step 4 结束时已 release。虽 RGA 同步模式 + buffer 复用概率极低，理论上存在 dmaFd 被 visioner 线程覆写的竞态窗口。
