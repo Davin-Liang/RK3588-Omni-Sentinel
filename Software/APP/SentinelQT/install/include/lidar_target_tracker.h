@@ -40,6 +40,9 @@ public:
 
     uint32_t get_detection_count() const { return detectionCount_; }
 
+    /** @brief 获取最近 N 帧延迟统计（us）：avg/min/max */
+    void get_latency_stats(int64_t& outAvg, int64_t& outMin, int64_t& outMax) const;
+
     bool get_bbox_detection_centroid(uint32_t globalBboxIdx,
                                      float& outX, float& outY) const;
 
@@ -167,6 +170,12 @@ private:
 
     // ---- 快照 ----
     void update_snapshot_();
+
+    // ---- 性能指标 ----
+    static constexpr uint32_t kLatencyWindowSize = 100;
+    int64_t  latencyWindow_[100];
+    uint32_t latencyIdx_{0};
+    uint32_t latencyCount_{0};
 };
 
 #endif // LIDAR_TARGET_TRACKER_H

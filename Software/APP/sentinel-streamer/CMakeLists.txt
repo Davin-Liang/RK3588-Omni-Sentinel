@@ -111,11 +111,17 @@ add_executable(sentinel_record_pool_test
     src/demo_record_pool.cpp
 )
 
-target_link_libraries(sentinel_streamer_demo
+target_include_directories(sentinel_record_pool_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../dma-buffer-pool/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sentinel-visioner/include
+)
+
+target_link_libraries(sentinel_record_pool_test
     sentinel_streamer_lib
     sentinel_visioner_lib
-    icm45686_eis_lib
-    icm45686_user_lib
+    dma_buffer_pool_lib
 )
 
 install(TARGETS sentinel_streamer_lib  DESTINATION lib)
