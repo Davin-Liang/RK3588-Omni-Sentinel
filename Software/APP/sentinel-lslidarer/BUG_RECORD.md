@@ -101,3 +101,42 @@ while (lidar.available_frames() == 0) {
 **原因**: `demo.cpp` 中为演示全圈点云效果，显式设置了 `config.angleDisableMin = 0; config.angleDisableMax = 0;`，覆盖了 `LidarConfig` 默认的 90°-240° 屏蔽区间。这导致 demo 输出行为与 README 中标注的"角度屏蔽 90°-240°"描述不一致。
 
 **解决**: demo 中保留全圈输出的设计意图（验证后方 20° 点的代码依赖全圈数据），但需在 DEMO-INSTRUCTIONS.md 中明确说明 demo 关闭了角度屏蔽，与默认产品配置不同。生产环境使用默认配置即可自动启用 90°-240° 屏蔽。
+
+---
+
+## 8. kPointsPerSweep=540 导致 heap-buffer-overflow
+
+**现象**: ASan 报 `heap-buffer-overflow`，WRITE of size 4 at address 0 bytes to the right of 64800-byte region，崩溃在 `reader_loop_()` → `sweepBuf[sweepCount].x = ...`。
+
+**原因**: `kPointsPerSweep = 540` 基于 `ceil(5400Hz / 10Hz) = 540` 计算，但高分辨率模式下实际每圈点数可达 ~1100。`reader_loop_()` 在累积一圈点时 `sweepCount` 超过 540 但无越界检查，写入 `RingBuffer` 分配区域末尾之后 4 字节。
+
+**解决**:
+- `kPointsPerSweep`: 540 → 1200
+- `reader_loop_()` 三处点累积循环加入 `sweepCount >= LidarConfig::kPointsPerSweep` 防溢出检查
+- 下游 `lidar-camera-fusion` 的 `kMaxLidarPoints` 同步更新为 1200
+
+---
+
+## 9. get_latest_frame/get_closest_frame 环形索引错误导致只返回 1Hz 旧帧
+
+**现象**: 融合循环实际只处理 ~1Hz 的雷达帧（期望 10Hz），`[LidarSweep]` 诊断显示 reader 正常产帧 10Hz，但 `get_latest_frame()` 持续返回同一时间戳的旧帧。融合每 1 秒才收到一个新帧，其余 9 帧被去重逻辑跳过。
+
+**原因**: `get_latest_frame()` 中计算槽位索引的逻辑错误：
+```cpp
+// BUG: 当 writeIdx > capacity(10) 后 validCount 恒=10
+// slotIdx = validCount - 1 = 9，永远读 slot[9]
+uint32_t validCount = std::min(writeIdx, ringBuffer_->capacity());
+ringBuffer_->copy_slot(validCount - 1, outFrame);
+```
+`copy_slot(idx, ...)` 接收的是槽位数组的**物理索引**（0~capacity-1），而非逻辑序号。写者通过 `idx = writeIndex_ % capacity` 写入正确的环形槽位，但读者必须同样取模才能定位最新帧。原代码在 `writeIndex_ < capacity` 时偶然正确（逻辑号=物理号），超过 capacity 后读数错位。
+
+**触发条件**: 雷达连续运行超过 1 秒（`writeIndex_` 超过 10 即出问题）。此前雷达随融合启停、`writeIndex_` 每次从 0 开始，故从未暴露。
+
+**解决**: 使用环形索引取最新槽位：
+```cpp
+uint32_t cap = ringBuffer_->capacity();
+ringBuffer_->copy_slot((writeIdx - 1) % cap, outFrame);
+```
+`get_closest_frame()` 同样修复：从最新槽位向前遍历 `validCount` 个槽（环形回绕），而非固定扫 slot[0..9]。
+
+**影响范围**: 此 bug 在 NVMe 自动启动雷达功能（雷达连续运行）后才暴露。修复后融合恢复 10Hz 处理率。NvmeWorker 的雷达轮询也间接受益（不再反复读到旧帧触发去重）。

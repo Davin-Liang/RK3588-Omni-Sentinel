@@ -31,12 +31,13 @@
          (640x640 RGB888)   (1080P RGB888)     (1080P NV12)
                   │                 │                  │
                   ▼                 ▼                  ▼
-         previewTaskQueue   previewTaskQueue   processTaskQueue
+         npuTaskQueue     previewTaskQueue   processTaskQueue
          (ThreadSafeQueue)  (ThreadSafeQueue)  (ThreadSafeQueue)
                   │                 │                  │
                   └────────┬────────┘                  │
                            ▼                           ▼
-              wait_get_preview()                wait_get_orig_copy_buffer()
+         wait_get_npu()    wait_get_preview()  wait_get_orig_copy_buffer()
+         release_npu()     release_preview()   release_orig_copy_buffer()
               try_get_preview()                  (sentinel-streamer 拉取)
               (NPU 推理 + QT 预览)              release_orig_copy_buffer()
                            │
@@ -52,11 +53,12 @@ visioner.add_camera("/dev/video11", 1920, 1080, 8, 0);  // 注册 + 建池
 visioner.camera_stream_ctrl(0, true);                     // 开流 + 启线程
 
 // 消费者拉取（两条独立的拉取路径）
-NpuPreview task = visioner.wait_get_preview(0);           // NPU 推理 + 预览
+NpuPreview结构体 task = visioner.wait_get_preview(0);           // NPU 推理 + 预览
 DmaBuffer_t* raw = visioner.wait_get_orig_copy_buffer(0); // 推流/录像
 
 // 用完必须归还
-visioner.release_preview(0, &task);
+visioner.release_npu(0, npu);
+visioner.release_preview(0, pre);
 visioner.release_orig_copy_buffer(0, raw);
 
 // 关闭
@@ -191,10 +193,10 @@ V4L2 硬件流照常运行（传感器曝光 → ISP 输出 → V4L2 缓冲区�
 
 ```cpp
 // 危险：相机停产后线程永远卡死在这里
-NpuPreview task = visioner->wait_get_preview(0);  // pop() 无限阻塞
+NpuPreview结构体 task = visioner->wait_get_preview(0);  // pop() 无限阻塞
 
 // 安全：200ms 内一定响应退出信号
-NpuPreview task = visioner->try_get_preview(0, 200);
+NpuPreview结构体 task = visioner->try_get_preview(0, 200);
 if (task.npuImage == nullptr && !running_) break;  // 超时或退出
 ```
 
@@ -295,11 +297,11 @@ if (task.npuImage == nullptr && !running_) break;  // 超时或退出
 
 ```cpp
 // 修复前（死锁）
-NpuPreview task = visioner->wait_get_preview(0);  // pop() 无超时
+NpuPreview结构体 task = visioner->wait_get_preview(0);  // pop() 无超时
 
 // 修复后（安全退出）
 while (running_) {
-    NpuPreview task = visioner->try_get_preview(0, 200);
+    NpuPreview结构体 task = visioner->try_get_preview(0, 200);
     if (task.npuImage != nullptr) {
         process(task);
         visioner->release_preview(0, &task);

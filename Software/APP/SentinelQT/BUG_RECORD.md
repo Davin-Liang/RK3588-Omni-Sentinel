@@ -300,3 +300,90 @@
 1. JS 端改用 `=== false` 精确比较，仅显式 `false` 时隐藏，`undefined`/`true` 均显示
 2. 新增专用端点 `GET /api/v1/eis/visible` 返回 `{"visible":true/false}`，不走复杂的 status JSON，接口极简便于 curl 直接验证
 3. 卡片默认显示（无 `display:none`），仅在后端明确返回 `visible:false` 时才隐藏，安全默认
+
+---
+
+## 31. PreviewWorker 在无帧时调 release_preview(nullptr) 导致堆损坏
+
+**现象**: `QLabel::setPixmap()` → `QImageData::~QImageData()` → `free()` 检测到 `malloc_printerr` / `corrupted double-linked list`。崩溃在 Qt 渲染管线，实际根因在 PreviewWorker。
+
+**原因**: `PreviewWorker::start()` 中 `visioner_->release_preview(camNum_, previewBuf)` 在 if-else 块外部无条件执行。当 `try_get_preview()` 返回 `nullptr`（200ms 超时无帧），`release_preview(nullptr)` 向 DMA 缓冲池释放空指针，可能写坏池元数据。堆损坏延迟到后续 `QLabel::setPixmap()` 析构旧图时被 glibc 检测到。
+
+**解决**: 将 `release_preview` 移入 `if (previewBuf != nullptr)` 分支内，只在成功获取帧时才释放。
+
+---
+
+## 32. RGA 预览输出 BGR_888 ↔ QImage Format_RGB888 颜色通道问题
+
+**现象**: 修改 `rga_convert_to_rgb_full_()` 的 RGA 输出格式从 `RK_FORMAT_BGR_888` 改为 `RK_FORMAT_RGB_888` 后，预览画面颜色通道不对（红蓝互换）。
+
+**原因**: ARM 平台上有字节序差异——RGA 的 `RK_FORMAT_BGR_888` 输出在 QImage `Format_RGB888` 下显示颜色正确。此前将两者强行统一为 RGB_888 反而导致颜色异常。这是硬件造成的命名不一致，不是 bug。
+
+**解决**: 保持 `rga_convert_to_rgb_full_()` 输出 `RK_FORMAT_BGR_888`（原始值）。`rga_process_to_rgb_()`（NPU 路径）仍输出 `RK_FORMAT_RGB_888`。
+
+---
+
+## 33. AI 报告页面重构：主页面 → 独立子页面
+
+**新增功能**: AI 分析报告从主页底部小文本框迁移到独立子页面 Page 4，与"融合管理""数据回溯"同级的 QStackedWidget 页面。
+
+**涉及改动**:
+- `widget.ui`: 新增 `pageAIReport` 空占位页 + `btnAIReport` 导航按钮（与 btnFusion/btnBacktrack 并列）
+- `widget.cpp`: `build_ai_report_page_()` 动态构建标题栏、操作栏、全屏 QTextEdit、倒计时标签
+- 主页面 AI 元素（`aiControlBar`、`aiReportText`）全部 `setVisible(false)` + `setMaximumHeight(0)`
+- 触发分析自动跳转 Page 4，报告只显示在子页面
+
+---
+
+## 34. 合并分支时 Cam1 外参 T0-T15 被误删
+
+**现象**: 融合跟踪无法创建新 track，`[BboxClaim] cam1 bbox[0] -> NONE`，`[OSD_pts] cam1 bbox[0] 0 points`。Web 俯视图只显示聚类圆，无跟踪目标。cam0 正常。
+
+**原因**: commit `f147216`（"将YOLO推理任务绑定到NPU２核"）在添加 `[AI]` 配置节时，误删了 `[Fusion]` 节中 Cam1 的 16 个外参 `Cam1T0` ~ `Cam1T15`。代码读取时默认值为 0.0f，全零矩阵导致 cX=cY=cZ=0 → 所有 LiDAR 点判为 BEHIND → bbox 匹配不到任何簇。
+
+**解决**: 从 commit `67a0c5e` 恢复 Cam1 外参值到 config.ini。同时检查确认 Cam0 外参未被影响。
+
+---
+
+## 35. FusionWorker 目标变化去重导致俯视图画面"冻住"
+
+**现象**: Web 俯视图和 Qt TopDownView 画面断续，目标静止时画面不刷新，恢复运动时位置突变。用户感觉"卡卡的"。
+
+**原因**: `fusion_worker.cpp` 中 `FusionWorker::start()` 在 100ms 轮询 `copy_tracked_targets()` 后，对比上次快照的 id/posX/posY/state，仅变化时才 emit `trackingUpdated`。目标短暂丢失或静止时前端无数据推送，画面冻结在最后一帧。
+
+**解决**: 去掉变化去重逻辑，每 100ms 无条件推送当前快照。改动在 `fusion_worker.cpp`：删除 `lastSnapshot` 比较代码块，轮询后直接构建 `QVector` 并 emit。
+
+---
+
+## 36. widget.h 前向声明导致 incomplete type 编译错误
+
+**现象**: 交叉编译时报错 `field 'thermalCfg_' has incomplete type 'ThermalConfig'`
+
+**原因**: `widget.h` 用前向声明 `struct ThermalConfig;` 但将 `ThermalConfig thermalCfg_` 声明为值成员。前向声明只提供类型名，不自带大小信息，编译器无法计算对象布局。
+
+**解决**: 将前向声明替换为 `#include "thermal_controller.h"`，让完整类型定义在 `widget.h` 编译时可见。
+
+---
+
+## 37. 温控频率写入值不在可用频率列表中导致刷屏
+
+**现象**: 温度进入 Warm 后每 2 秒重复打印同一条频率写入日志：
+```
+[Thermal] CPU little max_freq: 1416000 -> 1400000
+```
+
+**原因**: `cpuLittleWarm=1400000` 不在 policy0 A55 可用频率列表中（最近值为 1416000）。内核将写入值自动 clamp 到最近可用频率。`write_max_freq_()` 读回 1416000，与目标 1400000 不等，每周期重复写入——死循环刷屏。
+
+**解决**:
+1. `evaluate_and_apply_()` 的 4 次 `write_max_freq_()` 调用移入等级变化守卫内（`level_ != prevLevel || tickCount_ == intervalSec`），不再每周期无条件写
+2. 修正默认配置值到合法频率：`cpuLittleWarm 1400000→1416000`、`cpuLittleHot 1000000→1008000`、`cpuBigCritical 800000→816000`
+
+---
+
+## 38. NvmeWorker 存 lidar_ 值拷贝导致雷达运行时启停不感知
+
+**现象**: NVMe 初始化后自动启动雷达，但回溯热力图始终无 LiDAR 数据（`no LiDAR points in window`）。即使融合已启动、雷达正常运行，NvmeWorker 也不写入雷达帧。
+
+**原因**: `NvmeWorker` 构造时接受 `SentinelLslidarer*` 通过值拷贝存入 `lidar_`。Widget 在构造阶段调用 `init_nvme_()`，此时 `lidar_ = nullptr`。NvmeWorker 永久保存了这个 nullptr，后续 `init_nvme_()` 中自动启动雷达后 `lidar_` 已非空，但 NvmeWorker 内部指针不变。
+
+**解决**: 改为存储 `SentinelLslidarer**`（指向 Widget 的 `lidar_` 成员）。每次 `start()` 轮询循环中解引用 `*lidarPtr_` 获取最新值。雷达启停后自动生效，无需额外通知。同时将 `deinit_nvme_()` 移到 `delete lidar_` 之前，避免 NvmeWorker 访问已释放的 lidar 对象。

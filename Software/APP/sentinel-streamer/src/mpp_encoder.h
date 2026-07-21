@@ -40,10 +40,19 @@ void mp4_output_close(AVFormatContext** ctx);
 // ---- 编码 + 复用 ----
 /**
  * @brief 编码一帧，输出到 ffmpeg 管道（推流）和/或 MP4（录像）
+ * @param encFrame 预分配的可复用编码帧（nullptr=内部分配），生命周期由调用方管理
+ * @param encPkt   预分配的可复用编码包（nullptr=内部分配）
  */
 bool encode_and_mux(AVCodecContext* encCtx, void* virtAddr, int width, int height,
                     int64_t pts,
-                    FILE* streamPipe, AVFormatContext* mp4Ctx);
+                    FILE* streamPipe, AVFormatContext* mp4Ctx,
+                    AVFrame* encFrame = nullptr, AVPacket* encPkt = nullptr);
+
+/**
+ * @brief 确保 encFrame 已分配且尺寸匹配，首次或分辨率变化时重新分配
+ * @return true=成功
+ */
+bool ensure_enc_frame(AVFrame** frame, int width, int height);
 
 /**
  * @brief 排空编码器残余帧

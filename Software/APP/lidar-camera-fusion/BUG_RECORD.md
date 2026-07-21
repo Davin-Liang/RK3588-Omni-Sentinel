@@ -243,4 +243,73 @@
 
 4. **DBSCAN O(n²) 复杂度** — 540 点可忽略（~1.5M FLOPs），升级高线束雷达需空间索引加速。
 
+---
+
+## 21. kMaxLidarPoints=540 与 lslidarer 不同步导致 copy_slot 越界
+
+**现象**: ASan 报 `heap-buffer-overflow`，`memcpy` 写入 11148 bytes 到 6480-byte 区域。崩溃在 `RingBuffer::copy_slot()` → `SentinelLslidarer::get_latest_frame()` → `LidarCameraFusion::fusion_thread_()`。启动融合后立即触发。
+
+**原因**: lslidarer 的 `kPointsPerSweep` 从 540 扩容到 1200 后，`LidarCameraFusion` 的帧缓冲区 `lidarPointsBuf_` 仍按 `kMaxLidarPoints = 540` 分配（6480 bytes = 540 × 12）。`copy_slot()` 将新帧的点数据（~929 个点 = 11148 bytes）`memcpy` 到 540 点的缓冲区 → 越界。
+
+**解决**: `lidar_camera_fusion.h` 和 `lidar_target_tracker.h` 的 `kMaxLidarPoints` 从 540 同步更新为 1200。三个组件（lslidarer / fusion / tracker）共用同一个点容量常量，任意一方改动必须同步。
+
 5. **YOLO 检测到但 LiDAR 看不到的目标无法跟踪** — 单线雷达扫描面有限，超出扫描面的目标即使 YOLO 检测到也无法形成 LiDAR cluster。
+
+---
+
+## 22. bbox_claim 跨相机投影导致 cam0 簇被 cam1 bbox 误认领
+
+**现象**: `[BboxClaim] cam1 bbox[0] -> ci=8 dist=1.46m`，但 ci=8 质心 pos(-0.43,-1.20) 在 cam0 视角里，不在 USB 相机（cam1）视野内。cam1 正确的簇反而没被认领。同时 OSD 点云投影 cam1 bbox 点数为 0。
+
+**原因**: `bbox_claim_()` 中，对每个簇用**所有相机配置**投影，然后匹配**所有 bbox**（不分相机来源）。cam1 外参不准，但 cam0 外参准确，cam0 视角的簇用 cam0 投影后可能落入 cam1 bbox → 误认领。cam1 自己的正确簇因外参不准投影偏移而落选。
+
+**解决**: 
+- 在 `update()` 中传入 `bboxCamIdx` 数组，记录每个 bbox 的来源相机
+- `bbox_claim_()` 投影循环中添加 `if (bboxCamIdx_ && bboxCamIdx_[bb] != cc) continue;`，确保 bbox 只匹配同相机的投影。补选循环同样处理
+- 修复了 `lidar_camera_fusion_thread.cpp` 中构建 `allBboxes` 时同步构建 `bboxCamIdx`
+
+---
+
+## 23. bbox_claim 评分公式导致近距簇被远距簇"偷走"bbox
+
+**现象**: 人和椅子一前一后时（人近椅子远），椅子簇质心恰好投影在 bbox 内得分高，人的簇因投影稍偏得分低，导致椅子被跟踪、人被忽略。
+
+**原因**: 评分公式 `score = 1/(1+dist) × proximityFactor` 中，`proximityFactor`（像素邻近度）权重过大。远距簇质心若恰好投在 bbox 内（pixelDist=0），即使距离很远也能靠满分 proximityFactor 赢过近距簇。
+
+**解决**: 增加**深度优先仲裁**。在冲突解决后，比较每个 bbox 的得分最高簇和距离最近簇：若最近簇比得分最高簇近 ≥ 0.5m 且未被其他 bbox 认领，则强制选最近簇。同时追踪 `bboxClosestDist` / `bboxClosestCi` 数组辅助判定。日志标记 `[BboxClaim] depth-wins`。
+
+---
+
+## 24. 聚类可视化 orphan 判定用距离法误判
+
+**现象**: 网页俯视图上已认领的聚类圆频繁在"已认领"和"孤儿"之间跳变，有时跟踪目标旁边不显示聚类圈。深度优先仲裁（#23）后该现象加剧。
+
+**原因**: `update_snapshot_()` 中判定 cluster 是否被 bbox 认领用的是距离比较：`dx²+dy² < 0.01`（0.1m 阈值）。但 cluster 质心帧间跳动常超 0.1m，且深度仲裁后会换 `bboxCluster_[bb]` 指向，导致 bbox 匹配的新簇和历史记录旧簇的质心距离超阈值 → 误判为孤儿。
+
+**解决**: 改用 `clusterBboxMatch_` 索引法。`persist_clusters_()` 阶段已建立 `ci→hi`（当前簇索引→历史槽位）的精确映射。`update_snapshot_()` 直接查表：遍历所有 bbox，找到其认领的簇 ci，通过 `clusterBboxMatch_[ci]` 获取对应历史槽 hi，若 hi 匹配当前历史槽则为非孤儿。消除距离阈值依赖。
+
+---
+
+## 25. tracker 告警回调空指针触发未定义行为
+
+**现象**: 关闭自动回溯后，俯视图上的告警红圈一直闪烁不消失。再次开启自动回溯后红圈才消失。
+
+**原因**: `set_auto_backtrack_enabled_(false)` 调用 `register_warning_callback(nullptr, nullptr)`，将 tracker 内部的 `warningCb_` 设为 `nullptr`。但 `check_warnings_()` 中调用回调前没有判空：
+```cpp
+warningCb_(track, warningUserData_);  // nullptr 调用 → UB
+```
+ARM64 上调用空函数指针不会立即 crash（指令预取特性），但 UB 导致 `warningActive` 状态管理异常。红圈渲染依赖 `warningActive` 标志，该标志无法正常退出告警状态。
+
+**解决**: 两处回调调用前添加 `if (warningCb_)` 判空。`warningActive` 的进入/退出逻辑纯由距离阈值驱动，与回调注册状态解耦。
+
+---
+
+## 26. sentinel-lslidarer 环形索引 bug 导致融合退化至 1Hz
+
+**现象**: 融合循环实际只处理 ~1Hz 的雷达帧，而非预期的 10Hz。融合日志添加时间戳后确认每次迭代间隔约 1 秒。`iter` 字段显示单帧处理只要 1-3ms，诊断计数器 `poll/dup` 显示 99% 的轮询发现"重复帧"被跳过。
+
+**原因**: 本组件代码无错，根因在 `sentinel-lslidarer` 的 `get_latest_frame()` / `get_closest_frame()` 使用了错误的环形槽位索引（详见 lslidarer BUG_RECORD #9）。融合循环看不到新帧，去重逻辑把所有轮询都跳过。
+
+**触发条件**: NVMe 自动启动雷达后，雷达连续运行超过 1 秒（`writeIndex_` 超过 RingBuffer capacity）。此前雷达随融合启停，每次从索引 0 开始，bug 从未暴露。
+
+**解决**: 上游 lslidarer 修复圆形索引后，融合自动恢复 10Hz。本组件无代码改动。

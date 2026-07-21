@@ -13,11 +13,13 @@
 #include "nvme_worker.h"
 #include "NVMeDataManager.h"
 #include "ai_report_worker.h"
+#include "thermal_controller.h"
 
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QTextStream>
 #include <chrono>
 #include <thread>
 #include <QThread>
@@ -266,6 +268,8 @@ Widget::Widget(QWidget *parent)
 
     load_config_();
 
+    thermalCtrl_ = new (std::nothrow) ThermalController(thermalCfg_);
+
     // Resolution combo — CAM0
     int res0 = recordResolution_[0];
     ui->resCombo->setCurrentIndex(res0 == 720 ? 1 : 0);
@@ -328,6 +332,7 @@ Widget::Widget(QWidget *parent)
 
     // Build backtrack page
     build_backtrack_page_();
+    build_ai_report_page_();
 
     // Clock timer
     clockTimer_ = new QTimer(this);
@@ -462,10 +467,16 @@ Widget::Widget(QWidget *parent)
     aiReportWorker_ = nullptr;
     aiReportThread_ = nullptr;
     aiReportText_   = ui->aiReportText;
-    aiReportText_->setVisible(false);  // 默认隐藏
+    aiReportText_->setVisible(false);    // 主页面不再使用
+    aiReportText_->setMaximumHeight(0);  // 完全折叠
+
+    // 主页面 AI 控制栏（"系统运行日志AI分析总结" + "AI 分析"按钮）全部移除，
+    // AI 功能已移入独立子页面 pageAIReport（通过 btnAIReport 按钮跳转）
+    ui->aiControlBar->setVisible(false);
+    ui->aiControlBar->setMaximumHeight(0);
 
     aiAutoTimer_      = nullptr;
-    aiAutoIntervalSec_ = 300;
+    aiAutoIntervalSec_ = 1800;
     aiCountdownSec_   = -1;
     aiAutoEnabled_    = false;
     aiWorkerReady_.store(false);
@@ -475,10 +486,9 @@ Widget::Widget(QWidget *parent)
         fprintf(stderr, "[SentinelQT] AI: delayed init starting...\n");
         DeepSeekInference::Config aiCfg;
         aiCfg.modelPath = config_.value("AI/modelPath",
-            "/root/Deepseek/install/demo_Linux_aarch64/"
-            "DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm").toString().toStdString();
+            "/root/Deepseek/Llama-3.2-1B-Instruct_W8A8_rk3588.rkllm").toString().toStdString();
         aiCfg.maxNewTokens  = config_.value("AI/maxNewTokens",  512).toInt();
-        aiCfg.maxContextLen = config_.value("AI/maxContextLen", 2048).toInt();
+        aiCfg.maxContextLen = config_.value("AI/maxContextLen", 512).toInt();
         aiCfg.temperature   = config_.value("AI/temperature",   0.7f).toFloat();
         aiReportWorker_ = new AIReportWorker();
         aiReportWorker_->setConfig(aiCfg);
@@ -486,9 +496,11 @@ Widget::Widget(QWidget *parent)
         aiReportWorker_->moveToThread(aiReportThread_);
         connect(aiReportWorker_, &AIReportWorker::reportReady, this, &Widget::on_ai_report_ready_);
         connect(aiReportWorker_, &AIReportWorker::error, this, [this](const QString& msg) {
-            aiReportText_->setVisible(true);
-            aiReportText_->setHtml(
-                QString("<html><body style='color:#f85149;'>AI 错误: %1</body></html>").arg(msg));
+            if (aiReportPageText_) {
+                aiReportPageText_->setHtml(
+                    QString::fromUtf8("<html><body style='color:#f85149; font-size:14px;'>"
+                    "<b>AI 错误</b><br><br>%1</body></html>").arg(msg));
+            }
         });
         connect(aiReportThread_, &QThread::started, aiReportWorker_, &AIReportWorker::start);
         aiReportThread_->start();
@@ -502,6 +514,7 @@ Widget::Widget(QWidget *parent)
     });
 
     connect(ui->btnAIAnalysis, &QPushButton::clicked, this, &Widget::on_btn_ai_analysis_);
+    connect(ui->btnAIReport, &QPushButton::clicked, this, &Widget::on_btn_ai_report_page_);
 
     set_status_("系统就绪", "#3fb950");
     update_button_states_();
@@ -553,10 +566,10 @@ Widget::~Widget()
     if (lidar_) {
         lidar_->stop();
     }
+    deinit_nvme_();
+
     delete fusion_;
     delete lidar_;
-
-    deinit_nvme_();
 
     for (int i = 0; i < 2; ++i) {
         if (visioner_) {
@@ -569,6 +582,8 @@ Widget::~Widget()
     }
     delete streamer_;
     deinit_eis_();
+    delete thermalCtrl_;
+    thermalCtrl_ = nullptr;
     delete visioner_;
     delete ui;
 }
@@ -674,6 +689,33 @@ void Widget::load_config_()
             init_eis_();
         }
     }
+
+    // ---- Thermal ----
+    thermalCfg_.enabled       = config_.value("Thermal/enabled", true).toBool();
+    thermalCfg_.intervalSec   = config_.value("Thermal/intervalSec", 2).toInt();
+    thermalCfg_.restoreOnExit = config_.value("Thermal/restoreOnExit", true).toBool();
+
+    thermalCfg_.warmThreshold = config_.value("Thermal/warmThreshold", 65).toInt();
+    thermalCfg_.warmRecover   = config_.value("Thermal/warmRecover", 60).toInt();
+    thermalCfg_.hotThreshold  = config_.value("Thermal/hotThreshold", 75).toInt();
+    thermalCfg_.hotRecover    = config_.value("Thermal/hotRecover", 70).toInt();
+    thermalCfg_.critThreshold = config_.value("Thermal/critThreshold", 85).toInt();
+    thermalCfg_.critRecover   = config_.value("Thermal/critRecover", 80).toInt();
+
+    thermalCfg_.cpuBigNormal   = config_.value("Thermal/cpuBigNormal",   2304000).toInt();
+    thermalCfg_.cpuBigWarm     = config_.value("Thermal/cpuBigWarm",     1800000).toInt();
+    thermalCfg_.cpuBigHot      = config_.value("Thermal/cpuBigHot",      1200000).toInt();
+    thermalCfg_.cpuBigCritical = config_.value("Thermal/cpuBigCritical", 800000).toInt();
+
+    thermalCfg_.cpuLittleNormal   = config_.value("Thermal/cpuLittleNormal",   1800000).toInt();
+    thermalCfg_.cpuLittleWarm     = config_.value("Thermal/cpuLittleWarm",     1400000).toInt();
+    thermalCfg_.cpuLittleHot      = config_.value("Thermal/cpuLittleHot",      1000000).toInt();
+    thermalCfg_.cpuLittleCritical = config_.value("Thermal/cpuLittleCritical", 600000).toInt();
+
+    thermalCfg_.npuNormal   = config_.value("Thermal/npuNormal",   1000000000).toInt();
+    thermalCfg_.npuWarm     = config_.value("Thermal/npuWarm",      800000000).toInt();
+    thermalCfg_.npuHot      = config_.value("Thermal/npuHot",       600000000).toInt();
+    thermalCfg_.npuCritical = config_.value("Thermal/npuCritical",  300000000).toInt();
 }
 
 // ---- Camera init ----
@@ -1129,27 +1171,43 @@ void Widget::update_hw_usage_()
         fclose(fp);
     }
 
-    fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
-    if (fp) {
-        int raw;
-        if (fscanf(fp, "%d", &raw) == 1) tempC = raw / 1000;
-        fclose(fp);
+    // Temperature and level from ThermalController
+    if (thermalCtrl_) {
+        thermalCtrl_->tick();
     }
 
+    tempC = thermalCtrl_ ? thermalCtrl_->currentTempC() : -1;
+    const char* level = thermalCtrl_ ? thermalCtrl_->currentLevel() : "";
+    int cpuBigKHz = thermalCtrl_ ? thermalCtrl_->cpuBigFreq() : -1;
+    int npuHz = thermalCtrl_ ? thermalCtrl_->npuFreq() : -1;
+
     QString text;
+    // 温度 + 等级
     text += tempC >= 0 ? QString("%1°C").arg(tempC) : "--°C";
-    text += "  ";
-    text += cpuUsage >= 0 ? QString("CPU%1").arg(cpuUsage, 3) : "CPU --";
-    text += "  ";
+    if (level && level[0] != '\0') {
+        text += QString(" %1").arg(level);
+    }
+    text += " ";
+    // CPU
+    text += cpuUsage >= 0 ? QString("CPU%1%").arg(cpuUsage, 3) : "CPU --";
+    if (cpuBigKHz > 0) {
+        text += QString(" %1G").arg(cpuBigKHz / 1000000.0, 0, 'f', 1);
+    }
+    text += " ";
+    // RGA
     text += QString("RGA%1/%2/%3")
                 .arg(rgaCores[0] >= 0 ? QString::number(rgaCores[0]) : "-")
                 .arg(rgaCores[1] >= 0 ? QString::number(rgaCores[1]) : "-")
                 .arg(rgaCores[2] >= 0 ? QString::number(rgaCores[2]) : "-");
-    text += "  ";
+    text += " ";
+    // NPU
     text += QString("NPU%1/%2/%3")
                 .arg(npuCores[0] >= 0 ? QString::number(npuCores[0]) : "-")
                 .arg(npuCores[1] >= 0 ? QString::number(npuCores[1]) : "-")
                 .arg(npuCores[2] >= 0 ? QString::number(npuCores[2]) : "-");
+    if (npuHz > 0) {
+        text += QString(" %1G").arg(npuHz / 1e9, 0, 'f', 1);
+    }
 
     ui->hwLabel->setText(text);
 
@@ -2213,6 +2271,10 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
         if (path == "/api/v1/backtrack/auto-status") return web_auto_backtrack_status_();
         if (path == "/api/v1/ai/report") return web_ai_report_();
+        if (path == "/api/v1/thermal/status") {
+            if (thermalCtrl_) return thermalCtrl_->status_json();
+            return R"({"ok":false,"error":"thermal not available"})";
+        }
         return R"({"ok":false,"error":"unknown GET path"})";
     }
 
@@ -3125,13 +3187,15 @@ std::string Widget::get_hw_json_() const
         j["cpu"] = -1;
     }
 
-    // Temperature
-    fp = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
-    if (fp) {
-        int raw;
-        if (fscanf(fp, "%d", &raw) == 1) j["temp"] = raw / 1000;
-        else j["temp"] = -1;
-        fclose(fp);
+    // Temperature and level from ThermalController
+    if (thermalCtrl_) {
+        j["temp"] = thermalCtrl_->currentTempC();
+        j["thermalLevel"] = thermalCtrl_->currentLevel();
+        nlohmann::json tf;
+        tf["cpuLittle"] = thermalCtrl_->cpuLittleFreq();
+        tf["cpuBig"]    = thermalCtrl_->cpuBigFreq();
+        tf["npu"]       = thermalCtrl_->npuFreq();
+        j["thermalFreq"] = tf;
     } else {
         j["temp"] = -1;
     }
@@ -3489,7 +3553,7 @@ void Widget::init_nvme_()
         return;
     }
 
-    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, 2);
+    nvme_worker_ = new NvmeWorker(streamer_, nvme_manager_, &lidar_, 2);
     nvme_thread_ = new QThread(this);
     nvme_worker_->moveToThread(nvme_thread_);
 
@@ -3501,6 +3565,15 @@ void Widget::init_nvme_()
             });
 
     nvme_thread_->start();
+
+    // 为 NVMe 回溯独立启动雷达（不依赖融合是否开启）
+    if (lidar_ && !lidar_->is_running()) {
+        lidar_->load_config(lidarCfg_);
+        if (lidar_->start()) {
+            fprintf(stderr, "[SentinelQT] NVMe: LiDAR auto-started for backtrack\n");
+        }
+    }
+
     set_status_("NVMe 回溯已启动", "#2ea043");
 }
 
@@ -3570,6 +3643,20 @@ QStringList Widget::do_backtrack_(uint64_t triggerTsUs, int cameraId,
         }
     }
 
+    // 导出雷达热力图 PNG
+    {
+        std::string pngName = (QString("backtrack_%1_%2_lidar.png")
+            .arg(label, tsStr)).toStdString();
+        std::string pngPath = dir.absoluteFilePath(QString::fromStdString(pngName))
+            .toStdString();
+
+        if (nvme_manager_->export_lidar_heatmap_png(triggerNs, pngPath, backSecs)) {
+            fprintf(stderr, "[SentinelQT] backtrack LiDAR heatmap saved: %s\n",
+                    pngPath.c_str());
+            savedFiles.append(QString::fromStdString(pngName));
+        }
+    }
+
     if (okCount > 0) {
         fprintf(stderr, "[SentinelQT] backtrack done: %d clip(s) saved\n", okCount);
     } else {
@@ -3586,6 +3673,88 @@ void Widget::on_btn_backtrack_page_()
 }
 
 void Widget::on_btn_back_from_backtrack_()
+{
+    ui->stackedWidget->setCurrentIndex(0);
+}
+
+// ============================================================================
+// AI 报告子页面（照搬数据回溯页面模式）
+// ============================================================================
+
+void Widget::build_ai_report_page_()
+{
+    QWidget* page = ui->pageAIReport;
+    QVBoxLayout* rootLayout = new QVBoxLayout(page);
+    rootLayout->setContentsMargins(8, 8, 8, 4);
+    rootLayout->setSpacing(6);
+
+    // ---- 标题栏 ----
+    QFrame* titleBar = new QFrame(page);
+    titleBar->setFixedHeight(38);
+    titleBar->setStyleSheet("QFrame { background-color: #F4EAC5; border-radius: 10px; }");
+    QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(12, 0, 12, 0);
+
+    QLabel* titleLabel = new QLabel(QString::fromUtf8("AI 日志分析报告"), titleBar);
+    titleLabel->setStyleSheet("font-size: 16px; font-weight: 700; color: #58a6ff;");
+    titleLayout->addWidget(titleLabel);
+    titleLayout->addStretch();
+
+    QPushButton* btnBack = new QPushButton(QString::fromUtf8("返回"), titleBar);
+    btnBack->setFixedSize(80, 28);
+    btnBack->setStyleSheet(
+        "font-size: 12px; color: #2d3535; background-color: #F5F0D7;"
+        " border: 1px solid #8b949e; border-radius: 8px;");
+    connect(btnBack, &QPushButton::clicked, this, &Widget::on_btn_back_from_ai_report_);
+    titleLayout->addWidget(btnBack);
+    rootLayout->addWidget(titleBar);
+
+    // ---- 操作栏 ----
+    QFrame* actionBar = new QFrame(page);
+    QHBoxLayout* actionLayout = new QHBoxLayout(actionBar);
+    actionLayout->setContentsMargins(0, 0, 0, 0);
+    actionLayout->setSpacing(8);
+
+    QLabel* hintLabel = new QLabel(
+        QString::fromUtf8("点击触发分析后，DeepSeek 模型将读取系统运行状态并生成分析报告。"
+                          "推理约需 60-120 秒。"), actionBar);
+    hintLabel->setStyleSheet("font-size: 12px; color: #4a5555; background: transparent;");
+    actionLayout->addWidget(hintLabel);
+    actionLayout->addStretch();
+
+    QPushButton* btnAnalyze = new QPushButton(QString::fromUtf8("触发 AI 分析"), actionBar);
+    btnAnalyze->setFixedSize(120, 28);
+    btnAnalyze->setStyleSheet(
+        "font-size: 12px; font-weight: 600; color: #e6edf3; background-color: #1f6feb;"
+        " border: 1px solid #388bfd; border-radius: 8px;");
+    connect(btnAnalyze, &QPushButton::clicked, this, &Widget::on_btn_ai_analysis_);
+    actionLayout->addWidget(btnAnalyze);
+    rootLayout->addWidget(actionBar);
+
+    // ---- 报告文本区（全屏可滚动） ----
+    aiReportPageText_ = new QTextEdit(page);
+    aiReportPageText_->setReadOnly(true);
+    aiReportPageText_->setStyleSheet(
+        "QTextEdit { background-color: #1a1a2e; border: 1px solid #30363d;"
+        " border-radius: 10px; font-size: 13px; color: #e6edf3; padding: 10px; }"
+        " QScrollBar:vertical { width: 8px; }");
+    rootLayout->addWidget(aiReportPageText_, 1);  // stretch=1 占满剩余空间
+
+    // ---- 底部倒计时标签 ----
+    QLabel* countdownLabel = new QLabel(page);
+    countdownLabel->setFixedHeight(20);
+    countdownLabel->setAlignment(Qt::AlignCenter);
+    countdownLabel->setStyleSheet("font-size: 12px; color: #4a5555; background: transparent;");
+    countdownLabel->setObjectName("aiCountdownLabel");
+    rootLayout->addWidget(countdownLabel);
+}
+
+void Widget::on_btn_ai_report_page_()
+{
+    ui->stackedWidget->setCurrentIndex(4);
+}
+
+void Widget::on_btn_back_from_ai_report_()
 {
     ui->stackedWidget->setCurrentIndex(0);
 }
@@ -3802,16 +3971,15 @@ std::string Widget::web_ai_report_()
     // 先清空上次缓存，确保拿到的是本次推理结果
     lastAiReport_.clear();
 
-    // 同步更新 QT 屏幕显示（和 on_btn_ai_analysis_ 一致）
+    // 同步更新 AI 报告子页面显示
     if (aiAutoEnabled_) {
         aiCountdownSec_ = aiAutoIntervalSec_;  // 重置倒计时
     }
-    if (aiReportText_) {
-        aiReportText_->setVisible(true);
-        aiReportText_->setHtml(
-            QString::fromUtf8("<html><body style='color:#58a6ff;'>"
-            "<b>正在分析系统运行状态…</b><br>"
-            "DeepSeek-R1 1.5B 模型推理中，预计需要 2-3 分钟，请耐心等待..."
+    if (aiReportPageText_) {
+        aiReportPageText_->setHtml(
+            QString::fromUtf8("<html><body style='color:#58a6ff; font-size:14px;'>"
+            "<b>⏳ 正在分析系统运行状态…</b><br><br>"
+            "DeepSeek 模型推理中，预计需要 60-120 秒，请耐心等待..."
             "</body></html>"));
     }
 
@@ -3963,7 +4131,7 @@ void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
     // IMU 状态（当前未接入，使用占位）
     QString imuStatus = QString::fromUtf8("未启用");
 
-    // 融合跟踪状态
+    // 融合跟踪状态（含每个目标的距离，供 LLM 判断是否有人进入危险区域）
     QString fusionStatus;
     if (fusionEnabled_) {
         uint32_t total = static_cast<uint32_t>(lastTrackedTargets_.size());
@@ -3975,6 +4143,24 @@ void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
         }
         fusionStatus = QString::fromUtf8("目标数: %1, 已确认: %2, 告警: %3, 融合引擎: 运行中")
                            .arg(total).arg(confirmed).arg(warnings);
+
+        // 附加每个已确认目标的距离和告警状态
+        if (confirmed > 0) {
+            fusionStatus += QString::fromUtf8("\n各目标距离（告警阈值 %1m）：")
+                                .arg(fusionTrackerCfg_.warningExitDistMeters, 0, 'f', 2);
+            for (const auto& t : lastTrackedTargets_) {
+                if (t.state == TrackState::FusionTracking) {
+                    QString dangerTag;
+                    if (t.distanceMeters < fusionTrackerCfg_.warningExitDistMeters) {
+                        dangerTag = QString::fromUtf8(" ⚠ 已进入危险区域!");
+                    }
+                    fusionStatus += QString::fromUtf8("\n  - 目标#%1: %2m%3")
+                                        .arg(t.id)
+                                        .arg(t.distanceMeters, 0, 'f', 2)
+                                        .arg(dangerTag);
+                }
+            }
+        }
     } else {
         fusionStatus = QString::fromUtf8("融合引擎: 关闭");
     }
@@ -3990,9 +4176,11 @@ void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
 void Widget::on_btn_ai_analysis_()
 {
     if (!aiReportWorker_) {
-        aiReportText_->setVisible(true);
-        aiReportText_->setHtml(
-            QString::fromUtf8("<html><body style='color:#f85149;'>AI 模块未初始化</body></html>"));
+        if (aiReportPageText_) {
+            aiReportPageText_->setHtml(
+                QString::fromUtf8("<html><body style='color:#f85149; font-size:14px;'>"
+                "<b>AI 模块未初始化</b></body></html>"));
+        }
         return;
     }
 
@@ -4001,12 +4189,16 @@ void Widget::on_btn_ai_analysis_()
         aiCountdownSec_ = aiAutoIntervalSec_;
     }
 
-    aiReportText_->setVisible(true);
-    aiReportText_->setHtml(
-        QString::fromUtf8("<html><body style='color:#58a6ff;'>"
-        "<b>正在分析系统运行状态…</b><br>"
-        "DeepSeek-R1 1.5B 模型推理中，预计需要 20-60 秒，请耐心等待..."
-        "</body></html>"));
+    // 只在 AI 报告子页面显示状态，主页面文本框不再使用
+    if (aiReportPageText_) {
+        aiReportPageText_->setHtml(
+            QString::fromUtf8("<html><body style='color:#58a6ff; font-size:14px;'>"
+            "<b>⏳ 正在分析系统运行状态…</b><br><br>"
+            "DeepSeek 模型推理中，预计需要 60-120 秒，请耐心等待..."
+            "</body></html>"));
+    }
+    // 自动跳转到 AI 报告子页面
+    ui->stackedWidget->setCurrentIndex(4);
     QApplication::processEvents();  // 立即刷新 UI
 
     aiReportWorker_->requestReport();
@@ -4027,6 +4219,21 @@ void Widget::on_ai_report_ready_(const QString& report)
     fprintf(stderr, "%s\n", report.toUtf8().constData());
     fprintf(stderr, "========================================\n\n");
 
+    // 保存报告到文件（追加模式，带时间戳分隔）
+    if (!aiReportFile_.isEmpty()) {
+        QFile file(aiReportFile_);
+        if (file.open(QIODevice::Append | QIODevice::Text)) {
+            QTextStream out(&file);
+            out.setCodec("UTF-8");
+            out << "========================================\n";
+            out << "  AI 系统状态分析报告  "
+                << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+            out << "========================================\n";
+            out << report << "\n\n";
+            file.close();
+        }
+    }
+
     // 将报告中的换行转为 HTML，过滤 <think> 标签用灰色显示
     QString html = report;
     html.replace("&", "&amp;");
@@ -4039,11 +4246,21 @@ void Widget::on_ai_report_ready_(const QString& report)
                  "<span style='color:#8b949e; font-style:italic;'>[思考] ");
     html.replace("&lt;/think&gt;", "</span>");
 
-    aiReportText_->setHtml(
-        QString("<html><body style='color:#e6edf3; font-size:12px;'>"
-                "<b style='color:#3fb950;'>AI 系统状态分析报告</b><br><br>"
-                "%1"
-                "</body></html>").arg(html));
+    // AI 报告只显示在子页面（主页面文本框已弃用）
+    if (aiReportPageText_) {
+        QString pageHtml = QString(
+            "<html><body style='color:#e6edf3; font-size:14px;'>"
+            "<b style='color:#3fb950; font-size:16px;'>AI 系统状态分析报告</b><br><br>"
+            "%1"
+            "</body></html>").arg(html);
+        aiReportPageText_->setHtml(pageHtml);
+        // 更新底部时间标签
+        QLabel* countdownLbl = ui->pageAIReport->findChild<QLabel*>("aiCountdownLabel");
+        if (countdownLbl) {
+            countdownLbl->setText(QString::fromUtf8("报告生成时间: %1")
+                .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
+        }
+    }
 
     // 报告完成后重置倒计时
     if (aiAutoEnabled_) {
@@ -4064,7 +4281,7 @@ void Widget::reload_ai_auto_config_()
     int  wasInterval = aiAutoIntervalSec_;
 
     aiAutoEnabled_ = config_.value("AI/autoReportEnabled", false).toBool();
-    aiAutoIntervalSec_ = config_.value("AI/autoReportIntervalSec", 300).toInt();
+    aiAutoIntervalSec_ = config_.value("AI/autoReportIntervalSec", 1800).toInt();
 
     // 合法性检查：最少 30 秒，最多 3600 秒
     if (aiAutoIntervalSec_ < 30)  aiAutoIntervalSec_ = 30;
@@ -4093,15 +4310,10 @@ void Widget::reload_ai_auto_config_()
 
 void Widget::update_ai_countdown_display_()
 {
-    if (!aiReportText_) return;
-
-    if (!aiAutoEnabled_) {
-        // 自动分析禁用，不修改已有的报告内容
-        return;
-    }
+    // AI 报告已移入独立子页面，主页面仅更新倒计时状态标签
+    if (!aiAutoEnabled_) return;
 
     if (aiCountdownSec_ < 0) {
-        // 初始状态
         aiCountdownSec_ = aiAutoIntervalSec_;
     }
 
@@ -4109,20 +4321,10 @@ void Widget::update_ai_countdown_display_()
     int sec = aiCountdownSec_ % 60;
     QString countdownStr = QString("%1:%2").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0'));
 
-    // 在现有报告底部追加倒计时信息
-    // 仅在当前没有显示"正在分析"时更新
-    QString current = aiReportText_->toPlainText();
-    if (current.contains(QString::fromUtf8("正在分析"))) {
-        return;  // 推理进行中，不更新
-    }
-
-    // 如果报告区当前隐藏或为空，只显示倒计时
-    if (!aiReportText_->isVisible() || current.trimmed().isEmpty()) {
-        aiReportText_->setVisible(true);
-        aiReportText_->setHtml(
-            QString("<html><body style='color:#8b949e; font-size:11px;'>"
-                    "AI 自动分析倒计时: <b style='color:#58a6ff;'>%1</b>"
-                    "</body></html>").arg(countdownStr));
+    // 更新 AI 子页面底部倒计时
+    QLabel* countdownLbl = ui->pageAIReport->findChild<QLabel*>("aiCountdownLabel");
+    if (countdownLbl) {
+        countdownLbl->setText(QString::fromUtf8("下次自动分析倒计时: %1").arg(countdownStr));
     }
 }
 
@@ -4140,26 +4342,6 @@ void Widget::on_ai_auto_tick_()
     // 倒计时
     if (aiCountdownSec_ > 0) {
         aiCountdownSec_--;
-
-        // 每秒刷新一次倒计时显示
-        int min = aiCountdownSec_ / 60;
-        int sec = aiCountdownSec_ % 60;
-        QString countdownStr = QString("%1:%2").arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0'));
-
-        QString current = aiReportText_->toPlainText();
-        // 仅在空闲状态时更新倒计时显示（推理中不覆盖）
-        if (!current.contains(QString::fromUtf8("正在分析")) &&
-            !current.contains(QString::fromUtf8("AI 系统状态分析报告"))) {
-            aiReportText_->setVisible(true);
-            aiReportText_->setHtml(
-                QString("<html><body style='color:#8b949e; font-size:11px;'>"
-                        "AI 自动分析倒计时: <b style='color:#58a6ff;'>%1</b>"
-                        "</body></html>").arg(countdownStr));
-        } else if (current.contains(QString::fromUtf8("AI 系统状态分析报告"))) {
-            // 上次报告已显示，追加倒计时
-            // 这里不做复杂 HTML 拼接，简单覆盖底部状态栏
-            set_status_(QString::fromUtf8("下次 AI 分析: %1 后").arg(countdownStr), "#8b949e");
-        }
     }
 
     // 倒计时归零 → 触发分析
@@ -4167,11 +4349,22 @@ void Widget::on_ai_auto_tick_()
         fprintf(stderr, "[SentinelQT] AI auto-report timer fired\n");
 
         if (aiReportWorker_) {
-            // 如果已有请求在处理中，pending_ 检查会拒绝重复
             aiReportWorker_->requestReport();
         }
 
-        // 重置倒计时
         aiCountdownSec_ = aiAutoIntervalSec_;
+    }
+
+    // 倒计时只显示在 AI 报告子页面底部标签
+    if (aiReportPageText_) {
+        QLabel* countdownLbl = ui->pageAIReport->findChild<QLabel*>("aiCountdownLabel");
+        if (countdownLbl) {
+            if (aiAutoEnabled_ && aiCountdownSec_ > 0) {
+                int min = aiCountdownSec_ / 60;
+                int sec = aiCountdownSec_ % 60;
+                countdownLbl->setText(QString::fromUtf8("下次自动分析倒计时: %1:%2")
+                    .arg(min, 2, 10, QChar('0')).arg(sec, 2, 10, QChar('0')));
+            }
+        }
     }
 }

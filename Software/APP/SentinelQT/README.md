@@ -16,13 +16,15 @@
 
 - **系统暂停/恢复**：按相机独立 `camera_pause(camNum, paused)` 暂停/恢复 RGA 处理管线，底层 V4L2 流保持活跃不 STREAMOFF。暂停时自动停止该路推流、录像和预览线程。
 
-- **硬件状态监控**：标题栏左侧实时显示（1 秒刷新）：
+- **硬件状态监控 + 主动温控调频**：标题栏左侧实时显示（1 秒刷新）：
   - **温度**：`/sys/class/thermal/thermal_zone0/temp`
-  - **CPU 利用率**：`/proc/stat` 差分计算
+  - **温控等级**：Normal / Warm / Hot / Critical（4 级回滞）
+  - **CPU 利用率 + 频率**：`/proc/stat` 差分计算 + policy4 当前频率
   - **RGA 利用率**：`/sys/kernel/debug/rkrga/load`，逐核显示
-  - **NPU 利用率**：`/sys/kernel/debug/rknpu/load`，逐核显示
+  - **NPU 利用率 + 频率**：`/sys/kernel/debug/rknpu/load`，逐核显示 + fdab0000.npu cur_freq
   - **日期时间**：标题栏右侧显示 `yyyy-MM-dd HH:mm:ss`
   - 标题栏在三个页面顶部共享显示
+  - 主动温控：CPU（3 簇）+ NPU 频率上限自动调节，温度上 65°C 渐降，下 60°C 恢复。新增 `thermal-controller` 静态库实现策略引擎，详见 `thermal-controller/` 目录
 
 - **融合目标跟踪子页面**：基于 `SentinelLslidarer` + `LidarCameraFusion`，通过 `QStackedWidget` 切换到独立子页面（第 3 页）：
   - **鸟瞰俯视图**：自定义 `TopDownView` 组件实时绘制跟踪目标位置、速度矢量箭头、告警脉冲圈，支持距离网格和图例
@@ -122,6 +124,14 @@ dir=/mnt/sdcard
 | `warningEnterDistMeters` | `[Fusion]` | 告警触发距离 (m) | `3.0` |
 | `warningExitDistMeters` | `[Fusion]` | 告警解除距离 (m) | `3.5` |
 | `Cam0Fx` 等 | `[Fusion]` | 相机 0/1 内参 (px) | `400` |
+| `enabled` | `[Thermal]` | 温控开关 | `true` |
+| `intervalSec` | `[Thermal]` | 策略评估间隔 (s) | `2` |
+| `warmThreshold` / `warmRecover` | `[Thermal]` | Warm 升温/恢复阈值 (°C) | `65` / `60` |
+| `hotThreshold` / `hotRecover` | `[Thermal]` | Hot 升温/恢复阈值 (°C) | `75` / `70` |
+| `critThreshold` / `critRecover` | `[Thermal]` | Critical 升温/恢复阈值 (°C) | `85` / `80` |
+| `cpuBig*` | `[Thermal]` | CPU A76 各级频率上限 (kHz) | 2304000 / 1800000 / 1200000 / 816000 |
+| `cpuLittle*` | `[Thermal]` | CPU A55 各级频率上限 (kHz) | 1800000 / 1416000 / 1008000 / 600000 |
+| `npu*` | `[Thermal]` | NPU 各级频率上限 (Hz) | 1000000000 / 800000000 / 600000000 / 300000000 |
 
 ## Visual-Primary + IMU-Assisted EIS 集成说明
 

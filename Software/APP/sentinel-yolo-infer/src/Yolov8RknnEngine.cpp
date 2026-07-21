@@ -243,10 +243,12 @@ Yolov8RknnEngine::~Yolov8RknnEngine() {
     release();
 }
 
-bool Yolov8RknnEngine::init(const std::string& modelPath, float boxThreshold, float nmsThreshold) {
+bool Yolov8RknnEngine::init(const std::string& modelPath, float boxThreshold, float nmsThreshold,
+                            int npuCoreMask) {
     release();
     boxThreshold_ = boxThreshold;
     nmsThreshold_ = nmsThreshold;
+    npuCoreMask_  = npuCoreMask;
 
     std::vector<uint8_t> model;
     if (!read_file(modelPath, model)) return false;
@@ -256,6 +258,16 @@ bool Yolov8RknnEngine::init(const std::string& modelPath, float boxThreshold, fl
         std::cerr << "[Yolov8RknnEngine] rknn_init failed, ret=" << ret << std::endl;
         rknnCtx_ = 0;
         return false;
+    }
+
+    // 绑定 NPU 核心：YOLO 独占 Core 2，Core 0/1 留给 DeepSeek LLM
+    ret = rknn_set_core_mask(rknnCtx_, static_cast<rknn_core_mask>(npuCoreMask_));
+    if (ret != RKNN_SUCC) {
+        std::cerr << "[Yolov8RknnEngine] rknn_set_core_mask failed, ret=" << ret
+                  << " (mask=" << npuCoreMask_ << "), continuing anyway" << std::endl;
+        // 不致命，继续使用驱动默认分配
+    } else {
+        std::cout << "[Yolov8RknnEngine] NPU core mask set to " << npuCoreMask_ << std::endl;
     }
 
     if (!queryModelInfo_()) {

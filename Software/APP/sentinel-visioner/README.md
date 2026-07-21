@@ -11,7 +11,6 @@
 * **多路并发与一转多架构** ：基于 `epoll` 监听底层 V4L2 节点，单路物理视频流输入后，通过 RGA 硬件瞬间裂变为三路独立数据流（NPU 专用小图、1080P RGB888 预览图像、1080P 原始推流大图），互不干扰。
 * **双路双类型相机支持** ：统一 API 同时管理两路相机（CAM0 ISP 1080p + CAM1 USB），通过 `CameraType` 枚举和 `camNum` 索引区分，每路拥有完全隔离的 DMA 内存池和捕获线程。USB 相机自动协商 NV12/YUYV/MJPG 像素格式：NV12 直通，YUYV 时由 RGA 硬件转为 NV12，MJPG 时由 FFmpeg 软件解码为 NV12（支持 1080p@30fps）。USB NV12 相机自带安全拷贝池（`usbSafePool`），缓解 DMA 缓冲区兼容性导致的横向花屏问题（根因待查，详见 BUG_RECORD.md #7）。
 * **极致零拷贝 (Zero-Copy)** ：应用层不涉及任何内存映射 (`mmap`) 与 CPU 像素搬运，百兆级别的高清视频流转仅依靠轻量级的 DMA 文件描述符 (`dmaFd`) 传递。
-* **硬件级 ISP 与 RGA 联动** ：
 * **智能缩放与转换** ：纯硬件完成 `YCrCb_420_SP` (NV12) 到 `RGB_888` 的转换与等比例缩放。
 * **边缘填充 (Letterbox)** ：自动进行灰边 Padding 防脏数据。
 * **EIS 电子防抖接入点** ：原生预留有符号横纵坐标偏移量接口，无缝对接外部 IMU 陀螺仪数据进行像素级平移补偿。
@@ -174,7 +173,7 @@ int main() {
 ## ⚠️ 避坑与注意事项
 
 1. **绝对的归还机制** ：无论是在发生错误分支、丢弃数据分支，还是处理完成分支，都 **必须** 调用对应的 `release_` 接口归还 `DmaBuffer_t`。内存池的枯竭将导致底层 V4L2 引擎因无可用缓冲块而发生致命级 `Drop Frame`。
-2. **预览图像用途**：NPU 推理使用的 `RGB888` 缓冲区块通常为满足检测模型强制加入了 Letterbox 灰边，不应直接用于界面展示。若需带框视频推流，请使用 `task.previewImage` (干净的 1080P RGB888) 底图进行框体绘制。
+2. **图像用途分离**：`wait_get_npu` / `try_get_npu` 获取的 640x640 RGB888 NPU 推理小图带 Letterbox 灰边，不应用于界面展示。界面渲染应使用 `wait_get_preview` / `try_get_preview` 获取的 1080p BGR888 全彩预览帧。推流/录像取 `wait_get_orig_copy_buffer` 获取的 1080p NV12 原图。
 3. **驱动日志拦截** ：若发生 `[RGA Error] Invalid DMA fd` 报错，通常意味着底层视频流启动失败或捕获了坏帧。程序已内置防雪崩机制，会立刻切断后续处理并归还错乱内存，请优先排查硬件接线与 V4L2 `VIDIOC_S_FMT` 协商结果。
 4. **暂停与恢复**：若需临时停止预览或推理但不希望重建 V4L2 管线，请使用 `camera_pause(camNum, true)` 暂停 RGA 处理，而非 `camera_stream_ctrl(false)`。后者会执行 STREAMOFF，在 RK3588 ISP 驱动上可能导致无法恢复。
 5. **超时拉取**：对于需要周期性检查退出条件的消费者（如 QT 子线程），建议使用 `try_get_preview(camNum, 200)` 而非 `wait_get_preview()`。后者内部使用无限阻塞的 `pop()`，在无帧到达时会永久挂起线程，导致退出死锁。

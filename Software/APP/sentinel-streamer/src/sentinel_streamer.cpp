@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <new>
 #include <string>
 #include <thread>
@@ -78,6 +79,12 @@ struct StreamerContext {
     // 录像帧环形缓冲池
     RecordBufferPool* recordPool;
 
+    // 预分配编解码帧/包，避免 encode_and_mux 每次 malloc/free（推理期间 DDR 拥堵 OOM）
+    AVFrame*   encFrame{nullptr};    // 复用编码帧（数据缓存在内部 buffer 中）
+    AVPacket*  encPkt{nullptr};     // 复用编码包
+    int        encFrameW{0};         // encFrame 当前宽度（检测分辨率变化）
+    int        encFrameH{0};         // encFrame 当前高度
+
     // EIS 防抖参数
     int eisMargin;           ///< 裁切边距（像素），默认 32
 
@@ -85,6 +92,11 @@ struct StreamerContext {
     bool eisRecordDebug;                     ///< 默认 false
     AVCodecContext* recordEncCtxNoEis;       ///< 第二路编码器（无防抖）
     AVFormatContext* mp4CtxNoEis;            ///< 第二路 MP4（无防抖，_raw 后缀）
+
+    // 录制编码器安全关闭同步（避免 stop_record/stop_stream 与 stream 线程的 TOCTOU 竞态）
+    // 主线程设 true → stream 线程在安全点关闭对应资源 → 设回 false
+    std::atomic<bool> recordClosePending{false};
+    std::atomic<bool> streamClosePending{false};
 
     StreamerContext()
         : camNum(-1)
@@ -341,6 +353,10 @@ static void stream_thread_func_(StreamerContext* ctx)
 {
     fprintf(stderr, "[SentinelStreamer] cam=%d stream thread started\n", ctx->camNum);
 
+    // 预分配编码帧/包，避免每帧 av_frame_alloc/av_packet_alloc 的 malloc/free
+    // 在 LLM 推理期间 DDR 拥堵时，这些高频 alloc/free 会堆积导致 VmRSS 假性冲高 OOM
+    AVPacket* encPkt = av_packet_alloc();
+
     uint64_t firstTsUs = ctx->baselineTsUs;
     uint64_t lastLogTs = 0;
     int frameCount = 0;
@@ -348,6 +364,21 @@ static void stream_thread_func_(StreamerContext* ctx)
     fprintf(stderr, "[SentinelStreamer] baselineTsUs=%llu\n", (unsigned long long)firstTsUs);
 
     while (ctx->threadRunning.load(std::memory_order_acquire)) {
+        // 步骤 0: 检查异步关闭请求（主线程 stop_record / stop_stream 委托）
+        // 此时保证已不在任何 encode_and_mux() 调用中，是唯一安全关闭资源的时机。
+        if (ctx->recordClosePending.load(std::memory_order_acquire)) {
+            mp4_output_close(&ctx->mp4Ctx);
+            mp4_output_close(&ctx->mp4CtxNoEis);
+            mpp_encoder_close(&ctx->recordEncCtx);
+            mpp_encoder_close(&ctx->recordEncCtxNoEis);
+            ctx->recordClosePending.store(false, std::memory_order_release);
+        }
+        if (ctx->streamClosePending.load(std::memory_order_acquire)) {
+            ffmpeg_stream_close(ctx->ffmpegPipe);
+            ctx->ffmpegPipe = nullptr;
+            ctx->streamClosePending.store(false, std::memory_order_release);
+        }
+
         // 步骤 1: 获取原始 1080p NV12 帧
         DmaBuffer_t* origBuf = ctx->visioner->wait_get_orig_copy_buffer(ctx->camNum);
         if (!origBuf) continue;
@@ -433,15 +464,17 @@ static void stream_thread_func_(StreamerContext* ctx)
         bool srcAlready720p = (origBuf->width == 1280 && origBuf->height == 720);
         if (ctx->recordEnabled.load(std::memory_order_acquire) && ctx->recordEncCtx) {
             if (ctx->recordResolution == RecordResolution::RES_1080P) {
+                ensure_enc_frame(&ctx->encFrame, origBuf->width, origBuf->height);
                 encode_and_mux(ctx->recordEncCtx,
                                origBuf->virtAddr, origBuf->width, origBuf->height,
-                               recPts,
-                               nullptr, ctx->mp4Ctx);
+                               recPts, nullptr, ctx->mp4Ctx,
+                               ctx->encFrame, encPkt);
             } else if (ctx->recordResolution == RecordResolution::RES_720P && srcAlready720p) {
+                ensure_enc_frame(&ctx->encFrame, origBuf->width, origBuf->height);
                 encode_and_mux(ctx->recordEncCtx,
                                origBuf->virtAddr, origBuf->width, origBuf->height,
-                               recPts,
-                               nullptr, ctx->mp4Ctx);
+                               recPts, nullptr, ctx->mp4Ctx,
+                               ctx->encFrame, encPkt);
             }
         }
 
@@ -468,10 +501,11 @@ static void stream_thread_func_(StreamerContext* ctx)
                     draw_lidar_points_(scaleBuf->virtAddr, 1280, 720, srcW, srcH, lidarBoxes, 0, 0);
                 }
             }
+            ensure_enc_frame(&ctx->encFrame, 1280, 720);
             encode_and_mux(ctx->streamEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
-                           pts,
-                           ctx->ffmpegPipe, nullptr);
+                           pts, ctx->ffmpegPipe, nullptr,
+                           ctx->encFrame, encPkt);
         }
 
         // ----------------------------------------------------------------
@@ -482,19 +516,22 @@ static void stream_thread_func_(StreamerContext* ctx)
             !srcAlready720p &&
             ctx->recordEncCtx)
         {
+            // encFrame 在步骤 5a 已 ensure 为 720p，直接复用
             encode_and_mux(ctx->recordEncCtx,
                            scaleBuf->virtAddr, 1280, 720,
-                           recPts,
-                           nullptr, ctx->mp4Ctx);
+                           recPts, nullptr, ctx->mp4Ctx,
+                           ctx->encFrame, encPkt);
         }
 
         // ----------------------------------------------------------------
         // 步骤 5c: EIS 录制调试 — 无防抖第二路编码
         // ----------------------------------------------------------------
         if (scaleBufNoEis && ctx->recordEncCtxNoEis && ctx->mp4CtxNoEis) {
+            // 复用步骤 5a 已 ensure 的 720p encFrame
             encode_and_mux(ctx->recordEncCtxNoEis,
                            scaleBufNoEis->virtAddr, 1280, 720,
-                           recPts, nullptr, ctx->mp4CtxNoEis);
+                           recPts, nullptr, ctx->mp4CtxNoEis,
+                           ctx->encFrame, encPkt);
         }
 
         if (scaleBufNoEis) {
@@ -531,6 +568,9 @@ static void stream_thread_func_(StreamerContext* ctx)
             lastLogTs = tsUs;
         }
     }
+
+    // 清理预分配的编码帧/包
+    av_packet_free(&encPkt);
 
     fprintf(stderr, "[SentinelStreamer] cam=%d stream thread stopped\n", ctx->camNum);
 }
@@ -640,6 +680,8 @@ bool SentinelStreamer::remove_camera(int camNum)
         ctx->recordPool = nullptr;
     }
 
+    av_frame_free(&ctx->encFrame);
+
     delete ctx;
     contexts_[camNum] = nullptr;
 
@@ -710,24 +752,22 @@ bool SentinelStreamer::stop_stream(int camNum)
         return false;
     }
 
-    // 先停线程，再关输出、销毁编码器
-    bool threadStopped = !ctx->recordEnabled;
+    ctx->streamEnabled = false;
+
+    bool threadStopped = !ctx->recordEnabled.load(std::memory_order_acquire);
     if (threadStopped) {
+        // 录像已停：可以安全 join 线程，然后直接清理所有资源
         fprintf(stderr, "[SentinelStreamer] DEBUG: stopping thread...\n");
         ctx->threadRunning.store(false, std::memory_order_release);
         if (ctx->workerThread.joinable()) {
             ctx->workerThread.join();
             fprintf(stderr, "[SentinelStreamer] DEBUG: thread joined\n");
         }
-    }
 
-    ctx->streamEnabled = false;
-    fprintf(stderr, "[SentinelStreamer] DEBUG: closing ffmpeg pipe...\n");
-    ffmpeg_stream_close(ctx->ffmpegPipe);
-    ctx->ffmpegPipe = nullptr;
+        fprintf(stderr, "[SentinelStreamer] DEBUG: closing ffmpeg pipe...\n");
+        ffmpeg_stream_close(ctx->ffmpegPipe);
+        ctx->ffmpegPipe = nullptr;
 
-    // 只在确定线程已停时安全清理（编码器 + 可能延迟关闭的 mp4Ctx）
-    if (threadStopped) {
         fprintf(stderr, "[SentinelStreamer] DEBUG: flushing & closing both encoders...\n");
         mpp_encoder_flush(ctx->recordEncCtx, ctx->mp4Ctx);
         if (ctx->mp4Ctx) {
@@ -735,6 +775,22 @@ bool SentinelStreamer::stop_stream(int camNum)
         }
         mpp_encoder_close(&ctx->streamEncCtx);
         mpp_encoder_close(&ctx->recordEncCtx);
+    } else {
+        // 录像还在跑 → 委托 stream 线程在安全点关闭 ffmpeg 管道
+        // 避免主线程 pclose(ffmpegPipe) 时 stream 线程还在 fwrite() 往管道写数据
+        fprintf(stderr, "[SentinelStreamer] DEBUG: requesting stream thread to close ffmpeg pipe...\n");
+        ctx->streamClosePending.store(true, std::memory_order_release);
+        int waitCount = 0;
+        while (ctx->streamClosePending.load(std::memory_order_acquire) && waitCount < 500) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ++waitCount;
+        }
+        if (ctx->streamClosePending.load(std::memory_order_acquire)) {
+            fprintf(stderr, "[SentinelStreamer] WARNING: stream close timed out, forcing close\n");
+            ffmpeg_stream_close(ctx->ffmpegPipe);
+            ctx->ffmpegPipe = nullptr;
+            ctx->streamClosePending.store(false, std::memory_order_release);
+        }
     }
 
     fprintf(stderr, "[SentinelStreamer] cam=%d streaming stopped\n", camNum);
@@ -922,6 +978,7 @@ bool SentinelStreamer::stop_record(int camNum)
     ctx->recordBaseSet = false;
 
     if (!ctx->streamEnabled) {
+        // 推流已停：可以安全 join 线程
         ctx->threadRunning.store(false, std::memory_order_release);
         if (ctx->workerThread.joinable()) {
             ctx->workerThread.join();
@@ -933,12 +990,25 @@ bool SentinelStreamer::stop_record(int camNum)
         mpp_encoder_close(&ctx->recordEncCtx);
         mpp_encoder_close(&ctx->recordEncCtxNoEis);
     } else {
-        // 推流还在跑：只关录像的 MP4 和编码器，线程继续跑推流
-        fprintf(stderr, "[SentinelStreamer] DEBUG: closing record MP4...\n");
-        mp4_output_close(&ctx->mp4Ctx);
-        mp4_output_close(&ctx->mp4CtxNoEis);
-        mpp_encoder_close(&ctx->recordEncCtx);
-        mpp_encoder_close(&ctx->recordEncCtxNoEis);
+        // 推流还在跑 → 委托 stream 线程在安全点关闭录制编码器
+        // 避免主线程释放 encoder/mp4Ctx 时 stream 线程还在 encode_and_mux()
+        // 中使用这些指针（TOCTOU 竞态 → use-after-free → segfault）。
+        fprintf(stderr, "[SentinelStreamer] DEBUG: requesting stream thread to close record MP4...\n");
+        ctx->recordClosePending.store(true, std::memory_order_release);
+        // 自旋等待 stream 线程完成关闭（每次 10ms，最长 5 秒防死锁）
+        int waitCount = 0;
+        while (ctx->recordClosePending.load(std::memory_order_acquire) && waitCount < 500) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ++waitCount;
+        }
+        if (ctx->recordClosePending.load(std::memory_order_acquire)) {
+            fprintf(stderr, "[SentinelStreamer] WARNING: record close timed out, forcing close\n");
+            mp4_output_close(&ctx->mp4Ctx);
+            mp4_output_close(&ctx->mp4CtxNoEis);
+            mpp_encoder_close(&ctx->recordEncCtx);
+            mpp_encoder_close(&ctx->recordEncCtxNoEis);
+            ctx->recordClosePending.store(false, std::memory_order_release);
+        }
     }
 
     fprintf(stderr, "[SentinelStreamer] cam=%d recording stopped\n", camNum);

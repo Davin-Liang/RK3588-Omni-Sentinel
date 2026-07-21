@@ -41,7 +41,8 @@
 
 * **Main Thread (主线程)** : 负责系统初始化、摄像头挂载、生命周期管理（休眠 60 秒后触发优雅退出）。
 * **Capture Thread (底层捕获线程)** : 隐藏在 `SentinelVisioner` 内部，负责 `epoll` 监听、出队 NV12 图像、连续调用 RGA 硬件进行数据分发，完成后立即将 Buffer 归还内核。
-* **NPU & Preview Consumer (推理/预览消费线程)** : 阻塞获取 RGB888 小图与 1080P RGB888 预览图像。负责端到端延迟测算，预留 YOLO 模型推理与目标框绘制接口。
+* **NPU Consumer (推理消费线程)** : 阻塞获取 640x640 RGB888 NPU 小图。
+* **Preview Consumer (预览消费线程)** : 阻塞获取 1080P BGR888 预览图像。负责端到端延迟测算，预留 YOLO 模型推理与目标框绘制接口。
 * **Stream Consumer (推流消费线程)** : 阻塞获取原始 1080P NV12 图像，模拟将纯净画面送入 MPP 硬件编码器进行推流或视频落盘。
 
 ### 3. 运行与观测操作
@@ -65,7 +66,7 @@
 [Stream Thread] Started for Camera 0 - Waiting for data...
 Current FPS set to: 30
 Camera 0 (/dev/video11) added successfully.
-[NPU Pipeline Cam 0] Total: 30 frames | FPS: 30.00 | Latency: 3 ms
+[NPU Pipeline Cam 0] Total: 30 frames | FPS: 30.00 | RGA Latency: ~3 ms
 [Stream Pipeline Cam 0] Successfully processed 30 frames. Latest TS: 12543022134 us
 ...
 ```
@@ -110,7 +111,7 @@ Camera 0 (/dev/video11) added successfully.
 
 * **测试条件**: 1080P NV12 物理视频流输入，双队列并发处理（开启 NPU 专属 640x640 RGB888 缩放分支 + 原图推流分支）。
 * **端到端延迟 (Latency)**: **稳定在 64 ms 左右**（该延迟涵盖了 V4L2 硬件捕获、三次 RGA 硬件调度处理及线程间通信开销。实测表明流水线内部周转极速，未产生内存拷贝阻塞）。
-* **帧率表现 (FPS)**: **实测均值 13.97 FPS**（注：当前吞吐量受限于物理传感器（Sensor）在测试环境下的默认出帧率或自动曝光（AE）降频策略限制，C++ 零拷贝软件流水线本身尚未触及性能瓶颈，待后续 Sensor 寄存器调优后可解锁更高帧率）。
+* **帧率表现 (FPS)**: **实测均值 13.97 FPS**（注：当前吞吐量受限于物理传感器（Sensor）在测试环境下的默认出帧率或自动曝光（AE）降频策略限制，非软件管线的瓶颈。端到端延迟约 64ms，端到端延迟约 64ms、单次 RGA 耗时约 1-3ms）。
 
 ![Pipeline Benchmarks](./assets/demo1_pipeline_benchmarks.png)
 *(图：实测心跳日志，展现了稳定无波动的延迟与帧率表现)*

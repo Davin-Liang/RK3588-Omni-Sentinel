@@ -6,6 +6,11 @@
 #include <QtMath>
 #include <cstdio>
 
+// static constexpr float 需要类外定义（C++14 ODR-use 要求，qMin 取 const 引用触发）
+constexpr float TopDownView::kTargetRadius;
+constexpr float TopDownView::kMaxArrowLen;
+constexpr float TopDownView::kWarningRadius;
+
 TopDownView::TopDownView(QWidget* parent)
     : QWidget(parent)
 {
