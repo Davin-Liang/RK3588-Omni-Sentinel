@@ -17,13 +17,17 @@ NvmeWorker::NvmeWorker(SentinelStreamer* streamer,
     , lidarPtr_(lidarPtr)
     , numCameras_(numCameras)
     , lastLidarTs_(0)
+    , frameSkipCount_{0, 0}
 {
 }
 
 void NvmeWorker::start()
 {
     running_ = true;
-    fprintf(stderr, "[NvmeWorker] started for %d cameras\n", numCameras_);
+    // 每 N 帧写入一次，降低 NVMe 写压力（全帧率 45MB/s → 15MB/s）
+    static constexpr int kWriteInterval = 3;
+    fprintf(stderr, "[NvmeWorker] started for %d cameras, write every %d frames\n",
+            numCameras_, kWriteInterval);
 
     while (running_) {
         bool gotAny = false;
@@ -34,10 +38,14 @@ void NvmeWorker::start()
             uint64_t timestampUs = 0;
 
             if (streamer_->try_get_record_frame(cam, &data, &size, &timestampUs)) {
-                nvme_->write_video_frame_to_disk(
-                    data, size,
-                    timestampUs * 1000,
-                    cam == 0);
+                ++frameSkipCount_[cam];
+                if (frameSkipCount_[cam] >= kWriteInterval) {
+                    nvme_->write_video_frame_to_disk(
+                        data, size,
+                        timestampUs * 1000,
+                        cam == 0);
+                    frameSkipCount_[cam] = 0;
+                }
 
                 streamer_->release_record_frame(cam, data);
                 gotAny = true;
