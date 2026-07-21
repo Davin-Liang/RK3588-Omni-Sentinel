@@ -136,7 +136,9 @@ private:
     mutable std::mutex camera_pool_mutex_;
 
     // 队列
+    static constexpr size_t MAX_QUEUE_SIZE = 16;
     std::queue<std::shared_ptr<DataBlock>> data_queue_;
+    size_t queueDropCount_ = 0;  // 队列满丢弃计数
 
     // 缓冲池
     std::vector<uint8_t> lidar_buffer_;

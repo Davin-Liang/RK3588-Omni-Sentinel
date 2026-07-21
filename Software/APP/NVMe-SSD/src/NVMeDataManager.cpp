@@ -679,9 +679,17 @@ bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_
         block = std::move(fb);
     }
 
-    // 仅入队时持锁，减小锁粒度
+    // 队列有上限：满了直接丢帧，防止写线程跟不上导致内存无限堆积
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (data_queue_.size() >= MAX_QUEUE_SIZE) {
+            ++queueDropCount_;
+            if (queueDropCount_ % 100 == 1) {
+                fprintf(stderr, "[NVMeDataManager] queue full, dropped %zu frames\n",
+                        queueDropCount_);
+            }
+            return false;
+        }
         data_queue_.push(std::move(block));
     }
     queue_cv_.notify_one();
