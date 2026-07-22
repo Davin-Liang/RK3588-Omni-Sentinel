@@ -839,9 +839,9 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
         }
     }
 
-    // 只有开启 EIS 时才复制图像并叠加两个评价指标。
+    // 开启 EIS 或正在采集基线时，显示两项评价指标。
     QImage displayImage = image;
-    if (eisEnabled_[camNum]) {
+    if (eisEnabled_[camNum] || eisEnablePending_[camNum]) {
         displayImage = image.convertToFormat(QImage::Format_ARGB32);
         draw_eis_quality_overlay_(displayImage, camNum);
     }
@@ -879,7 +879,8 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
 
 void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
 {
-    if (camNum < 0 || camNum >= 2 || image.isNull() || !eisEnabled_[camNum]) {
+    if (camNum < 0 || camNum >= 2 || image.isNull() ||
+        (!eisEnabled_[camNum] && !eisEnablePending_[camNum])) {
         return;
     }
 
@@ -888,86 +889,65 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    // 评价文字直接绘制在预览原图上，之后还会缩放到 Qt 标签尺寸。
-    // 因此根据预览图宽度动态放大，避免在 7 寸屏幕上缩小后看不清。
+    // 原图最终还会缩放到 Qt 预览控件，所以在原图上用较大的字号绘制。
     const float uiScale = std::max(
         1.0f,
-        std::min(1.5f, static_cast<float>(image.width()) / 640.0f));
+        std::min(1.45f, static_cast<float>(image.width()) / 720.0f));
 
-    const int margin = static_cast<int>(14.0f * uiScale);
+    const int margin = static_cast<int>(16.0f * uiScale);
     const int panelWidth = std::min(
         image.width() - margin * 2,
-        static_cast<int>(460.0f * uiScale));
-    const int panelHeight = static_cast<int>(146.0f * uiScale);
+        static_cast<int>(560.0f * uiScale));
+    const int panelHeight = static_cast<int>(150.0f * uiScale);
     const QRect panelRect(margin, margin, panelWidth, panelHeight);
 
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 195));
+    painter.setBrush(QColor(0, 0, 0, 210));
     painter.drawRoundedRect(panelRect,
-                            static_cast<int>(10.0f * uiScale),
-                            static_cast<int>(10.0f * uiScale));
+                            static_cast<int>(12.0f * uiScale),
+                            static_cast<int>(12.0f * uiScale));
 
-    QFont titleFont = painter.font();
-    titleFont.setBold(true);
-    titleFont.setPixelSize(static_cast<int>(24.0f * uiScale));
-    painter.setFont(titleFont);
-    painter.setPen(QColor(230, 237, 243));
-    painter.drawText(
-        panelRect.adjusted(static_cast<int>(16.0f * uiScale),
-                           static_cast<int>(10.0f * uiScale),
-                           -static_cast<int>(12.0f * uiScale),
-                           -static_cast<int>(8.0f * uiScale)),
-        Qt::AlignLeft | Qt::AlignTop,
-        QString::fromUtf8("IMU 防抖效果评价"));
-
-    QFont valueFont = painter.font();
-    valueFont.setBold(true);
-    valueFont.setPixelSize(static_cast<int>(21.0f * uiScale));
-    painter.setFont(valueFont);
+    QFont font = painter.font();
+    font.setBold(true);
+    font.setPixelSize(static_cast<int>(27.0f * uiScale));
+    painter.setFont(font);
 
     QString suppressionText;
-    QColor suppressionColor(180, 180, 180);
+    QColor suppressionColor(210, 210, 210);
 
-    if (!metrics.baselineReady) {
-        suppressionText = QString::fromUtf8("采集基线中");
+    if (eisEnablePending_[camNum]) {
+        suppressionText = QString::fromUtf8("基线采集中");
+    } else if (!metrics.baselineReady) {
+        suppressionText = QString::fromUtf8("等待基线");
     } else if (!metrics.valid) {
         suppressionText = QString::fromUtf8("计算中");
     } else {
         suppressionText = QString("%1 %").arg(metrics.suppressionPercent, 0, 'f', 1);
         if (metrics.suppressionPercent >= 60.0f) {
-            suppressionColor = QColor(63, 185, 80);
+            suppressionColor = QColor(63, 210, 95);
         } else if (metrics.suppressionPercent >= 30.0f) {
-            suppressionColor = QColor(210, 153, 34);
+            suppressionColor = QColor(235, 180, 45);
         } else {
-            suppressionColor = QColor(248, 81, 73);
+            suppressionColor = QColor(255, 90, 85);
         }
     }
 
-    const int contentLeft = panelRect.left() + static_cast<int>(16.0f * uiScale);
-    const int contentWidth = panelRect.width() - static_cast<int>(32.0f * uiScale);
-    const int rowHeight = static_cast<int>(34.0f * uiScale);
-
-    painter.setPen(suppressionColor);
-    painter.drawText(
-        QRect(contentLeft,
-              panelRect.top() + static_cast<int>(54.0f * uiScale),
-              contentWidth,
-              rowHeight),
-        Qt::AlignLeft | Qt::AlignVCenter,
-        QString::fromUtf8("抑振率：") + suppressionText);
-
-    painter.setPen(QColor(88, 166, 255));
-    const QString residualText = metrics.valid
+    const QString residualText = (!eisEnablePending_[camNum] && metrics.valid)
         ? QString("%1 px RMS").arg(metrics.residualJitterRmsPx, 0, 'f', 2)
         : QString::fromUtf8("计算中");
 
-    painter.drawText(
-        QRect(contentLeft,
-              panelRect.top() + static_cast<int>(94.0f * uiScale),
-              contentWidth,
-              rowHeight),
-        Qt::AlignLeft | Qt::AlignVCenter,
-        QString::fromUtf8("残余抖动：") + residualText);
+    const int x = panelRect.left() + static_cast<int>(22.0f * uiScale);
+    const int y1 = panelRect.top() + static_cast<int>(52.0f * uiScale);
+    const int y2 = panelRect.top() + static_cast<int>(112.0f * uiScale);
+
+    // 使用基线坐标绘制，避免大字体在 QRect 中被裁剪或与标题重叠。
+    painter.setPen(suppressionColor);
+    painter.drawText(QPointF(x, y1),
+                     QString::fromUtf8("抑振率：") + suppressionText);
+
+    painter.setPen(QColor(95, 180, 255));
+    painter.drawText(QPointF(x, y2),
+                     QString::fromUtf8("残余抖动：") + residualText);
 }
 
 void Widget::push_eis_quality_to_web_(int camNum)
@@ -981,14 +961,119 @@ void Widget::push_eis_quality_to_web_(int camNum)
     nlohmann::json j;
     j["cam"] = camNum;
     j["eisEnabled"] = eisEnabled_[camNum];
+    j["eisPending"] = eisEnablePending_[camNum];
     j["valid"] = metrics.valid;
     j["baselineReady"] = metrics.baselineReady;
     j["suppressionPercent"] = metrics.suppressionPercent;
     j["residualJitterRmsPx"] = metrics.residualJitterRmsPx;
 
-    // WebServer::push_event 会封装为 type=event、event=eis_quality。
-    // 前端只更新 HTML 指标卡片，不参与 IMU-only 防抖控制。
     webServer_->push_event("eis_quality", j.dump());
+}
+
+void Widget::request_eis_enable_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2 || eisEnabled_[camNum] || eisEnablePending_[camNum]) {
+        return;
+    }
+
+    eisEnablePending_[camNum] = true;
+    eisBaselinePollCount_[camNum] = 0;
+
+    // 保持 IMU 补偿关闭，让评价器先采集真正的“未防抖”基线。
+    eisQualityEvaluator_[camNum].setEisEnabled(false);
+    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+
+    QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
+    if (btn) {
+        btn->setText(QString::fromUtf8("基线采集中"));
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #d29922; border: 1px solid #b78103; border-radius: 8px; }");
+    }
+
+    set_status_(QString("相机%1 正在采集未防抖基线，请保持当前振动约2秒")
+                    .arg(camNum + 1),
+                "#d29922");
+    push_eis_quality_to_web_(camNum);
+
+    QTimer::singleShot(250, this, [this, camNum]() {
+        poll_eis_baseline_and_enable_(camNum);
+    });
+}
+
+void Widget::poll_eis_baseline_and_enable_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2 || !eisEnablePending_[camNum]) {
+        return;
+    }
+
+    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+    ++eisBaselinePollCount_[camNum];
+    push_eis_quality_to_web_(camNum);
+
+    // 正常情况下 15 个有效样本约需 1.5 秒；最多等待 5 秒。
+    if (eisQualityMetrics_[camNum].baselineReady ||
+        eisBaselinePollCount_[camNum] >= 20) {
+        enable_eis_now_(camNum);
+        return;
+    }
+
+    QTimer::singleShot(250, this, [this, camNum]() {
+        poll_eis_baseline_and_enable_(camNum);
+    });
+}
+
+void Widget::enable_eis_now_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2 || !eisEnablePending_[camNum]) {
+        return;
+    }
+
+    eisEnablePending_[camNum] = false;
+    eisBaselinePollCount_[camNum] = 0;
+
+    if (imuOnlyEis_) {
+        imuOnlyEis_->resetImuOnlyState(camNum);
+    }
+
+    eisEnabled_[camNum] = true;
+    eisQualityEvaluator_[camNum].setEisEnabled(true);
+    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+
+    QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
+    if (btn) {
+        btn->setText(QString::fromUtf8("防抖开"));
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
+    }
+
+    set_status_(QString("相机%1 IMU-only EIS已启用，正在计算评价指标")
+                    .arg(camNum + 1),
+                "#3fb950");
+    update_camera_button_states_(camNum);
+    push_eis_quality_to_web_(camNum);
+}
+
+void Widget::cancel_eis_enable_pending_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2) {
+        return;
+    }
+
+    eisEnablePending_[camNum] = false;
+    eisBaselinePollCount_[camNum] = 0;
+
+    QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
+    if (btn) {
+        btn->setText(QString::fromUtf8("防抖关"));
+        btn->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; "
+            "color: #e6edf3; background-color: #6e7681; "
+            "border: 1px solid #8b949e; border-radius: 8px; }");
+    }
+
+    push_eis_quality_to_web_(camNum);
 }
 
 // ---- Stream ----
@@ -1341,7 +1426,12 @@ void Widget::update_camera_button_states_(int camNum)
     }
 
     QPushButton* btnEis = cam_btn(ui->btnEis0, ui->btnEis1, camNum);
-    if (eisEnabled_[camNum]) {
+    if (eisEnablePending_[camNum]) {
+        btnEis->setText(QString::fromUtf8("基线采集中"));
+        btnEis->setStyleSheet(
+            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
+            "background-color: #d29922; border: 1px solid #b78103; border-radius: 8px; }");
+    } else if (eisEnabled_[camNum]) {
         btnEis->setText(QString::fromUtf8("防抖开"));
         btnEis->setStyleSheet(
             "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
@@ -2663,6 +2753,8 @@ void Widget::deinit_eis_()
 
     for (int i = 0; i < 2; ++i) {
         eisEnabled_[i] = false;
+        eisEnablePending_[i] = false;
+        eisBaselinePollCount_[i] = 0;
         eisQualityEvaluator_[i].setEisEnabled(false);
         QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
         if (btn) {
@@ -2703,10 +2795,21 @@ bool Widget::imu_only_eis_offset_callback_(uint64_t timestampUs, int camNum,
 
 void Widget::on_btn_eis_(int camNum)
 {
-    QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
+    if (camNum < 0 || camNum >= 2) {
+        return;
+    }
+
+    if (eisEnablePending_[camNum]) {
+        cancel_eis_enable_pending_(camNum);
+        set_status_(QString("相机%1 已取消防抖基线采集").arg(camNum + 1), "#ffffff");
+        if (!eisEnabled_[0] && !eisEnabled_[1] &&
+            !eisEnablePending_[0] && !eisEnablePending_[1]) {
+            deinit_eis_();
+        }
+        return;
+    }
 
     if (!eisEnabled_[camNum]) {
-        // IMU-only EIS：只启动 IMU 读取和 offset 回调。
         if (!eisReader_) {
             init_eis_();
         }
@@ -2715,17 +2818,7 @@ void Widget::on_btn_eis_(int camNum)
             return;
         }
 
-        imuOnlyEis_->resetImuOnlyState(camNum);
-
-        eisEnabled_[camNum] = true;
-        eisQualityEvaluator_[camNum].setEisEnabled(true);
-        eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
-        push_eis_quality_to_web_(camNum);
-        btn->setText(QString::fromUtf8("防抖开"));
-        btn->setStyleSheet(
-            "QPushButton { font-size: 12px; font-weight: 600; color: #000; "
-            "background-color: #4CAF50; border: 1px solid #388E3C; border-radius: 8px; }");
-        set_status_(QString("相机%1 IMU-only EIS已启用").arg(camNum + 1), "#3fb950");
+        request_eis_enable_(camNum);
     } else {
         if (imuOnlyEis_) {
             imuOnlyEis_->resetImuOnlyState(camNum);
@@ -2733,26 +2826,29 @@ void Widget::on_btn_eis_(int camNum)
         eisEnabled_[camNum] = false;
         eisQualityEvaluator_[camNum].setEisEnabled(false);
         eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
-        push_eis_quality_to_web_(camNum);
-        btn->setText(QString::fromUtf8("防抖关"));
-        btn->setStyleSheet(
-            "QPushButton { font-size: 12px; font-weight: 600; "
-            "color: #e6edf3; background-color: #6e7681; "
-            "border: 1px solid #8b949e; border-radius: 8px; }");
+        cancel_eis_enable_pending_(camNum);
         set_status_(QString("相机%1 IMU-only EIS已禁用").arg(camNum + 1), "#ffffff");
 
-        if (!eisEnabled_[0] && !eisEnabled_[1]) {
+        if (!eisEnabled_[0] && !eisEnabled_[1] &&
+            !eisEnablePending_[0] && !eisEnablePending_[1]) {
             deinit_eis_();
         }
     }
 
-    fprintf(stderr, "[SentinelQT] cam %d IMU-only EIS %s\n", camNum,
-            eisEnabled_[camNum] ? "enabled" : "disabled");
+    fprintf(stderr, "[SentinelQT] cam %d IMU-only EIS enabled=%d pending=%d\n",
+            camNum,
+            eisEnabled_[camNum] ? 1 : 0,
+            eisEnablePending_[camNum] ? 1 : 0);
 }
 
 std::string Widget::web_eis_start_(int camNum)
 {
-    if (eisEnabled_[camNum]) return R"({"ok":true})";
+    if (camNum < 0 || camNum >= 2) {
+        return R"({"ok":false,"error":"invalid camera"})";
+    }
+    if (eisEnabled_[camNum] || eisEnablePending_[camNum]) {
+        return R"({"ok":true})";
+    }
     if (!eisReader_) {
         init_eis_();
     }
@@ -2760,20 +2856,22 @@ std::string Widget::web_eis_start_(int camNum)
         return R"({"ok":false,"error":"IMU-only EIS init failed"})";
     }
 
-    imuOnlyEis_->resetImuOnlyState(camNum);
-
-    eisEnabled_[camNum] = true;
-    eisQualityEvaluator_[camNum].setEisEnabled(true);
-    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
-    push_eis_quality_to_web_(camNum);
+    request_eis_enable_(camNum);
     update_camera_button_states_(camNum);
-    fprintf(stderr, "[SentinelQT] cam %d IMU-only EIS enabled via web\n", camNum);
-    return R"({"ok":true})";
+    fprintf(stderr, "[SentinelQT] cam %d EIS baseline capture requested via web\n", camNum);
+    return R"({"ok":true,"pendingBaseline":true})";
 }
 
 std::string Widget::web_eis_stop_(int camNum)
 {
-    if (!eisEnabled_[camNum]) return R"({"ok":true})";
+    if (camNum < 0 || camNum >= 2) {
+        return R"({"ok":false,"error":"invalid camera"})";
+    }
+
+    if (eisEnablePending_[camNum]) {
+        cancel_eis_enable_pending_(camNum);
+    }
+
     if (imuOnlyEis_) {
         imuOnlyEis_->resetImuOnlyState(camNum);
     }
@@ -2782,7 +2880,9 @@ std::string Widget::web_eis_stop_(int camNum)
     eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
     push_eis_quality_to_web_(camNum);
     update_camera_button_states_(camNum);
-    if (!eisEnabled_[0] && !eisEnabled_[1]) {
+
+    if (!eisEnabled_[0] && !eisEnabled_[1] &&
+        !eisEnablePending_[0] && !eisEnablePending_[1]) {
         deinit_eis_();
     }
     return R"({"ok":true})";
@@ -3090,6 +3190,7 @@ std::string Widget::get_status_json_() const
         cam["paused"]        = cameraPaused_[i];
         cam["osdEnabled"]    = osdEnabled_[i];
         cam["eisEnabled"]    = eisEnabled_[i];
+        cam["eisPending"]    = eisEnablePending_[i];
         cam["lidarOsdEnabled"] = lidarOsdEnabled_[i];
         cam["streaming"]     = streamer_ ? streamer_->is_streaming(i) : false;
         cam["recording"]     = streamer_ ? streamer_->is_recording(i) : false;

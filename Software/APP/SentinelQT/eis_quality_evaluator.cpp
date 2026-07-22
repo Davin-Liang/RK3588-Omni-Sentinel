@@ -48,8 +48,11 @@ void EisQualityEvaluator::setEisEnabled(bool enabled)
     activeWindow_.clear();
 
     latestMetrics_.valid = false;
+    // 只要有效样本数足够就认为基线已采集完成。
+    // 真正计算抑振率时再对过小的基线 RMS 做下限保护，
+    // 避免静止场景中永远显示“采集基线中”。
     latestMetrics_.baselineReady =
-        baselineWindow_.size() >= kMinBaselineSamples && rms_(baselineWindow_) > 0.05f;
+        baselineWindow_.size() >= kMinBaselineSamples;
     latestMetrics_.residualJitterRmsPx = 0.0f;
     latestMetrics_.suppressionPercent = 0.0f;
 }
@@ -240,14 +243,17 @@ bool EisQualityEvaluator::processFrame(const QImage& image,
     const float activeRms = rms_(activeWindow_);
 
     latestMetrics_.baselineReady =
-        baselineWindow_.size() >= kMinBaselineSamples && baselineRms > 0.05f;
+        baselineWindow_.size() >= kMinBaselineSamples;
 
     if (eisEnabled_) {
         latestMetrics_.valid = activeWindow_.size() >= kMinActiveSamples;
         latestMetrics_.residualJitterRmsPx = activeRms;
 
         if (latestMetrics_.valid && latestMetrics_.baselineReady) {
-            float suppression = 100.0f * (1.0f - activeRms / baselineRms);
+            // 对极小基线增加分母下限，保证数值稳定。
+            // 调参时仍应在相似振动条件下完成“关闭基线”和“开启评价”。
+            const float safeBaselineRms = std::max(baselineRms, 0.10f);
+            float suppression = 100.0f * (1.0f - activeRms / safeBaselineRms);
             // 保留负值用于识别“防抖反而放大抖动”，同时避免异常值撑爆显示。
             suppression = std::max(-100.0f, std::min(100.0f, suppression));
             latestMetrics_.suppressionPercent = suppression;

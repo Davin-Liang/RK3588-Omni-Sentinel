@@ -165,8 +165,17 @@ private:
     EisQualityMetrics   eisQualityMetrics_[2];
     int                 eisQualityFrameCounter_[2] = {0, 0};
     int                 eisQualityWebPushCounter_[2] = {0, 0};
+
+    // 开启防抖前先自动采集约 1.5 秒未防抖基线，确保抑振率能够得到数值。
+    bool                eisEnablePending_[2] = {false, false};
+    int                 eisBaselinePollCount_[2] = {0, 0};
+
     void draw_eis_quality_overlay_(QImage& image, int camNum);
     void push_eis_quality_to_web_(int camNum);
+    void request_eis_enable_(int camNum);
+    void poll_eis_baseline_and_enable_(int camNum);
+    void enable_eis_now_(int camNum);
+    void cancel_eis_enable_pending_(int camNum);
 
     // ---- Thermal ----
     ThermalConfig         thermalCfg_;
