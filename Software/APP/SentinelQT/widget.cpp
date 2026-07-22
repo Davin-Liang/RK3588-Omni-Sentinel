@@ -40,6 +40,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 #include <chrono>
 #include "json.hpp"
 
@@ -887,23 +888,41 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    const QRect panelRect(14, 14, 300, 96);
+    // 评价文字直接绘制在预览原图上，之后还会缩放到 Qt 标签尺寸。
+    // 因此根据预览图宽度动态放大，避免在 7 寸屏幕上缩小后看不清。
+    const float uiScale = std::max(
+        1.0f,
+        std::min(1.5f, static_cast<float>(image.width()) / 640.0f));
+
+    const int margin = static_cast<int>(14.0f * uiScale);
+    const int panelWidth = std::min(
+        image.width() - margin * 2,
+        static_cast<int>(460.0f * uiScale));
+    const int panelHeight = static_cast<int>(146.0f * uiScale);
+    const QRect panelRect(margin, margin, panelWidth, panelHeight);
+
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 185));
-    painter.drawRoundedRect(panelRect, 9, 9);
+    painter.setBrush(QColor(0, 0, 0, 195));
+    painter.drawRoundedRect(panelRect,
+                            static_cast<int>(10.0f * uiScale),
+                            static_cast<int>(10.0f * uiScale));
 
     QFont titleFont = painter.font();
     titleFont.setBold(true);
-    titleFont.setPixelSize(17);
+    titleFont.setPixelSize(static_cast<int>(24.0f * uiScale));
     painter.setFont(titleFont);
     painter.setPen(QColor(230, 237, 243));
-    painter.drawText(panelRect.adjusted(12, 7, -10, -8),
-                     Qt::AlignLeft | Qt::AlignTop,
-                     QString::fromUtf8("IMU 防抖效果评价"));
+    painter.drawText(
+        panelRect.adjusted(static_cast<int>(16.0f * uiScale),
+                           static_cast<int>(10.0f * uiScale),
+                           -static_cast<int>(12.0f * uiScale),
+                           -static_cast<int>(8.0f * uiScale)),
+        Qt::AlignLeft | Qt::AlignTop,
+        QString::fromUtf8("IMU 防抖效果评价"));
 
     QFont valueFont = painter.font();
     valueFont.setBold(true);
-    valueFont.setPixelSize(16);
+    valueFont.setPixelSize(static_cast<int>(21.0f * uiScale));
     painter.setFont(valueFont);
 
     QString suppressionText;
@@ -924,25 +943,31 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
         }
     }
 
+    const int contentLeft = panelRect.left() + static_cast<int>(16.0f * uiScale);
+    const int contentWidth = panelRect.width() - static_cast<int>(32.0f * uiScale);
+    const int rowHeight = static_cast<int>(34.0f * uiScale);
+
     painter.setPen(suppressionColor);
-    painter.drawText(QRect(panelRect.left() + 12,
-                           panelRect.top() + 36,
-                           panelRect.width() - 24,
-                           24),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     QString::fromUtf8("抑振率：") + suppressionText);
+    painter.drawText(
+        QRect(contentLeft,
+              panelRect.top() + static_cast<int>(54.0f * uiScale),
+              contentWidth,
+              rowHeight),
+        Qt::AlignLeft | Qt::AlignVCenter,
+        QString::fromUtf8("抑振率：") + suppressionText);
 
     painter.setPen(QColor(88, 166, 255));
     const QString residualText = metrics.valid
         ? QString("%1 px RMS").arg(metrics.residualJitterRmsPx, 0, 'f', 2)
         : QString::fromUtf8("计算中");
 
-    painter.drawText(QRect(panelRect.left() + 12,
-                           panelRect.top() + 64,
-                           panelRect.width() - 24,
-                           24),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     QString::fromUtf8("残余抖动：") + residualText);
+    painter.drawText(
+        QRect(contentLeft,
+              panelRect.top() + static_cast<int>(94.0f * uiScale),
+              contentWidth,
+              rowHeight),
+        Qt::AlignLeft | Qt::AlignVCenter,
+        QString::fromUtf8("残余抖动：") + residualText);
 }
 
 void Widget::push_eis_quality_to_web_(int camNum)
@@ -2639,7 +2664,6 @@ void Widget::deinit_eis_()
     for (int i = 0; i < 2; ++i) {
         eisEnabled_[i] = false;
         eisQualityEvaluator_[i].setEisEnabled(false);
-        eisQualityMetrics_[i] = eisQualityEvaluator_[i].latestMetrics();
         QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
         if (btn) {
             btn->setText(QString::fromUtf8("防抖关"));
