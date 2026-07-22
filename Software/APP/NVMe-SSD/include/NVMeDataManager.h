@@ -157,7 +157,7 @@ private:
     std::string nvme_device_path_;
 
     // 配置参数
-    static constexpr size_t BUFFER_SIZE = 1024 * 1024;      // 1MB缓冲池
+    static constexpr size_t BUFFER_SIZE = 256 * 1024;       // 256KB缓冲池（约 2.5s LiDAR 数据）
     static constexpr size_t HEADER_ALIGNMENT = 512;        // 512B对齐
     static constexpr uint32_t MAGIC_NUMBER = 0xDEADBEEF;   // 魔数
 };

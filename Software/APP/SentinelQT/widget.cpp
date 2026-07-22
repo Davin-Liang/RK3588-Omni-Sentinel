@@ -1488,6 +1488,8 @@ void Widget::load_fusion_config_()
     fusionCamCfg_[0].cy = config_.value("Fusion/Cam0Cy", 240.0f).toFloat();
     fusionCamCfg_[0].imgWidth  = config_.value("Fusion/Cam0ImgWidth", 640u).toUInt();
     fusionCamCfg_[0].imgHeight = config_.value("Fusion/Cam0ImgHeight", 480u).toUInt();
+    fusionCamCfg_[0].yoloConfThreshold =
+        config_.value("Fusion/Cam0ConfThreshold", 0.60f).toFloat();
     for (int i = 0; i < 16; ++i) {
         fusionCamCfg_[0].tLidarToCam[i] =
             config_.value(QString("Fusion/Cam0T%1").arg(i), 0.0f).toFloat();
@@ -1499,6 +1501,8 @@ void Widget::load_fusion_config_()
     fusionCamCfg_[1].cy = config_.value("Fusion/Cam1Cy", 240.0f).toFloat();
     fusionCamCfg_[1].imgWidth  = config_.value("Fusion/Cam1ImgWidth", 640u).toUInt();
     fusionCamCfg_[1].imgHeight = config_.value("Fusion/Cam1ImgHeight", 480u).toUInt();
+    fusionCamCfg_[1].yoloConfThreshold =
+        config_.value("Fusion/Cam1ConfThreshold", 0.60f).toFloat();
     for (int i = 0; i < 16; ++i) {
         fusionCamCfg_[1].tLidarToCam[i] =
             config_.value(QString("Fusion/Cam1T%1").arg(i), 0.0f).toFloat();
@@ -1543,6 +1547,9 @@ void Widget::save_fusion_config_()
     config_.setValue("Fusion/Cam1Fy", fusionCamCfg_[1].fy);
     config_.setValue("Fusion/Cam1Cx", fusionCamCfg_[1].cx);
     config_.setValue("Fusion/Cam1Cy", fusionCamCfg_[1].cy);
+
+    config_.setValue("Fusion/Cam0ConfThreshold", fusionCamCfg_[0].yoloConfThreshold);
+    config_.setValue("Fusion/Cam1ConfThreshold", fusionCamCfg_[1].yoloConfThreshold);
 
     ++fusionConfigVersion_;
     config_.sync();
@@ -2971,6 +2978,10 @@ std::string Widget::web_fusion_config_(const std::string& body)
             fusionTrackerCfg_.clusterVisOpacity = j["clusterVisOpacity"];
         if (j.contains("radarRangeMeters"))
             fusionTrackerCfg_.radarRangeMeters = j["radarRangeMeters"];
+        if (j.contains("Cam0ConfThreshold"))
+            fusionCamCfg_[0].yoloConfThreshold = j["Cam0ConfThreshold"];
+        if (j.contains("Cam1ConfThreshold"))
+            fusionCamCfg_[1].yoloConfThreshold = j["Cam1ConfThreshold"];
 
         if (fusion_) fusion_->configure_tracker(fusionTrackerCfg_);
         save_fusion_config_();
@@ -2989,6 +3000,8 @@ std::string Widget::web_fusion_intrinsics_(int camNum, const std::string& body)
         fusionCamCfg_[camNum].fy = j.value("fy", fusionCamCfg_[camNum].fy);
         fusionCamCfg_[camNum].cx = j.value("cx", fusionCamCfg_[camNum].cx);
         fusionCamCfg_[camNum].cy = j.value("cy", fusionCamCfg_[camNum].cy);
+        fusionCamCfg_[camNum].yoloConfThreshold =
+            j.value("yoloConfThreshold", fusionCamCfg_[camNum].yoloConfThreshold);
 
         if (fusion_) {
             fusion_->update_camera_intrinsics(camNum,
@@ -3100,6 +3113,8 @@ std::string Widget::get_status_json_() const
     }
 
     j["radarRangeMeters"] = fusionTrackerCfg_.radarRangeMeters;
+    j["Cam0ConfThreshold"] = fusionCamCfg_[0].yoloConfThreshold;
+    j["Cam1ConfThreshold"] = fusionCamCfg_[1].yoloConfThreshold;
     j["fusionConfigVersion"] = fusionConfigVersion_;
     j["autoBacktrackEnabled"] = autoBacktrackEnabled_;
 

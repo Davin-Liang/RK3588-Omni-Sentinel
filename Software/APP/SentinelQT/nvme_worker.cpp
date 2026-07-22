@@ -25,7 +25,7 @@ void NvmeWorker::start()
 {
     running_ = true;
     // 每 N 帧写入一次，降低 NVMe 写压力（全帧率 45MB/s → 15MB/s）
-    static constexpr int kWriteInterval = 3;
+    static constexpr int kWriteInterval = 4;
     fprintf(stderr, "[NvmeWorker] started for %d cameras, write every %d frames\n",
             numCameras_, kWriteInterval);
 
