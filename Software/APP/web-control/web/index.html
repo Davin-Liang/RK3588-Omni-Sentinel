@@ -3,9 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-<meta http-equiv="Pragma" content="no-cache">
-<meta http-equiv="Expires" content="0">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👁️</text></svg>">
 <title>RK3588 Omni Sentinel</title>
 <style>
@@ -66,23 +63,21 @@ body{
 .cam-dot.off{background:var(--gray)}
 .cam-name{font-size:15px;font-weight:600}
 .cam-info{font-size:14px;color:var(--text2);margin-left:8px}
-.cam-video{background:#000;position:relative;isolation:isolate;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+.cam-video{background:#000;position:relative;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
 .cam-video img{width:100%;height:100%;object-fit:contain}
 .cam-video iframe{position:absolute;inset:0;width:100%;height:100%;border:none;z-index:1}
 .cam-placeholder{color:rgba(255,255,255,0.3);font-size:30px;position:absolute;z-index:0}
-/* IMU-only EIS 两项实时效果评价：叠加在 Web 视频窗口左上角。 */
-.eis-quality-overlay{
-  display:none;position:absolute;left:18px;top:18px;z-index:9999;min-width:330px;
-  padding:15px 18px;border-radius:10px;background:rgba(0,0,0,.78);
-  color:#fff;pointer-events:none;box-shadow:0 3px 14px rgba(0,0,0,.45);
-  backdrop-filter:blur(3px)
+/* IMU-only EIS 防抖评价状态栏：显示在“点云投影”按钮后面。 */
+.eis-status-bar{
+  display:none;align-items:center;min-height:30px;margin-left:4px;padding:6px 12px;
+  border:1px solid #a5a08c;border-radius:7px;background:#f5f0db;color:#334;
+  font-size:16px;font-weight:700;line-height:1.2;white-space:nowrap;vertical-align:middle;
 }
-.eis-quality-overlay.show{display:block}
-.eis-quality-title{font-size:19px;font-weight:700;margin-bottom:9px;color:#e6edf3;line-height:1.3}
-.eis-quality-row{display:flex;align-items:center;justify-content:space-between;gap:22px;font-size:18px;line-height:1.9}
-.eis-quality-label{color:#c9d1d9}
-.eis-quality-value{font-size:19px;font-weight:700;white-space:nowrap}
-.eis-good{color:#3fb950}.eis-medium{color:#d29922}.eis-poor{color:#f85149}.eis-wait{color:#b1bac4}.eis-residual{color:#58a6ff}
+.eis-status-bar.show{display:inline-flex}
+.eis-status-pending{background:#fff6dd;border-color:#d9c16b;color:#8a6a00}
+.eis-status-good{background:#e9f9ee;border-color:#7fcf95;color:#1f6d36}
+.eis-status-medium{background:#fff3d7;border-color:#d8aa4c;color:#8a5b00}
+.eis-status-poor{background:#ffeaea;border-color:#e19b9b;color:#a22c2c}
 .cam-controls{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid rgba(48,54,61,0.15);flex-wrap:wrap}
 .cam-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:14px;color:var(--text2)}
 .cam-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
@@ -201,11 +196,6 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
     </div>
     <div class="cam-video" id="camVideo0">
       <span class="cam-placeholder" id="camPlaceholder0">推流待启动</span>
-      <div class="eis-quality-overlay" id="eisQuality0">
-        <div class="eis-quality-title">IMU 防抖效果评价</div>
-        <div class="eis-quality-row"><span class="eis-quality-label">抑振率</span><span class="eis-quality-value eis-wait" id="eisSuppression0">采集基线中</span></div>
-        <div class="eis-quality-row"><span class="eis-quality-label">残余抖动</span><span class="eis-quality-value eis-residual" id="eisResidual0">计算中</span></div>
-      </div>
     </div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview0">开启预览</button>
@@ -215,6 +205,9 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-off" id="btnOsd0">框叠加</button>
       <button class="btn btn-off" id="btnEis0">防抖关</button>
       <button class="btn btn-off" id="btnLidarOsd0">点云投影关</button>
+      <span class="eis-status-bar" id="eisStatusBar0">
+        <span id="eisStatusText0">基线计算中</span>
+      </span>
       <span style="font-size:14px;color:var(--text2)" id="camFps0"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot0"></div>
@@ -231,11 +224,6 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
     </div>
     <div class="cam-video" id="camVideo1">
       <span class="cam-placeholder" id="camPlaceholder1">推流待启动</span>
-      <div class="eis-quality-overlay" id="eisQuality1">
-        <div class="eis-quality-title">IMU 防抖效果评价</div>
-        <div class="eis-quality-row"><span class="eis-quality-label">抑振率</span><span class="eis-quality-value eis-wait" id="eisSuppression1">采集基线中</span></div>
-        <div class="eis-quality-row"><span class="eis-quality-label">残余抖动</span><span class="eis-quality-value eis-residual" id="eisResidual1">计算中</span></div>
-      </div>
     </div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview1">开启预览</button>
@@ -245,6 +233,9 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-off" id="btnOsd1">框叠加</button>
       <button class="btn btn-off" id="btnEis1">防抖关</button>
       <button class="btn btn-off" id="btnLidarOsd1">点云投影关</button>
+      <span class="eis-status-bar" id="eisStatusBar1">
+        <span id="eisStatusText1">基线计算中</span>
+      </span>
       <span style="font-size:14px;color:var(--text2)" id="camFps1"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot1"></div>
@@ -360,7 +351,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
-let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,eisPending:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,eisPending:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null}};
+let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null}};
 let trackingTargets=[],trackingClusters=[],showClusters=true,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
@@ -408,7 +399,7 @@ function updateUI(data){
   }
 
   for(let i=0;i<2;i++){const d=data['cam'+i];if(!d)continue;
-    Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,eisPending:!!d.eisPending,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
+    Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
     if(d.eisQuality)cam[i].eisQuality=d.eisQuality;
 
     // Header dot
@@ -421,7 +412,7 @@ function updateUI(data){
     const br=document.getElementById('btnRecord'+i);br.textContent=cam[i].recording?'停止录像':'开始录像';br.className='btn '+(cam[i].recording?'btn-on':'btn-off');
     const bp=document.getElementById('btnPause'+i);bp.textContent=cam[i].paused?'恢复':'暂停';bp.className='btn '+(cam[i].paused?'btn-on':'btn-off');
     const bo=document.getElementById('btnOsd'+i);bo.textContent=cam[i].osdEnabled?'框去除':'框叠加';bo.className='btn '+(cam[i].osdEnabled?'btn-on':'btn-off');
-    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisPending?'基线采集中':(cam[i].eisEnabled?'防抖开':'防抖关');be.className='btn '+(cam[i].eisEnabled?'btn-on':cam[i].eisPending?'btn-yellow':'btn-off');updateEisQuality(i,cam[i].eisQuality);
+    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'防抖开':'防抖关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');updateEisQuality(i,cam[i].eisQuality);
     const bl=document.getElementById('btnLidarOsd'+i);bl.textContent=cam[i].lidarOsdEnabled?'点云投影开':'点云投影关';bl.className='btn '+(cam[i].lidarOsdEnabled?'btn-on':'btn-off');
     const bv=document.getElementById('btnPreview'+i);bv.textContent=cam[i].previewActive?'关闭预览':'开启预览';bv.className='btn '+(cam[i].previewActive?'btn-on':'btn-off');
 
@@ -485,49 +476,54 @@ function updateUI(data){
 function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus()}if(data.clusters&&data.clusters.length>0){trackingClusters=data.clusters}drawRadar()}
 
 // 只显示防抖效果评价，不显示算法内部 offset/gyro 等调试量。
+// 状态栏位于每个相机控制行的“点云投影”按钮后面。
 function updateEisQuality(i,q){
-  const panel=document.getElementById('eisQuality'+i);
-  const sEl=document.getElementById('eisSuppression'+i);
-  const rEl=document.getElementById('eisResidual'+i);
-  if(!panel||!sEl||!rEl)return;
+  const bar=document.getElementById('eisStatusBar'+i);
+  const textEl=document.getElementById('eisStatusText'+i);
+  if(!bar||!textEl)return;
 
-  if(!cam[i].eisEnabled&&!cam[i].eisPending){
-    panel.classList.remove('show');
+  if(q&&typeof q==='object')cam[i].eisQuality=q;
+  const metrics=cam[i].eisQuality;
+
+  // 防抖关闭后不显示状态栏。
+  if(!cam[i].eisEnabled){
+    bar.className='eis-status-bar';
+    textEl.textContent='';
     return;
   }
 
-  panel.classList.add('show');
-  if(cam[i].eisPending){
-    panel.classList.add('show');
-    sEl.textContent='基线采集中';
-    sEl.className='eis-quality-value eis-wait';
-    rEl.textContent='计算中';
+  bar.className='eis-status-bar show eis-status-pending';
+
+  // 防抖开启，但还未取得评价数据。
+  if(!metrics){
+    textEl.textContent='防抖状态：计算中';
     return;
   }
 
-  if(!q){
-    sEl.textContent='计算中';
-    sEl.className='eis-quality-value eis-wait';
-    rEl.textContent='计算中';
+  // 未防抖基线尚未准备完成。
+  if(!metrics.baselineReady){
+    textEl.textContent='防抖状态：基线计算中';
     return;
   }
 
-  cam[i].eisQuality=q;
-  if(!q.baselineReady){
-    sEl.textContent='采集基线中';
-    sEl.className='eis-quality-value eis-wait';
-  }else if(!q.valid){
-    sEl.textContent='计算中';
-    sEl.className='eis-quality-value eis-wait';
+  // 基线已完成，但当前图像评价样本暂时无效。
+  if(!metrics.valid){
+    textEl.textContent='防抖状态：效果计算中';
+    return;
+  }
+
+  const suppression=Number(metrics.suppressionPercent||0);
+  const residual=Number(metrics.residualJitterRmsPx||0);
+
+  if(suppression>=60){
+    bar.className='eis-status-bar show eis-status-good';
+  }else if(suppression>=30){
+    bar.className='eis-status-bar show eis-status-medium';
   }else{
-    const value=Number(q.suppressionPercent||0);
-    sEl.textContent=value.toFixed(1)+' %';
-    sEl.className='eis-quality-value '+(value>=60?'eis-good':value>=30?'eis-medium':'eis-poor');
+    bar.className='eis-status-bar show eis-status-poor';
   }
 
-  rEl.textContent=q.valid
-    ? Number(q.residualJitterRmsPx||0).toFixed(2)+' px RMS'
-    : '计算中';
+  textEl.textContent='抑振率：'+suppression.toFixed(1)+'% ｜ 残余抖动：'+residual.toFixed(2)+' px RMS';
 }
 
 function handleEvent(data){
@@ -538,7 +534,6 @@ function handleEvent(data){
     const i=Number(q.cam||0);
     if(i===0||i===1){
       cam[i].eisEnabled=!!q.eisEnabled;
-      cam[i].eisPending=!!q.eisPending;
       updateEisQuality(i,q);
     }
     return null;
@@ -564,7 +559,7 @@ async function toggleStream(i){if(cam[i].streaming){await api('POST','/cam/'+i+'
 async function toggleRecord(i){await api('POST','/cam/'+i+'/record/'+(cam[i].recording?'stop':'start'))}
 async function togglePause(i){await api('POST','/cam/'+i+'/'+(cam[i].paused?'resume':'pause'))}
 async function toggleOsd(i){await api('POST','/cam/'+i+'/osd/'+(cam[i].osdEnabled?'stop':'start'))}
-async function toggleEis(i){await api('POST','/cam/'+i+'/eis/'+((cam[i].eisEnabled||cam[i].eisPending)?'stop':'start'))}
+async function toggleEis(i){await api('POST','/cam/'+i+'/eis/'+(cam[i].eisEnabled?'stop':'start'))}
 async function toggleLidarOsd(i){await api('POST','/cam/'+i+'/lidar-osd/'+(cam[i].lidarOsdEnabled?'stop':'start'))}
 
 // ===== EIS 防抖参数 =====
@@ -575,7 +570,7 @@ function readCamEis(i){return{camId:i,focalX:parseFloat(document.getElementById(
 async function saveEisConfig(){const body={cam0:readCamEis(0),cam1:readCamEis(1)};const r=await api('POST','/eis/config',body);if(r.ok)toast('防抖参数已保存')}
 
 // ===== MJPEG =====
-function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('camVideo'+i),ph=document.getElementById('camPlaceholder'+i);const iframe=document.createElement('iframe');iframe.src='http://'+location.hostname+':8889/live/cam'+i+'/';iframe.allow='autoplay';iframe.style.width='100%';iframe.style.height='100%';iframe.style.border='none';pane.appendChild(iframe);const overlay=document.getElementById('eisQuality'+i);if(overlay)pane.appendChild(overlay);hlsPlayer[i]=iframe;if(ph)ph.style.display='none'}function stopHls(i){if(hlsPlayer[i]){hlsPlayer[i].remove();hlsPlayer[i]=null}document.getElementById('camPlaceholder'+i).style.display=''}
+function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('camVideo'+i),ph=document.getElementById('camPlaceholder'+i);const iframe=document.createElement('iframe');iframe.src='http://'+location.hostname+':8889/live/cam'+i+'/';iframe.allow='autoplay';iframe.style.width='100%';iframe.style.height='100%';iframe.style.border='none';pane.appendChild(iframe);hlsPlayer[i]=iframe;if(ph)ph.style.display='none'}function stopHls(i){if(hlsPlayer[i]){hlsPlayer[i].remove();hlsPlayer[i]=null}document.getElementById('camPlaceholder'+i).style.display=''}
 
 // ===== Fusion =====
 document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop');fusionEnabled=!1;trackingTargets=[];trackingClusters=[];updateFusionStatus();drawRadar()}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
@@ -743,14 +738,6 @@ function updateClock(){const n=new Date();document.getElementById('clock').textC
 
 // ===== Init =====
 connectWS();updateClock();setInterval(updateClock,1000);buildFusionParams();
-
-// WebSocket 断线或浏览器错过事件时，用 REST 状态轮询兜底。
-async function pollStatusFallback(){
-  const d=await api('GET','/status',null,{silent:true});
-  if(d&&d.cam0&&d.cam1)updateUI(d);
-}
-pollStatusFallback();
-setInterval(pollStatusFallback,1000);
 window.addEventListener('resize',()=>{initCanvas();drawRadar()});
 setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig();switchEisTab(0);initEisControl();initAutoBacktrackStatus()},1000);
 async function initAutoBacktrackStatus(){
