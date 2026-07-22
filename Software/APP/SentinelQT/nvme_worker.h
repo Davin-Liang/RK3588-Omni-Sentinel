@@ -36,6 +36,9 @@ private:
     int numCameras_;
     std::atomic<bool> running_{false};
 
+    // 视频帧跳帧计数 (降低 NVMe 写压力)
+    int frameSkipCount_[2];
+
     // 雷达轮询缓冲与去重 (1200 = kPointsPerSweep 理论最大值)
     LidarPoint lidarPointsBuf_[1200];
     uint64_t lastLidarTs_;

@@ -136,7 +136,9 @@ private:
     mutable std::mutex camera_pool_mutex_;
 
     // 队列
+    static constexpr size_t MAX_QUEUE_SIZE = 16;
     std::queue<std::shared_ptr<DataBlock>> data_queue_;
+    size_t queueDropCount_ = 0;  // 队列满丢弃计数
 
     // 缓冲池
     std::vector<uint8_t> lidar_buffer_;
@@ -155,7 +157,7 @@ private:
     std::string nvme_device_path_;
 
     // 配置参数
-    static constexpr size_t BUFFER_SIZE = 1024 * 1024;      // 1MB缓冲池
+    static constexpr size_t BUFFER_SIZE = 256 * 1024;       // 256KB缓冲池（约 2.5s LiDAR 数据）
     static constexpr size_t HEADER_ALIGNMENT = 512;        // 512B对齐
     static constexpr uint32_t MAGIC_NUMBER = 0xDEADBEEF;   // 魔数
 };

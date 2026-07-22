@@ -679,9 +679,17 @@ bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_
         block = std::move(fb);
     }
 
-    // 仅入队时持锁，减小锁粒度
+    // 队列有上限：满了直接丢帧，防止写线程跟不上导致内存无限堆积
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (data_queue_.size() >= MAX_QUEUE_SIZE) {
+            ++queueDropCount_;
+            if (queueDropCount_ % 100 == 1) {
+                fprintf(stderr, "[NVMeDataManager] queue full, dropped %zu frames\n",
+                        queueDropCount_);
+            }
+            return false;
+        }
         data_queue_.push(std::move(block));
     }
     queue_cv_.notify_one();
@@ -1130,13 +1138,20 @@ void NVMeDataManager::flush() {
     }
     queue_cv_.notify_one();
 
-    // 等待 writer 线程将队列排空（数据安全落盘后返回）
-    while (true) {
+    // 等待 writer 线程排空队列，超时 3 秒防止 NVMe 降速时死锁
+    int maxWaitMs = 3000;
+    int waitedMs = 0;
+    while (waitedMs < maxWaitMs) {
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
             if (data_queue_.empty()) break;
         }
-        usleep(1000);  // 1ms
+        usleep(5000);  // 5ms
+        waitedMs += 5;
+    }
+    if (waitedMs >= maxWaitMs) {
+        fprintf(stderr, "[NVMeDataManager] flush timeout after %dms, queue has %zu blocks\n",
+                waitedMs, data_queue_.size());
     }
 }
 

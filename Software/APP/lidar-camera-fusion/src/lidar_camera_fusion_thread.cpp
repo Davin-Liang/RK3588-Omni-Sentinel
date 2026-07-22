@@ -99,8 +99,9 @@ void LidarCameraFusion::fusion_thread_()
                 generate_fake_detections_(c);
             }
             auto& dets = fakeDetections_[c];
+            float confThres = camConfigs_[c].yoloConfThreshold;
             dets.erase(std::remove_if(dets.begin(), dets.end(),
-                [](const YoloBBox& b) { return b.classId != 0 || b.confidence < 0.60f; }),
+                [confThres](const YoloBBox& b) { return b.classId != 0 || b.confidence < confThres; }),
                 dets.end());
         }
 

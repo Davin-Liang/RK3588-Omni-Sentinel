@@ -387,3 +387,13 @@
 **原因**: `NvmeWorker` 构造时接受 `SentinelLslidarer*` 通过值拷贝存入 `lidar_`。Widget 在构造阶段调用 `init_nvme_()`，此时 `lidar_ = nullptr`。NvmeWorker 永久保存了这个 nullptr，后续 `init_nvme_()` 中自动启动雷达后 `lidar_` 已非空，但 NvmeWorker 内部指针不变。
 
 **解决**: 改为存储 `SentinelLslidarer**`（指向 Widget 的 `lidar_` 成员）。每次 `start()` 轮询循环中解引用 `*lidarPtr_` 获取最新值。雷达启停后自动生效，无需额外通知。同时将 `deinit_nvme_()` 移到 `delete lidar_` 之前，避免 NvmeWorker 访问已释放的 lidar 对象。
+
+---
+
+## 39. NVMe 全帧率写入导致 SSD 过热降速 → OOM
+
+**现象**: 推流运行几分钟后 RSS 从 200MB 线性涨到 3GB，进程卡死。关闭 NVMe 写入后不复现。
+
+**原因**: NvmeWorker 以相机全帧率（15fps）写入每帧 3MB NV12 数据到 NVMe，持续 ~45MB/s。RK3588 板端 NVMe 无主动散热，几分钟后 SSD 控制器过热降速，`data_queue_` 无限堆积（详见 NVMe-SSD BUG_RECORD #6）。
+
+**解决**: NvmeWorker 新增跳帧计数器 `frameSkipCount_`，每 3 帧只写 1 次，写压力从 45MB/s 降至 15MB/s。RecordBufferPool 的解耦保证了跳帧后回溯仍能导出完整的时间窗口视频（扫描 NVMe 时取窗口内所有帧）。配合 NVMe-SSD 的队列上限 `MAX_QUEUE_SIZE=16` 和 `flush()` 超时，三重保护彻底解决 OOM。

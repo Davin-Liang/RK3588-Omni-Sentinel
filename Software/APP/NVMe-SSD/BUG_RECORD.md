@@ -60,3 +60,26 @@ endif()
 **原因**: `NvmeWorker` 构造时接受 `SentinelLslidarer*` 并保存为**值拷贝**。Widget 在构造时调用 `init_nvme_()`，此时 `lidar_` 为 `nullptr`（雷达尚未启动）。后续 `init_nvme_()` 中自动启动雷达后 `lidar_` 已非空，但 NvmeWorker 内部仍存着构造时的 `nullptr` 副本，始终走 `if (lidar_ == nullptr) return` 跳过分支。
 
 **解决**: NvmeWorker 改为存储 `SentinelLslidarer**`（指向 Widget 的 `lidar_` 成员）。每次轮询时解引用获取最新指针值。雷达启动/停止后自动感知，无需额外通知机制。
+
+---
+
+## 6. 写队列无限堆积导致 OOM
+
+**现象**: 推流运行几分钟后 RSS 从 200MB 线性涨到 3GB，然后进程卡死或 OOM killed。关闭 NVMe 写入后不再复现。
+
+**原因**: `data_queue_`（`std::queue<std::shared_ptr<DataBlock>>`）无容量上限。RK3588 板端 NVMe SSD 无主动散热，持续 45MB/s 写入几分钟后过热降速，writer 线程消费速度断崖下跌。生产者（NvmeWorker）继续以 15fps × 3MB/frame 入队，每帧 3MB 的 DataBlock 在内存中无限堆积。
+
+**解决**: 三层防护：
+1. **队列上限** `MAX_QUEUE_SIZE=16`：入队前检查，超限直接丢弃，内存最多 48MB。每 100 次丢弃打印计数
+2. **flush() 超时**：等待队列排空从无限自旋改为 3 秒超时，防止 NVMe 降速时回溯导出永久阻塞主线程
+3. **NvmeWorker 跳帧**：每 3 帧只写 1 次（45MB/s → 15MB/s），从源头降低 SSD 写压力
+
+---
+
+## 7. flush() 死锁主线程导致融合界面冻住
+
+**现象**: 推流和融合运行一段时间后点击回溯，融合界面停止更新，回溯无响应，终端关不掉程序。
+
+**原因**: `flush()` 中等待 `data_queue_` 排空的循环无超时。NVMe 降速后 writer 线程写不动，队列永远不空。回溯调用链（Web API → BlockingQueuedConnection → 主线程 → do_backtrack_ → export_lidar_heatmap_png → flush）把主线程永久阻塞。
+
+**解决**: `flush()` 等待循环加 3 秒超时。超时后打印 `flush timeout` 日志，放弃等待继续导出（可能丢失最新几帧雷达数据，但不会死锁）。
