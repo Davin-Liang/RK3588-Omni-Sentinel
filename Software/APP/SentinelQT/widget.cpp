@@ -43,7 +43,7 @@
 #include <algorithm>
 #include <chrono>
 #include "json.hpp"
-
+#include "voice_warning.h"
 extern "C" {
 #include <libavformat/avformat.h>
 }
@@ -4302,6 +4302,7 @@ void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
                     QString dangerTag;
                     if (t.distanceMeters < fusionTrackerCfg_.warningExitDistMeters) {
                         dangerTag = QString::fromUtf8(" ⚠ 已进入危险区域!");
+                        voice::playDangerWarning();
                     }
                     fusionStatus += QString::fromUtf8("\n  - 目标#%1: %2m%3")
                                         .arg(t.id)

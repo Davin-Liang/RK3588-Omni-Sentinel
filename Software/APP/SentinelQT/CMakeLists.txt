@@ -128,6 +128,8 @@ add_executable(SentinelQT
     virtual_keyboard.h
     nvme_worker.cpp
     nvme_worker.h
+    voice_warning.cpp
+    voice_warning.h
     ${TS_FILES}
 )
 
