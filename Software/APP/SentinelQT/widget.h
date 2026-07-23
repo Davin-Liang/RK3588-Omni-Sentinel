@@ -14,7 +14,7 @@
 #include "lidar_camera_fusion.h"
 
 #include "imu_eis.hpp"
-#include "vision_eis.hpp"
+#include "eis_quality_evaluator.h"
 
 class SentinelVisioner;
 class SentinelStreamer;
@@ -155,12 +155,18 @@ private:
 
     // ---- EIS ----
     bool                showEisControl_ = false;
-    // ---- Visual EIS + IMU assist ----
+    // ---- IMU-only EIS ----
     Icm45686Reader*     eisReader_ = nullptr;
     EisStabilizer*      imuOnlyEis_ = nullptr;
-    VisionEisConfig     visualEisCfg_[2];
     ImuOnlyEisConfig    imuOnlyEisCfg_[2];
-    uint32_t            imuAssistWindowMs_ = 200;
+
+    // ---- EIS 实时效果评价（只分析图像，不参与防抖控制）----
+    EisQualityEvaluator eisQualityEvaluator_[2];
+    EisQualityMetrics   eisQualityMetrics_[2];
+    int                 eisQualityFrameCounter_[2] = {0, 0};
+    int                 eisQualityWebPushCounter_[2] = {0, 0};
+    void draw_eis_quality_overlay_(QImage& image, int camNum);
+    void push_eis_quality_to_web_(int camNum);
 
     // ---- Thermal ----
     ThermalConfig         thermalCfg_;
@@ -186,7 +192,6 @@ private:
     void init_eis_();
     void deinit_eis_();
     void setup_lidar_osd_provider_();
-    bool imu_assist_callback_(uint64_t timestampUs, int camNum, VisionImuAssistState& state);
     bool imu_only_eis_offset_callback_(uint64_t timestampUs, int camNum,
                                        int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);

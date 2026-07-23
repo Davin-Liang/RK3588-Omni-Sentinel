@@ -64,6 +64,11 @@ add_library(sentinel_streamer_lib STATIC
     src/mpp_encoder.cpp
     src/record_buffer_pool.cpp
 )
+# ---- 第三方依赖: ICM45686 EIS ----
+if(NOT TARGET icm45686_eis_lib)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../icm45686-eis-app
+                     ${CMAKE_CURRENT_BINARY_DIR}/icm45686_eis_build)
+endif()
 
 target_include_directories(sentinel_streamer_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -111,9 +116,11 @@ add_executable(sentinel_record_pool_test
     src/demo_record_pool.cpp
 )
 
-target_link_libraries(sentinel_record_pool_test
+target_link_libraries(sentinel_streamer_demo
     sentinel_streamer_lib
     sentinel_visioner_lib
+    icm45686_eis_lib
+    icm45686_user_lib
 )
 
 install(TARGETS sentinel_streamer_lib  DESTINATION lib)

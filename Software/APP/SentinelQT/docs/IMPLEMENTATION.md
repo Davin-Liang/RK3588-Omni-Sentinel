@@ -230,7 +230,7 @@ OSD 状态通过 WebSocket `status` JSON 推送 `osdEnabled` 字段到 Web 前�
 
 ### 3.9 EIS 电子防抖集成
 
-通过回调注入模式将 ICM45686 EIS 算法集成到 sentinel-visioner 采集管线，QT 和 Web 界面各相机独立控制。
+当前版本只保留 IMU-only EIS。系统通过回调注入模式将 ICM45686 IMU-only offset 集成到 sentinel-visioner 采集管线，QT 和 Web 界面各相机独立控制。
 
 **架构**:
 ```
@@ -246,7 +246,7 @@ Widget 拥有:
 **控制**: 
 - QT: `btnEis0/btnEis1` 按钮，切换 `eisEnabled_[0/1]`，首次触发懒加载 `init_eis_()`
 - Web: `/api/v1/cam/{0,1}/eis/start|stop` POST 路由，与 QT 按钮双向同步
-- 两路 EIS 都关闭时自动 `deinit_eis_()` 释放 IMU 资源
+- 两路 IMU-only EIS 都关闭时自动 `deinit_eis_()` 释放 IMU 资源
 
 **status JSON**: 含 `eisEnabled` 字段，WebSocket 推送同步。
 
