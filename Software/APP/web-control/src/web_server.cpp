@@ -16,6 +16,8 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <limits.h>
+#include <unistd.h>
 #include <QBuffer>
 
 using json = nlohmann::json;
@@ -108,6 +110,10 @@ bool WebServer::start()
 
     // ---- 根路径: 服务 SPA ----
     impl_->httpServer_.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        // 禁止浏览器缓存旧页面，避免部署新版本后仍看不到 EIS 指标。
+        res.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+        res.set_header("Pragma", "no-cache");
+        res.set_header("Expires", "0");
         res.set_content(get_embedded_html_(), "text/html; charset=utf-8");
     });
 
@@ -235,11 +241,16 @@ bool WebServer::start()
         size_t fileSize = fsize.tellg();
         fsize.close();
 
+        // 根据扩展名判断 Content-Type
+        bool is_png = (filePath.size() >= 4 &&
+                       filePath.compare(filePath.size() - 4, 4, ".png") == 0);
+        const char* contentType = is_png ? "image/png" : "video/mp4";
+
         // 用 cpp-httplib 的内容提供器流式输出
         // cpp-httplib 会据此自动处理 Range 请求
         res.set_content_provider(
             fileSize,          // Content-Length
-            "video/mp4",       // Content-Type
+            contentType,       // Content-Type
             [filePath](size_t offset, size_t length, httplib::DataSink& sink) -> bool {
                 std::ifstream f(filePath, std::ios::binary);
                 if (!f) return false;
@@ -407,21 +418,34 @@ static std::string load_html_file_()
     if (!g_htmlCache_.empty())
         return g_htmlCache_;
 
-    const char* paths[] = {
-        "web/index.html",
-        "../web/index.html",
-        "../../web-control/web/index.html",
-        "/opt/sentinel/web/index.html",
-    };
+    std::vector<std::string> paths;
 
-    for (const char* p : paths) {
+    // 优先读取与 SentinelQT 可执行文件同目录的 web/index.html，
+    // 避免相对工作目录中残留的旧页面被误加载。
+    char exePath[PATH_MAX] = {0};
+    const ssize_t exeLen = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+    if (exeLen > 0) {
+        exePath[exeLen] = '\0';
+        std::string exeFile(exePath);
+        const std::size_t slash = exeFile.find_last_of('/');
+        if (slash != std::string::npos) {
+            paths.push_back(exeFile.substr(0, slash) + "/web/index.html");
+        }
+    }
+
+    paths.push_back("web/index.html");
+    paths.push_back("../web/index.html");
+    paths.push_back("../../web-control/web/index.html");
+    paths.push_back("/opt/sentinel/web/index.html");
+
+    for (const std::string& p : paths) {
         std::ifstream f(p);
         if (f.is_open()) {
             std::ostringstream ss;
             ss << f.rdbuf();
             g_htmlCache_ = ss.str();
             fprintf(stderr, "[WebServer] Loaded SPA from %s (%zu bytes)\n",
-                    p, g_htmlCache_.size());
+                    p.c_str(), g_htmlCache_.size());
             return g_htmlCache_;
         }
     }

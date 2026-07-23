@@ -75,11 +75,35 @@ public:
                                    int camera_id = -1,
                                    bool input_is_nv12 = false);
 
+    // 导出雷达热力图 PNG（回溯窗口内所有 LiDAR 点按时间着色叠加）
+    bool export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
+                                   const std::string& output_path,
+                                   double time_window_sec = 5.0);
+
     // 获取统计信息
     size_t get_queue_size() const;
     size_t get_buffer_usage() const;
 
+    // 将累积缓冲区中的残留数据强制刷入磁盘队列，等待 writer 线程写完
+    void flush();
+
 private:
+    // 热力图渲染辅助
+    struct LidarPointRecord {
+        float x, y;
+        uint64_t timestamp_ns;
+    };
+    struct HeatmapInfo {
+        double timeWindowSec;
+        int frameCount;
+        size_t totalPoints;
+        uint64_t triggerTimestampNs;
+    };
+    void render_heatmap_pixels_(const std::vector<LidarPointRecord>& points,
+                                 const HeatmapInfo& info,
+                                 int imgW, int imgH,
+                                 std::vector<uint8_t>& rgba);
+
     // 线程函数
     void writer_thread();
 
@@ -112,7 +136,9 @@ private:
     mutable std::mutex camera_pool_mutex_;
 
     // 队列
+    static constexpr size_t MAX_QUEUE_SIZE = 16;
     std::queue<std::shared_ptr<DataBlock>> data_queue_;
+    size_t queueDropCount_ = 0;  // 队列满丢弃计数
 
     // 缓冲池
     std::vector<uint8_t> lidar_buffer_;
@@ -131,7 +157,7 @@ private:
     std::string nvme_device_path_;
 
     // 配置参数
-    static constexpr size_t BUFFER_SIZE = 1024 * 1024;      // 1MB缓冲池
+    static constexpr size_t BUFFER_SIZE = 256 * 1024;       // 256KB缓冲池（约 2.5s LiDAR 数据）
     static constexpr size_t HEADER_ALIGNMENT = 512;        // 512B对齐
     static constexpr uint32_t MAGIC_NUMBER = 0xDEADBEEF;   // 魔数
 };

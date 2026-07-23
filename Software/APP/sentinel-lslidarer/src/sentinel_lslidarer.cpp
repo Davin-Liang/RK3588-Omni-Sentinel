@@ -80,14 +80,17 @@ bool SentinelLslidarer::get_closest_frame(uint64_t cameraTsNs, LidarFrame& outFr
     uint32_t writeIdx = ringBuffer_->write_index();
     if (writeIdx == 0) return false;
 
-    uint32_t validCount = std::min(writeIdx, ringBuffer_->capacity());
+    uint32_t cap = ringBuffer_->capacity();
+    uint32_t latestSlot = (writeIdx - 1) % cap;  // 最近写入的槽位
+    uint32_t validCount = std::min(writeIdx, cap);
     if (validCount == 0) return false;
 
-    // 线性扫描找最小时间差
+    // 从最新槽位向前线性扫描 validCount 个槽（环形索引）
     uint32_t bestIdx = 0;
     uint64_t bestDelta = UINT64_MAX;
 
-    for (uint32_t i = 0; i < validCount; ++i) {
+    for (uint32_t j = 0; j < validCount; ++j) {
+        uint32_t i = (latestSlot + cap - j) % cap;
         LidarFrame tmp;
         tmp.points = outFrame.points;  // 复用调用者缓冲区
         ringBuffer_->copy_slot(i, tmp);
@@ -117,10 +120,12 @@ bool SentinelLslidarer::get_latest_frame(LidarFrame& outFrame) {
     uint32_t writeIdx = ringBuffer_->write_index();
     if (writeIdx == 0) return false;
 
-    uint32_t validCount = std::min(writeIdx, ringBuffer_->capacity());
+    uint32_t cap = ringBuffer_->capacity();
+    uint32_t validCount = std::min(writeIdx, cap);
     if (validCount == 0) return false;
 
-    ringBuffer_->copy_slot(validCount - 1, outFrame);
+    // 最近写入的槽位 = (writeIdx - 1) % capacity
+    ringBuffer_->copy_slot((writeIdx - 1) % cap, outFrame);
     return true;
 }
 
@@ -283,6 +288,24 @@ void SentinelLslidarer::reader_loop_() {
 
             ringBuffer_->commit_write(sweepEndNs, sweepCount);
             ++sweepCount_;
+
+            // 首圈打印
+            if (sweepCount_ == 1) {
+                std::fprintf(stderr, "[LidarSweep] first sweep detected (points=%u)\n",
+                             sweepCount);
+            }
+
+            if (sweepCount_ % 10 == 0) {
+                static uint64_t lastSweepReportNs = 0;
+                uint64_t now = sweepEndNs;
+                if (lastSweepReportNs > 0) {
+                    double intervalMs = static_cast<double>(now - lastSweepReportNs) / 1e6;
+                    std::fprintf(stderr, "[LidarSweep] 10 sweeps in %.0f ms (%.1f Hz), total=%lu\n",
+                                 intervalMs, 10000.0 / intervalMs,
+                                 static_cast<unsigned long>(sweepCount_));
+                }
+                lastSweepReportNs = now;
+            }
 
             // 重置，开始新一圈
             sweepBuf   = ringBuffer_->begin_write();

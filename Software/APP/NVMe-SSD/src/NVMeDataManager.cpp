@@ -7,6 +7,10 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <cmath>
+#include <ctime>
+#include <cstdio>
+#include "lodepng.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -15,6 +19,184 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
+
+namespace {
+
+// On-disk LiDAR point layout matching sentinel-lslidarer's LidarPoint {float x, y, intensity}
+struct LidarPointDisk {
+    float x;
+    float y;
+    float intensity;
+};
+
+static_assert(sizeof(LidarPointDisk) == 3 * sizeof(float),
+              "LidarPointDisk size must match LidarPoint {float x, y, intensity}");
+
+// hue: 0-360, sat: 0-1, light: 0-1  →  RGB 各分量 0-255
+void hsl_to_rgb(float h, float s, float l,
+                uint8_t& r, uint8_t& g, uint8_t& b) {
+    auto hue2rgb = [](float p, float q, float t) -> float {
+        if (t < 0.0f) t += 1.0f;
+        if (t > 1.0f) t -= 1.0f;
+        if (t < 1.0f/6.0f) return p + (q - p) * 6.0f * t;
+        if (t < 1.0f/2.0f) return q;
+        if (t < 2.0f/3.0f) return p + (q - p) * (2.0f/3.0f - t) * 6.0f;
+        return p;
+    };
+
+    if (s == 0.0f) {
+        auto v = static_cast<uint8_t>(l * 255.0f);
+        r = g = b = v;
+        return;
+    }
+
+    float q = (l < 0.5f) ? l * (1.0f + s) : l + s - l * s;
+    float p = 2.0f * l - q;
+    float hNorm = h / 360.0f;
+
+    r = static_cast<uint8_t>(hue2rgb(p, q, hNorm + 1.0f/3.0f) * 255.0f);
+    g = static_cast<uint8_t>(hue2rgb(p, q, hNorm) * 255.0f);
+    b = static_cast<uint8_t>(hue2rgb(p, q, hNorm - 1.0f/3.0f) * 255.0f);
+}
+
+// ---- 5x7 位图字体 (ASCII 32-126) ----
+// 每个字符 5 列 × 7 行，5 字节，bit 0=顶行
+static const uint8_t kFont5x7[95][5] = {
+    {0x00,0x00,0x00,0x00,0x00}, // 32 ' '
+    {0x00,0x00,0x5F,0x00,0x00}, // 33 '!'
+    {0x00,0x07,0x00,0x07,0x00}, // 34 '"'
+    {0x14,0x7F,0x14,0x7F,0x14}, // 35 '#'
+    {0x24,0x2A,0x7F,0x2A,0x12}, // 36 '$'
+    {0x23,0x13,0x08,0x64,0x62}, // 37 '%'
+    {0x36,0x49,0x55,0x22,0x50}, // 38 '&'
+    {0x00,0x05,0x03,0x00,0x00}, // 39 '''
+    {0x00,0x1C,0x22,0x41,0x00}, // 40 '('
+    {0x00,0x41,0x22,0x1C,0x00}, // 41 ')'
+    {0x08,0x2A,0x1C,0x2A,0x08}, // 42 '*'
+    {0x08,0x08,0x3E,0x08,0x08}, // 43 '+'
+    {0x00,0x50,0x30,0x00,0x00}, // 44 ','
+    {0x08,0x08,0x08,0x08,0x08}, // 45 '-'
+    {0x00,0x60,0x60,0x00,0x00}, // 46 '.'
+    {0x20,0x10,0x08,0x04,0x02}, // 47 '/'
+    {0x3E,0x51,0x49,0x45,0x3E}, // 48 '0'
+    {0x00,0x42,0x7F,0x40,0x00}, // 49 '1'
+    {0x42,0x61,0x51,0x49,0x46}, // 50 '2'
+    {0x21,0x41,0x45,0x4B,0x31}, // 51 '3'
+    {0x18,0x14,0x12,0x7F,0x10}, // 52 '4'
+    {0x27,0x45,0x45,0x45,0x39}, // 53 '5'
+    {0x3C,0x4A,0x49,0x49,0x30}, // 54 '6'
+    {0x01,0x71,0x09,0x05,0x03}, // 55 '7'
+    {0x36,0x49,0x49,0x49,0x36}, // 56 '8'
+    {0x06,0x49,0x49,0x29,0x1E}, // 57 '9'
+    {0x00,0x36,0x36,0x00,0x00}, // 58 ':'
+    {0x00,0x56,0x36,0x00,0x00}, // 59 ';'
+    {0x00,0x08,0x14,0x22,0x41}, // 60 '<'
+    {0x14,0x14,0x14,0x14,0x14}, // 61 '='
+    {0x41,0x22,0x14,0x08,0x00}, // 62 '>'
+    {0x02,0x01,0x51,0x09,0x06}, // 63 '?'
+    {0x32,0x49,0x79,0x41,0x3E}, // 64 '@'
+    {0x7E,0x11,0x11,0x11,0x7E}, // 65 'A'
+    {0x7F,0x49,0x49,0x49,0x36}, // 66 'B'
+    {0x3E,0x41,0x41,0x41,0x22}, // 67 'C'
+    {0x7F,0x41,0x41,0x22,0x1C}, // 68 'D'
+    {0x7F,0x49,0x49,0x49,0x41}, // 69 'E'
+    {0x7F,0x09,0x09,0x01,0x01}, // 70 'F'
+    {0x3E,0x41,0x41,0x51,0x32}, // 71 'G'
+    {0x7F,0x08,0x08,0x08,0x7F}, // 72 'H'
+    {0x00,0x41,0x7F,0x41,0x00}, // 73 'I'
+    {0x20,0x40,0x41,0x3F,0x01}, // 74 'J'
+    {0x7F,0x08,0x14,0x22,0x41}, // 75 'K'
+    {0x7F,0x40,0x40,0x40,0x40}, // 76 'L'
+    {0x7F,0x02,0x04,0x02,0x7F}, // 77 'M'
+    {0x7F,0x04,0x08,0x10,0x7F}, // 78 'N'
+    {0x3E,0x41,0x41,0x41,0x3E}, // 79 'O'
+    {0x7F,0x09,0x09,0x09,0x06}, // 80 'P'
+    {0x3E,0x41,0x51,0x21,0x5E}, // 81 'Q'
+    {0x7F,0x09,0x19,0x29,0x46}, // 82 'R'
+    {0x46,0x49,0x49,0x49,0x31}, // 83 'S'
+    {0x01,0x01,0x7F,0x01,0x01}, // 84 'T'
+    {0x3F,0x40,0x40,0x40,0x3F}, // 85 'U'
+    {0x1F,0x20,0x40,0x20,0x1F}, // 86 'V'
+    {0x7F,0x20,0x18,0x20,0x7F}, // 87 'W'
+    {0x63,0x14,0x08,0x14,0x63}, // 88 'X'
+    {0x03,0x04,0x78,0x04,0x03}, // 89 'Y'
+    {0x61,0x51,0x49,0x45,0x43}, // 90 'Z'
+    {0x00,0x00,0x7F,0x41,0x41}, // 91 '['
+    {0x02,0x04,0x08,0x10,0x20}, // 92 '\'
+    {0x41,0x41,0x7F,0x00,0x00}, // 93 ']'
+    {0x04,0x02,0x01,0x02,0x04}, // 94 '^'
+    {0x40,0x40,0x40,0x40,0x40}, // 95 '_'
+    {0x00,0x01,0x02,0x04,0x00}, // 96 '`'
+    {0x20,0x54,0x54,0x54,0x78}, // 97 'a'
+    {0x7F,0x48,0x44,0x44,0x38}, // 98 'b'
+    {0x38,0x44,0x44,0x44,0x20}, // 99 'c'
+    {0x38,0x44,0x44,0x48,0x7F}, // 100 'd'
+    {0x38,0x54,0x54,0x54,0x18}, // 101 'e'
+    {0x08,0x7E,0x09,0x01,0x02}, // 102 'f'
+    {0x08,0x14,0x54,0x54,0x3C}, // 103 'g'
+    {0x7F,0x08,0x04,0x04,0x78}, // 104 'h'
+    {0x00,0x44,0x7D,0x40,0x00}, // 105 'i'
+    {0x20,0x40,0x44,0x3D,0x00}, // 106 'j'
+    {0x00,0x7F,0x10,0x28,0x44}, // 107 'k'
+    {0x00,0x41,0x7F,0x40,0x00}, // 108 'l'
+    {0x7C,0x04,0x18,0x04,0x78}, // 109 'm'
+    {0x7C,0x08,0x04,0x04,0x78}, // 110 'n'
+    {0x38,0x44,0x44,0x44,0x38}, // 111 'o'
+    {0x7C,0x14,0x14,0x14,0x08}, // 112 'p'
+    {0x08,0x14,0x14,0x18,0x7C}, // 113 'q'
+    {0x7C,0x08,0x04,0x04,0x08}, // 114 'r'
+    {0x48,0x54,0x54,0x54,0x20}, // 115 's'
+    {0x04,0x3F,0x44,0x40,0x20}, // 116 't'
+    {0x3C,0x40,0x40,0x20,0x7C}, // 117 'u'
+    {0x1C,0x20,0x40,0x20,0x1C}, // 118 'v'
+    {0x3C,0x40,0x30,0x40,0x3C}, // 119 'w'
+    {0x44,0x28,0x10,0x28,0x44}, // 120 'x'
+    {0x0C,0x50,0x50,0x50,0x3C}, // 121 'y'
+    {0x44,0x64,0x54,0x4C,0x44}, // 122 'z'
+    {0x00,0x08,0x36,0x41,0x00}, // 123 '{'
+    {0x00,0x00,0x7F,0x00,0x00}, // 124 '|'
+    {0x00,0x41,0x36,0x08,0x00}, // 125 '}'
+    {0x08,0x04,0x08,0x10,0x08}, // 126 '~'
+};
+
+// 在 RGBA 缓冲的 (x,y) 处绘制一个 2x 放大的 ASCII 字符 (白色)
+static void draw_char_rgba(uint8_t* rgba, int imgW, int imgH,
+                           int x, int y, char ch, int scale) {
+    if (ch < 32 || ch > 126) return;
+    const uint8_t* glyph = kFont5x7[ch - 32];
+    for (int col = 0; col < 5; ++col) {
+        uint8_t bits = glyph[col];
+        for (int row = 0; row < 7; ++row) {
+            if (bits & (1 << row)) {
+                for (int sy = 0; sy < scale; ++sy) {
+                    for (int sx = 0; sx < scale; ++sx) {
+                        int px = x + col * scale + sx;
+                        int py = y + row * scale + sy;
+                        if (px >= 0 && px < imgW && py >= 0 && py < imgH) {
+                            size_t idx = (static_cast<size_t>(py) * imgW + px) * 4;
+                            rgba[idx] = 255;     // R
+                            rgba[idx+1] = 255;   // G
+                            rgba[idx+2] = 255;   // B
+                            rgba[idx+3] = 255;   // A
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 在 RGBA 缓冲的 (x,y) 处绘制一行 2x 放大的 ASCII 文本 (白色)
+static void draw_text_rgba(uint8_t* rgba, int imgW, int imgH,
+                           int x, int y, const std::string& text, int scale) {
+    int cx = x;
+    for (char ch : text) {
+        draw_char_rgba(rgba, imgW, imgH, cx, y, ch, scale);
+        cx += 6 * scale;  // 5px 字符 + 1px 间距
+    }
+}
+
+} // namespace
 
 NVMeDataManager::NVMeDataManager()
     : running_(false)
@@ -150,6 +332,300 @@ bool NVMeDataManager::write_to_nvme(const Header* header, const uint8_t* data,
     return true;
 }
 
+void NVMeDataManager::render_heatmap_pixels_(
+        const std::vector<LidarPointRecord>& points,
+        const HeatmapInfo& info,
+        int imgW, int imgH,
+        std::vector<uint8_t>& rgba) {
+
+    if (points.empty()) return;
+
+    // --- 顶部信息栏（黑色半透明背景 + 白色文字 2x 放大）---
+    {
+        int barHeight = 54;
+        int barY = 0;
+        // 半透明黑色背景
+        for (int py = barY; py < barY + barHeight && py < imgH; ++py) {
+            for (int px = 0; px < imgW; ++px) {
+                size_t idx = (static_cast<size_t>(py) * imgW + px) * 4;
+                uint8_t& r = rgba[idx];
+                uint8_t& g = rgba[idx+1];
+                uint8_t& b = rgba[idx+2];
+                r = static_cast<uint8_t>(r / 4);
+                g = static_cast<uint8_t>(g / 4);
+                b = static_cast<uint8_t>(b / 4);
+                rgba[idx+3] = 200;  // semi-opaque
+            }
+        }
+        // 白色文字
+        int scale = 2;
+        int textY = 3;
+        draw_text_rgba(rgba.data(), imgW, imgH, 10, textY,
+                       "LiDAR Heatmap", scale);
+        textY += 8 * scale;  // 7px font * scale
+
+        // 格式化时间戳
+        uint64_t ns = info.triggerTimestampNs;
+        time_t sec = static_cast<time_t>(ns / 1000000000ULL);
+        int ms = static_cast<int>((ns / 1000000ULL) % 1000);
+        struct tm tmbuf;
+        char timeBuf[64];
+        if (gmtime_r(&sec, &tmbuf)) {
+            snprintf(timeBuf, sizeof(timeBuf),
+                     "%04d-%02d-%02d %02d:%02d:%02d.%03d UTC",
+                     tmbuf.tm_year + 1900, tmbuf.tm_mon + 1, tmbuf.tm_mday,
+                     tmbuf.tm_hour, tmbuf.tm_min, tmbuf.tm_sec, ms);
+        } else {
+            snprintf(timeBuf, sizeof(timeBuf), "ts=%llu", (unsigned long long)ns);
+        }
+
+        char line1[128];
+        snprintf(line1, sizeof(line1), "Window: %.1fs  |  Frames: %d  |  Points: %zu",
+                 info.timeWindowSec, info.frameCount, info.totalPoints);
+        draw_text_rgba(rgba.data(), imgW, imgH, 10, textY, line1, scale);
+        textY += 8 * scale;
+        draw_text_rgba(rgba.data(), imgW, imgH, 10, textY,
+                       std::string("Trigger: ") + timeBuf, scale);
+    }
+
+    // --- 计算渲染范围 ---
+    float minX = points[0].x, maxX = points[0].x;
+    float minY = points[0].y, maxY = points[0].y;
+    uint64_t minTs = points[0].timestamp_ns;
+    uint64_t maxTs = points[0].timestamp_ns;
+
+    for (const auto& p : points) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+        if (p.timestamp_ns < minTs) minTs = p.timestamp_ns;
+        if (p.timestamp_ns > maxTs) maxTs = p.timestamp_ns;
+    }
+
+    // 10% 边距 + 最小范围 ±10m
+    float marginX = std::max((maxX - minX) * 0.1f, 0.5f);
+    float marginY = std::max((maxY - minY) * 0.1f, 0.5f);
+    float viewMinX = minX - marginX;
+    float viewMaxX = maxX + marginX;
+    float viewMinY = minY - marginY;
+    float viewMaxY = maxY + marginY;
+
+    // 确保正方形 + 至少 ±10m
+    float cx = (viewMinX + viewMaxX) * 0.5f;
+    float cy = (viewMinY + viewMaxY) * 0.5f;
+    float half = std::max({viewMaxX - cx, viewMaxY - cy, 10.0f});
+    viewMinX = cx - half;
+    viewMaxX = cx + half;
+    viewMinY = cy - half;
+    viewMaxY = cy + half;
+
+    float scaleX = imgW / (viewMaxX - viewMinX);
+    float scaleY = imgH / (viewMaxY - viewMinY);
+    float scale  = std::min(scaleX, scaleY);
+
+    auto world_to_pixel = [&](float wx, float wy, int& px, int& py) {
+        px = static_cast<int>((wx - cx) * scale + imgW / 2.0f);
+        py = static_cast<int>((cy - wy) * scale + imgH / 2.0f);
+    };
+
+    // --- 黑色背景 ---
+    std::fill(rgba.begin(), rgba.end(), 0);
+
+    // --- 网格线 (10m 间距，深灰 #202020) ---
+    {
+        int gridStepM = 10;
+
+        for (int gm = static_cast<int>(std::floor(viewMinX / gridStepM)) * gridStepM;
+             gm <= static_cast<int>(std::ceil(viewMaxX / gridStepM)) * gridStepM;
+             gm += gridStepM) {
+            int px, py;
+            world_to_pixel(static_cast<float>(gm), 0.0f, px, py);
+            if (px >= 0 && px < imgW) {
+                for (int y = 0; y < imgH; y += 4) {  // 虚线
+                    size_t idx = (static_cast<size_t>(y) * imgW + px) * 4;
+                    rgba[idx] = 0x20; rgba[idx+1] = 0x20; rgba[idx+2] = 0x20; rgba[idx+3] = 255;
+                }
+            }
+        }
+
+        for (int gm = static_cast<int>(std::floor(viewMinY / gridStepM)) * gridStepM;
+             gm <= static_cast<int>(std::ceil(viewMaxY / gridStepM)) * gridStepM;
+             gm += gridStepM) {
+            int px, py;
+            world_to_pixel(0.0f, static_cast<float>(gm), px, py);
+            if (py >= 0 && py < imgH) {
+                for (int x = 0; x < imgW; x += 4) {  // 虚线
+                    size_t idx = (static_cast<size_t>(py) * imgW + x) * 4;
+                    rgba[idx] = 0x20; rgba[idx+1] = 0x20; rgba[idx+2] = 0x20; rgba[idx+3] = 255;
+                }
+            }
+        }
+    }
+
+    // --- 传感器原点十字 (白色) ---
+    {
+        int ox, oy;
+        world_to_pixel(0.0f, 0.0f, ox, oy);
+        for (int dx = -10; dx <= 10; ++dx) {
+            int px = ox + dx;
+            if (px >= 0 && px < imgW && oy >= 0 && oy < imgH) {
+                size_t idx = (static_cast<size_t>(oy) * imgW + px) * 4;
+                rgba[idx] = rgba[idx+1] = rgba[idx+2] = 255; rgba[idx+3] = 255;
+            }
+        }
+        for (int dy = -10; dy <= 10; ++dy) {
+            int py = oy + dy;
+            if (ox >= 0 && ox < imgW && py >= 0 && py < imgH) {
+                size_t idx = (static_cast<size_t>(py) * imgW + ox) * 4;
+                rgba[idx] = rgba[idx+1] = rgba[idx+2] = 255; rgba[idx+3] = 255;
+            }
+        }
+    }
+
+    // --- 渲染点：时间→色相 (240°→0°: 蓝→青→绿→黄→红)，alpha 叠加 ---
+    float tsRange = (maxTs > minTs) ? static_cast<float>(maxTs - minTs) : 1.0f;
+    int pointRadius = 2;
+
+    for (const auto& pt : points) {
+        float t = static_cast<float>(pt.timestamp_ns - minTs) / tsRange;
+        float hue = 240.0f * (1.0f - t);  // 240°(蓝) → 0°(红)
+
+        uint8_t cr, cg, cb;
+        hsl_to_rgb(hue, 1.0f, 0.5f, cr, cg, cb);
+
+        int cxPx, cyPx;
+        world_to_pixel(pt.x, pt.y, cxPx, cyPx);
+
+        for (int dy = -pointRadius; dy <= pointRadius; ++dy) {
+            for (int dx = -pointRadius; dx <= pointRadius; ++dx) {
+                if (dx*dx + dy*dy > pointRadius*pointRadius) continue;
+                int px = cxPx + dx;
+                int py = cyPx + dy;
+                if (px < 0 || px >= imgW || py < 0 || py >= imgH) continue;
+                size_t idx = (static_cast<size_t>(py) * imgW + px) * 4;
+                // Alpha 叠加：新颜色与现有颜色混合
+                uint8_t& er = rgba[idx];
+                uint8_t& eg = rgba[idx+1];
+                uint8_t& eb = rgba[idx+2];
+                uint8_t& ea = rgba[idx+3];
+                float alpha = 0.3f;  // 每点透明度，累积形成热点
+                er = static_cast<uint8_t>(er * (1.0f - alpha) + cr * alpha);
+                eg = static_cast<uint8_t>(eg * (1.0f - alpha) + cg * alpha);
+                eb = static_cast<uint8_t>(eb * (1.0f - alpha) + cb * alpha);
+                ea = 255;
+            }
+        }
+    }
+}
+
+bool NVMeDataManager::export_lidar_heatmap_png(uint64_t trigger_timestamp_ns,
+                                                const std::string& output_path,
+                                                double time_window_sec) {
+    uint64_t window_ns = static_cast<uint64_t>(time_window_sec * 1'000'000'000.0);
+    uint64_t start_ns = (trigger_timestamp_ns > window_ns)
+                      ? (trigger_timestamp_ns - window_ns) : 0;
+    uint64_t end_ns = trigger_timestamp_ns;
+
+    // 0. 将内存缓冲区中的残留雷达数据刷入磁盘
+    flush();
+
+    // 1. 扫描 NVMe 收集 LiDAR 记录
+    int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
+    if (read_fd < 0) {
+        fprintf(stderr, "[NVMeDataManager] heatmap: open failed: %s\n", strerror(errno));
+        return false;
+    }
+
+    std::vector<LidarPointRecord> allPoints;
+    int lidarFrameCnt = 0;
+    off_t offset = 0;
+    Header header;
+
+    while (true) {
+        ssize_t n = pread(read_fd, &header, sizeof(Header), offset);
+        if (n != static_cast<ssize_t>(sizeof(Header))) break;
+        if (header.magic_number != MAGIC_NUMBER) break;
+
+        size_t record_payload = sizeof(Header) + header.data_size;
+        size_t padding = (HEADER_ALIGNMENT - (record_payload % HEADER_ALIGNMENT)) % HEADER_ALIGNMENT;
+        size_t record_size = record_payload + padding;
+
+        if (header.data_type == static_cast<uint8_t>(DataType::LIDAR) &&
+            // flush() 块 header ts=0，允许通过；每帧的真实 ts 在帧头中
+            (header.timestamp_ns == 0 ||
+             (header.timestamp_ns >= start_ns && header.timestamp_ns <= end_ns))) {
+
+            std::vector<uint8_t> buf(header.data_size);
+            n = pread(read_fd, buf.data(), header.data_size, offset + sizeof(Header));
+            if (n == static_cast<ssize_t>(header.data_size)) {
+                // 解析帧头: [pointsCount:u32][timestampNs:u64][LidarPointDisk * N] ...
+                size_t pos = 0;
+                while (pos + 12 <= static_cast<size_t>(header.data_size)) {
+                    uint32_t frameCount;
+                    uint64_t frameTs;
+                    std::memcpy(&frameCount, buf.data() + pos, sizeof(frameCount));
+                    std::memcpy(&frameTs, buf.data() + pos + sizeof(frameCount),
+                               sizeof(frameTs));
+                    pos += 12;  // 帧头: 4 + 8
+
+                    size_t framePointsSize = static_cast<size_t>(frameCount) * sizeof(LidarPointDisk);
+                    if (frameCount == 0 || pos + framePointsSize > static_cast<size_t>(header.data_size)) {
+                        break;  // 帧头损坏或结束
+                    }
+
+                    // 时间窗口过滤
+                    if (frameTs >= start_ns && frameTs <= end_ns) {
+                        ++lidarFrameCnt;
+                        const LidarPointDisk* pts =
+                            reinterpret_cast<const LidarPointDisk*>(buf.data() + pos);
+                        for (uint32_t i = 0; i < frameCount; ++i) {
+                            LidarPointRecord r;
+                            r.x = pts[i].x;
+                            r.y = pts[i].y;
+                            r.timestamp_ns = frameTs;
+                            allPoints.push_back(r);
+                        }
+                    }
+
+                    pos += framePointsSize;
+                }
+            }
+        }
+
+        offset += static_cast<off_t>(record_size);
+    }
+
+    close(read_fd);
+
+    if (allPoints.empty()) {
+        fprintf(stderr, "[NVMeDataManager] heatmap: no LiDAR points in window\n");
+        return false;
+    }
+
+    // 2. 渲染 RGBA 像素缓冲
+    const int kImgSize = 1200;
+    std::vector<uint8_t> rgba(static_cast<size_t>(kImgSize) * kImgSize * 4, 0);
+    HeatmapInfo info;
+    info.timeWindowSec    = time_window_sec;
+    info.frameCount       = lidarFrameCnt;
+    info.totalPoints      = allPoints.size();
+    info.triggerTimestampNs = trigger_timestamp_ns;
+    render_heatmap_pixels_(allPoints, info, kImgSize, kImgSize, rgba);
+
+    // 3. 编码 PNG 并写盘
+    unsigned error = lodepng::encode(output_path, rgba, kImgSize, kImgSize);
+    if (error) {
+        fprintf(stderr, "[NVMeDataManager] heatmap: lodepng encode error: %s\n",
+                lodepng_error_text(error));
+        return false;
+    }
+
+    fprintf(stderr, "[NVMeDataManager] heatmap saved: %s (%zu points, %d frames)\n",
+            output_path.c_str(), allPoints.size(), lidarFrameCnt);
+    return true;
+}
+
 DataBlock* NVMeDataManager::acquire_pool_block() {
     std::lock_guard<std::mutex> lock(camera_pool_mutex_);
     for (int i = 0; i < CAMERA_POOL_SIZE; i++) {
@@ -203,9 +679,17 @@ bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_
         block = std::move(fb);
     }
 
-    // 仅入队时持锁，减小锁粒度
+    // 队列有上限：满了直接丢帧，防止写线程跟不上导致内存无限堆积
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (data_queue_.size() >= MAX_QUEUE_SIZE) {
+            ++queueDropCount_;
+            if (queueDropCount_ % 100 == 1) {
+                fprintf(stderr, "[NVMeDataManager] queue full, dropped %zu frames\n",
+                        queueDropCount_);
+            }
+            return false;
+        }
         data_queue_.push(std::move(block));
     }
     queue_cv_.notify_one();
@@ -217,38 +701,45 @@ bool NVMeDataManager::write_lidar_points_to_disk(const uint8_t* points_data, siz
                                           uint64_t timestamp_ns) {
     std::lock_guard<std::mutex> lock(queue_mutex_);
 
-    // 检查缓冲池空间
-    if (lidar_buffer_pos_ + points_size > lidar_buffer_.size()) {
-        // 缓冲池满了，需要刷入队列
-        if (!lidar_buffer_pos_) {
-            std::cerr << "Lidar buffer is empty but still full, possible logic error" << std::endl;
-            return false;
+    // 每帧前加 12 字节帧头: [pointsCount:u32][timestampNs:u64]
+    static constexpr size_t kFrameHeaderSize = sizeof(uint32_t) + sizeof(uint64_t);
+    size_t totalFrameSize = kFrameHeaderSize + points_size;
+
+    // 检查缓冲池空间（含帧头）
+    if (lidar_buffer_pos_ + totalFrameSize > lidar_buffer_.size()) {
+        // 缓冲池不够放当前帧，先刷已有数据到队列
+        if (lidar_buffer_pos_ > 0) {
+            auto block = std::make_shared<DataBlock>();
+            prepare_header(block->header, DataType::LIDAR, timestamp_ns,
+                          static_cast<uint32_t>(lidar_buffer_pos_));
+            block->data.assign(lidar_buffer_.data(),
+                              lidar_buffer_.data() + lidar_buffer_pos_);
+            block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
+
+            data_queue_.push(std::move(block));
+            queue_cv_.notify_one();
+
+            // 重置缓冲池位置
+            lidar_buffer_pos_ = 0;
         }
 
-        // 直接创建 DataBlock（一次拷贝，无包头拼接）
-        auto block = std::make_shared<DataBlock>();
-        prepare_header(block->header, DataType::LIDAR, timestamp_ns,
-                      static_cast<uint32_t>(lidar_buffer_pos_));
-        block->data.assign(lidar_buffer_.data(),
-                          lidar_buffer_.data() + lidar_buffer_pos_);
-        block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
-
-        data_queue_.push(std::move(block));
-        queue_cv_.notify_one();
-
-        // 重置缓冲池位置
-        lidar_buffer_pos_ = 0;
+        // 单帧超过整个缓冲池大小则拒绝
+        if (totalFrameSize > lidar_buffer_.size()) {
+            std::cerr << "Lidar frame too large for buffer: " << totalFrameSize << " bytes"
+                      << std::endl;
+            return false;
+        }
     }
 
-    // 写入新数据到缓冲池
-    if (lidar_buffer_pos_ + points_size <= lidar_buffer_.size()) {
-        std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_, points_data, points_size);
-        lidar_buffer_pos_ += points_size;
-        return true;
-    } else {
-        std::cerr << "Lidar data too large for buffer" << std::endl;
-        return false;
-    }
+    // 写入帧头 + 点数据
+    uint32_t count = static_cast<uint32_t>(points_size / sizeof(LidarPointDisk));
+    std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_, &count, sizeof(count));
+    std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_ + sizeof(count),
+               &timestamp_ns, sizeof(timestamp_ns));
+    std::memcpy(lidar_buffer_.data() + lidar_buffer_pos_ + kFrameHeaderSize,
+               points_data, points_size);
+    lidar_buffer_pos_ += totalFrameSize;
+    return true;
 }
 
 bool NVMeDataManager::write_imu_data_to_disk(const uint8_t* imu_data, size_t imu_size,
@@ -615,6 +1106,53 @@ size_t NVMeDataManager::get_queue_size() const {
 
 size_t NVMeDataManager::get_buffer_usage() const {
     return lidar_buffer_pos_ + imu_buffer_pos_;
+}
+
+void NVMeDataManager::flush() {
+    // 将残留的 LiDAR/IMU 缓冲区数据推入队列
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+
+        if (lidar_buffer_pos_ > 0) {
+            auto block = std::make_shared<DataBlock>();
+            // 记录头时间戳用 0（语义：flush 导出，非真实帧时间戳）
+            prepare_header(block->header, DataType::LIDAR, 0,
+                          static_cast<uint32_t>(lidar_buffer_pos_));
+            block->data.assign(lidar_buffer_.data(),
+                              lidar_buffer_.data() + lidar_buffer_pos_);
+            block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
+            data_queue_.push(std::move(block));
+            lidar_buffer_pos_ = 0;
+        }
+
+        if (imu_buffer_pos_ > 0) {
+            auto block = std::make_shared<DataBlock>();
+            prepare_header(block->header, DataType::IMU, 0,
+                          static_cast<uint32_t>(imu_buffer_pos_));
+            block->data.assign(imu_buffer_.data(),
+                              imu_buffer_.data() + imu_buffer_pos_);
+            block->padding_size = calc_padding(sizeof(Header) + imu_buffer_pos_);
+            data_queue_.push(std::move(block));
+            imu_buffer_pos_ = 0;
+        }
+    }
+    queue_cv_.notify_one();
+
+    // 等待 writer 线程排空队列，超时 3 秒防止 NVMe 降速时死锁
+    int maxWaitMs = 3000;
+    int waitedMs = 0;
+    while (waitedMs < maxWaitMs) {
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (data_queue_.empty()) break;
+        }
+        usleep(5000);  // 5ms
+        waitedMs += 5;
+    }
+    if (waitedMs >= maxWaitMs) {
+        fprintf(stderr, "[NVMeDataManager] flush timeout after %dms, queue has %zu blocks\n",
+                waitedMs, data_queue_.size());
+    }
 }
 
 void NVMeDataManager::writer_thread() {

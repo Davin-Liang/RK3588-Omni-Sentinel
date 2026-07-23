@@ -287,3 +287,29 @@
 **原因**: `update_snapshot_()` 中判定 cluster 是否被 bbox 认领用的是距离比较：`dx²+dy² < 0.01`（0.1m 阈值）。但 cluster 质心帧间跳动常超 0.1m，且深度仲裁后会换 `bboxCluster_[bb]` 指向，导致 bbox 匹配的新簇和历史记录旧簇的质心距离超阈值 → 误判为孤儿。
 
 **解决**: 改用 `clusterBboxMatch_` 索引法。`persist_clusters_()` 阶段已建立 `ci→hi`（当前簇索引→历史槽位）的精确映射。`update_snapshot_()` 直接查表：遍历所有 bbox，找到其认领的簇 ci，通过 `clusterBboxMatch_[ci]` 获取对应历史槽 hi，若 hi 匹配当前历史槽则为非孤儿。消除距离阈值依赖。
+
+---
+
+## 25. tracker 告警回调空指针触发未定义行为
+
+**现象**: 关闭自动回溯后，俯视图上的告警红圈一直闪烁不消失。再次开启自动回溯后红圈才消失。
+
+**原因**: `set_auto_backtrack_enabled_(false)` 调用 `register_warning_callback(nullptr, nullptr)`，将 tracker 内部的 `warningCb_` 设为 `nullptr`。但 `check_warnings_()` 中调用回调前没有判空：
+```cpp
+warningCb_(track, warningUserData_);  // nullptr 调用 → UB
+```
+ARM64 上调用空函数指针不会立即 crash（指令预取特性），但 UB 导致 `warningActive` 状态管理异常。红圈渲染依赖 `warningActive` 标志，该标志无法正常退出告警状态。
+
+**解决**: 两处回调调用前添加 `if (warningCb_)` 判空。`warningActive` 的进入/退出逻辑纯由距离阈值驱动，与回调注册状态解耦。
+
+---
+
+## 26. sentinel-lslidarer 环形索引 bug 导致融合退化至 1Hz
+
+**现象**: 融合循环实际只处理 ~1Hz 的雷达帧，而非预期的 10Hz。融合日志添加时间戳后确认每次迭代间隔约 1 秒。`iter` 字段显示单帧处理只要 1-3ms，诊断计数器 `poll/dup` 显示 99% 的轮询发现"重复帧"被跳过。
+
+**原因**: 本组件代码无错，根因在 `sentinel-lslidarer` 的 `get_latest_frame()` / `get_closest_frame()` 使用了错误的环形槽位索引（详见 lslidarer BUG_RECORD #9）。融合循环看不到新帧，去重逻辑把所有轮询都跳过。
+
+**触发条件**: NVMe 自动启动雷达后，雷达连续运行超过 1 秒（`writeIndex_` 超过 RingBuffer capacity）。此前雷达随融合启停，每次从索引 0 开始，bug 从未暴露。
+
+**解决**: 上游 lslidarer 修复圆形索引后，融合自动恢复 10Hz。本组件无代码改动。

@@ -65,7 +65,19 @@ body{
 .cam-info{font-size:14px;color:var(--text2);margin-left:8px}
 .cam-video{background:#000;position:relative;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
 .cam-video img{width:100%;height:100%;object-fit:contain}
-.cam-placeholder{color:rgba(255,255,255,0.3);font-size:30px;position:absolute}
+.cam-video iframe{position:absolute;inset:0;width:100%;height:100%;border:none;z-index:1}
+.cam-placeholder{color:rgba(255,255,255,0.3);font-size:30px;position:absolute;z-index:0}
+/* IMU-only EIS 防抖评价状态栏：显示在“点云投影”按钮后面。 */
+.eis-status-bar{
+  display:none;align-items:center;min-height:30px;margin-left:4px;padding:6px 12px;
+  border:1px solid #a5a08c;border-radius:7px;background:#f5f0db;color:#334;
+  font-size:16px;font-weight:700;line-height:1.2;white-space:nowrap;vertical-align:middle;
+}
+.eis-status-bar.show{display:inline-flex}
+.eis-status-pending{background:#fff6dd;border-color:#d9c16b;color:#8a6a00}
+.eis-status-good{background:#e9f9ee;border-color:#7fcf95;color:#1f6d36}
+.eis-status-medium{background:#fff3d7;border-color:#d8aa4c;color:#8a5b00}
+.eis-status-poor{background:#ffeaea;border-color:#e19b9b;color:#a22c2c}
 .cam-controls{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid rgba(48,54,61,0.15);flex-wrap:wrap}
 .cam-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:14px;color:var(--text2)}
 .cam-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
@@ -182,7 +194,9 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <span class="cam-name">相机 1</span>
       <span class="cam-info" id="camInfo0">1920×1080</span>
     </div>
-    <div class="cam-video" id="camVideo0"><span class="cam-placeholder" id="camPlaceholder0">推流待启动</span></div>
+    <div class="cam-video" id="camVideo0">
+      <span class="cam-placeholder" id="camPlaceholder0">推流待启动</span>
+    </div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview0">开启预览</button>
       <button class="btn btn-off" id="btnStream0">开始推流</button>
@@ -191,6 +205,9 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-off" id="btnOsd0">框叠加</button>
       <button class="btn btn-off" id="btnEis0">防抖关</button>
       <button class="btn btn-off" id="btnLidarOsd0">点云投影关</button>
+      <span class="eis-status-bar" id="eisStatusBar0">
+        <span id="eisStatusText0">基线计算中</span>
+      </span>
       <span style="font-size:14px;color:var(--text2)" id="camFps0"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot0"></div>
@@ -205,7 +222,9 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <span class="cam-name">相机 2</span>
       <span class="cam-info" id="camInfo1">1280×720</span>
     </div>
-    <div class="cam-video" id="camVideo1"><span class="cam-placeholder" id="camPlaceholder1">推流待启动</span></div>
+    <div class="cam-video" id="camVideo1">
+      <span class="cam-placeholder" id="camPlaceholder1">推流待启动</span>
+    </div>
     <div class="cam-controls">
       <button class="btn btn-off" id="btnPreview1">开启预览</button>
       <button class="btn btn-off" id="btnStream1">开始推流</button>
@@ -214,6 +233,9 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
       <button class="btn btn-off" id="btnOsd1">框叠加</button>
       <button class="btn btn-off" id="btnEis1">防抖关</button>
       <button class="btn btn-off" id="btnLidarOsd1">点云投影关</button>
+      <span class="eis-status-bar" id="eisStatusBar1">
+        <span id="eisStatusText1">基线计算中</span>
+      </span>
       <span style="font-size:14px;color:var(--text2)" id="camFps1"></span>
       <div class="cam-status">
         <div class="cam-status-dot off" id="statusDot1"></div>
@@ -308,6 +330,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 <div id="playerOverlay">
   <button id="playerClose" onclick="closePlayer()">✕</button>
   <video id="playerVideo" controls autoplay></video>
+  <img id="playerImg" style="max-width:90%;max-height:80%;display:none">
 </div>
 
 <script>
@@ -328,7 +351,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 // ===== State =====
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
-let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0}};
+let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null}};
 let trackingTargets=[],trackingClusters=[],showClusters=true,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
@@ -377,6 +400,7 @@ function updateUI(data){
 
   for(let i=0;i<2;i++){const d=data['cam'+i];if(!d)continue;
     Object.assign(cam[i],{streaming:!!d.streaming,recording:!!d.recording,paused:!!d.paused,osdEnabled:!!d.osdEnabled,eisEnabled:!!d.eisEnabled,lidarOsdEnabled:!!d.lidarOsdEnabled,previewActive:!!d.previewActive,width:d.width||cam[i].width,height:d.height||cam[i].height,fps:d.fps||0,recordResolution:d.recordResolution||cam[i].recordResolution,recordingElapsedSec:d.recordingElapsedSec||0});
+    if(d.eisQuality)cam[i].eisQuality=d.eisQuality;
 
     // Header dot
     document.getElementById('camDot'+i).className='cam-dot '+(cam[i].previewActive?'on':'off');
@@ -388,7 +412,7 @@ function updateUI(data){
     const br=document.getElementById('btnRecord'+i);br.textContent=cam[i].recording?'停止录像':'开始录像';br.className='btn '+(cam[i].recording?'btn-on':'btn-off');
     const bp=document.getElementById('btnPause'+i);bp.textContent=cam[i].paused?'恢复':'暂停';bp.className='btn '+(cam[i].paused?'btn-on':'btn-off');
     const bo=document.getElementById('btnOsd'+i);bo.textContent=cam[i].osdEnabled?'框去除':'框叠加';bo.className='btn '+(cam[i].osdEnabled?'btn-on':'btn-off');
-    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'防抖开':'防抖关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');
+    const be=document.getElementById('btnEis'+i);be.textContent=cam[i].eisEnabled?'防抖开':'防抖关';be.className='btn '+(cam[i].eisEnabled?'btn-on':'btn-off');updateEisQuality(i,cam[i].eisQuality);
     const bl=document.getElementById('btnLidarOsd'+i);bl.textContent=cam[i].lidarOsdEnabled?'点云投影开':'点云投影关';bl.className='btn '+(cam[i].lidarOsdEnabled?'btn-on':'btn-off');
     const bv=document.getElementById('btnPreview'+i);bv.textContent=cam[i].previewActive?'关闭预览':'开启预览';bv.className='btn '+(cam[i].previewActive?'btn-on':'btn-off');
 
@@ -450,7 +474,81 @@ function updateUI(data){
   }
 }
 function updateTracking(data){if(data.targets){trackingTargets=data.targets;updateFusionStatus()}if(data.clusters&&data.clusters.length>0){trackingClusters=data.clusters}drawRadar()}
-function handleEvent(data){const l='相机'+((data.cam||0)+1);switch(data.event){case'stream_started':return l+' 推流已启动';case'stream_stopped':return l+' 推流已停止';case'record_started':return l+' 录像已开始';case'record_stopped':return l+' 录像已停止'}return null}
+
+// 只显示防抖效果评价，不显示算法内部 offset/gyro 等调试量。
+// 状态栏位于每个相机控制行的“点云投影”按钮后面。
+function updateEisQuality(i,q){
+  const bar=document.getElementById('eisStatusBar'+i);
+  const textEl=document.getElementById('eisStatusText'+i);
+  if(!bar||!textEl)return;
+
+  if(q&&typeof q==='object')cam[i].eisQuality=q;
+  const metrics=cam[i].eisQuality;
+
+  // 防抖关闭后不显示状态栏。
+  if(!cam[i].eisEnabled){
+    bar.className='eis-status-bar';
+    textEl.textContent='';
+    return;
+  }
+
+  bar.className='eis-status-bar show eis-status-pending';
+
+  // 防抖开启，但还未取得评价数据。
+  if(!metrics){
+    textEl.textContent='防抖状态：计算中';
+    return;
+  }
+
+  // 未防抖基线尚未准备完成。
+  if(!metrics.baselineReady){
+    textEl.textContent='防抖状态：基线计算中';
+    return;
+  }
+
+  // 基线已完成，但当前图像评价样本暂时无效。
+  if(!metrics.valid){
+    textEl.textContent='防抖状态：效果计算中';
+    return;
+  }
+
+  const suppression=Number(metrics.suppressionPercent||0);
+  const residual=Number(metrics.residualJitterRmsPx||0);
+
+  if(suppression>=60){
+    bar.className='eis-status-bar show eis-status-good';
+  }else if(suppression>=30){
+    bar.className='eis-status-bar show eis-status-medium';
+  }else{
+    bar.className='eis-status-bar show eis-status-poor';
+  }
+
+  textEl.textContent='抑振率：'+suppression.toFixed(1)+'% ｜ 残余抖动：'+residual.toFixed(2)+' px RMS';
+}
+
+function handleEvent(data){
+  if(data&&data.event==='eis_quality'){
+    // WebServer::push_event() 把实际指标放在 data.detail 中；
+    // 同时兼容旧版本把字段直接放在 data 中的格式。
+    const q=(data.detail&&typeof data.detail==='object')?data.detail:data;
+    const i=Number(q.cam||0);
+    if(i===0||i===1){
+      cam[i].eisEnabled=!!q.eisEnabled;
+      updateEisQuality(i,q);
+    }
+    return null;
+  }
+
+  const detail=(data&&data.detail&&typeof data.detail==='object')?data.detail:data;
+  const l='相机'+(((detail&&detail.cam)||0)+1);
+  switch(data.event){
+    case'stream_started':return l+' 推流已启动';
+    case'stream_stopped':return l+' 推流已停止';
+    case'record_started':return l+' 录像已开始';
+    case'record_stopped':return l+' 录像已停止';
+  }
+  return null;
+}
 
 // ===== Buttons =====
 for(let i=0;i<2;i++){document.getElementById('btnPreview'+i).onclick=()=>togglePreview(i);document.getElementById('btnStream'+i).onclick=()=>toggleStream(i);document.getElementById('btnRecord'+i).onclick=()=>toggleRecord(i);document.getElementById('btnPause'+i).onclick=()=>togglePause(i);document.getElementById('btnOsd'+i).onclick=()=>toggleOsd(i);document.getElementById('btnEis'+i).onclick=()=>toggleEis(i);document.getElementById('btnLidarOsd'+i).onclick=()=>toggleLidarOsd(i)}
@@ -527,8 +625,9 @@ async function saveFusionConfig(){
 
 // ===== Videos =====
 async function loadVideos(){const d=await api('GET','/videos',null,{silent:true});const tb=document.getElementById('videoBody');tb.innerHTML='';if(!d||!d.videos)return;d.videos.slice(-30).forEach(v=>{const dur=v.durationSec?Math.floor(v.durationSec/60)+':'+String(Math.floor(v.durationSec%60)).padStart(2,'0'):'--';const tr=document.createElement('tr');tr.innerHTML='<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+v.name+'">'+v.name+'</td><td>'+(v.width?v.width+'×'+v.height:'--')+'</td><td>'+dur+'</td><td><button class="btn-play" onclick="playVideo(\''+encodeURIComponent(v.path)+'\')">▶</button><button class="btn-del" onclick="delVideo(\''+encodeURIComponent(v.path)+'\')">删除</button></td>';tb.appendChild(tr)})}
-function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
-function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo');video.pause();video.src='';overlay.classList.remove('show')}
+function playVideo(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');img.style.display='none';video.style.display='';video.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show');video.play()}
+function playImage(path){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');video.style.display='none';img.style.display='';img.src='/api/v1/playback?path='+encodeURIComponent(decodeURIComponent(path));overlay.classList.add('show')}
+function closePlayer(){const overlay=document.getElementById('playerOverlay'),video=document.getElementById('playerVideo'),img=document.getElementById('playerImg');video.pause();video.src='';img.src='';overlay.classList.remove('show')}
 async function delVideo(p){if(confirm('确认删除?')){await api('DELETE','/videos',{path:decodeURIComponent(p)});loadVideos()}}
 
 // ===== Backtrack =====
@@ -560,9 +659,12 @@ async function loadBacktrackFiles() {
         const sizeKB = v.size ? (v.size / 1024).toFixed(1) + ' KB' : '--';
         const dur = v.duration || '--:--';
         const pp = encodeURIComponent(v.path || '');
+        const isPng = v.name && v.name.toLowerCase().endsWith('.png');
+        const playFn = isPng ? "playImage" : "playVideo";
+        const playBtn = isPng ? '🖼' : '▶';
         tr.innerHTML = '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + v.name + '">' + v.name + '</td>'
             + '<td>' + dur + '</td><td>' + sizeKB + '</td>'
-            + '<td><button class="btn-play" onclick="playVideo(\'' + pp + '\')">▶</button>'
+            + '<td><button class="btn-play" onclick="' + playFn + '(\'' + pp + '\')">' + playBtn + '</button>'
             + '<button class="btn-del" onclick="delBacktrackFile(\'' + encodeURIComponent(v.name) + '\')">删除</button></td>';
         tb.appendChild(tr);
     });
