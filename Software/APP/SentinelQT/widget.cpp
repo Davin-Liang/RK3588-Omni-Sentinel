@@ -457,6 +457,7 @@ Widget::Widget(QWidget *parent)
         });
         if (webServer_->start()) {
             fprintf(stderr, "[SentinelQT] Web server started on port %d\n", webPort);
+            webServer_->set_ai_report_path(aiReportFile_.toStdString());
         } else {
             fprintf(stderr, "[SentinelQT] Web server failed to start on port %d\n", webPort);
         }
@@ -616,7 +617,9 @@ void Widget::load_config_()
     autoBacktrackEnabled_ = config_.value("Backtrack/autoBacktrackEnabled", false).toBool();
     autoBacktrackCooldownSec_ = config_.value("Backtrack/autoBacktrackCooldownSec", 30.0).toDouble();
 
-    aiReportFile_ = config_.value("AI/reportFile", "./ai_report.txt").toString();
+    // 解析为绝对路径，避免 CWD 变化导致保存和导出的目录不一致
+    QString rawPath = config_.value("AI/reportFile", "./ai_report.txt").toString();
+    aiReportFile_ = QFileInfo(rawPath).absoluteFilePath();
 
     // EIS 防抖配置：IMU-only。
     // 仅使用 ICM45686 读取角速度/加速度，由 EisStabilizer 计算 offsetX/offsetY，
@@ -2393,6 +2396,7 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
         if (path == "/api/v1/backtrack/auto-status") return web_auto_backtrack_status_();
         if (path == "/api/v1/ai/report") return web_ai_report_();
+        if (path == "/api/v1/ai/report/files") return web_ai_report_files_();
         if (path == "/api/v1/thermal/status") {
             if (thermalCtrl_) return thermalCtrl_->status_json();
             return R"({"ok":false,"error":"thermal not available"})";
@@ -4164,6 +4168,37 @@ std::string Widget::web_ai_report_()
     return resp.dump();
 }
 
+std::string Widget::web_ai_report_files_()
+{
+    nlohmann::json files = nlohmann::json::array();
+    if (!aiReportFile_.isEmpty()) {
+        QFileInfo fi(aiReportFile_);
+        QDir dir(fi.absolutePath());
+        QString prefix = fi.completeBaseName() + "_";
+        QString suffix = "." + fi.suffix();
+        QStringList list = dir.entryList({prefix + "*" + suffix}, QDir::Files, QDir::Time);
+        fprintf(stderr, "[SentinelQT] AI report files: dir=%s pattern=%s*%s count=%d\n",
+                fi.absolutePath().toUtf8().constData(),
+                prefix.toUtf8().constData(), suffix.toUtf8().constData(), list.size());
+        for (const QString& name : list) {
+            // 从文件名中提取时间戳: ai_report_20260719_143000.txt
+            QString ts = name.mid(prefix.length(), 15);  // yyyyMMdd_HHmmss
+            QString displayTs = ts.left(4) + "-" + ts.mid(4,2) + "-" + ts.mid(6,2)
+                              + " " + ts.mid(9,2) + ":" + ts.mid(11,2) + ":" + ts.mid(13,2);
+            nlohmann::json f;
+            f["name"] = name.toStdString();
+            f["time"] = displayTs.toStdString();
+            QFileInfo fileFi(dir.absoluteFilePath(name));
+            f["size"] = fileFi.size();
+            files.push_back(f);
+        }
+    }
+    nlohmann::json resp;
+    resp["ok"] = true;
+    resp["files"] = files;
+    return resp.dump();
+}
+
 std::string Widget::get_backtrack_files_json_() const
 {
     nlohmann::json files = nlohmann::json::array();
@@ -4368,18 +4403,39 @@ void Widget::on_ai_report_ready_(const QString& report)
     fprintf(stderr, "%s\n", report.toUtf8().constData());
     fprintf(stderr, "========================================\n\n");
 
-    // 保存报告到文件（追加模式，带时间戳分隔）
+    // 保存报告：一份追加到 ai_report.txt 汇总，一份独立时间戳文件供网页导出
     if (!aiReportFile_.isEmpty()) {
-        QFile file(aiReportFile_);
-        if (file.open(QIODevice::Append | QIODevice::Text)) {
-            QTextStream out(&file);
+        QFileInfo fi(aiReportFile_);
+        QString baseDir = fi.absolutePath();
+        QString ts = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+
+        // 1) 追加到汇总文件 ai_report.txt
+        QFile appendFile(aiReportFile_);
+        if (appendFile.open(QIODevice::Append | QIODevice::Text)) {
+            QTextStream out(&appendFile);
             out.setCodec("UTF-8");
-            out << "========================================\n";
+            out << "\n========================================\n";
             out << "  AI 系统状态分析报告  "
                 << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
             out << "========================================\n";
-            out << report << "\n\n";
-            file.close();
+            out << report << "\n";
+            appendFile.close();
+        }
+
+        // 2) 独立时间戳文件，供网页端导出下载
+        QString tsFile = baseDir + "/" + fi.completeBaseName()
+                       + "_" + ts + "." + fi.suffix();
+        QFile tsF(tsFile);
+        if (tsF.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&tsF);
+            out.setCodec("UTF-8");
+            out << report;
+            tsF.close();
+            fprintf(stderr, "[SentinelQT] AI report saved: %s (%lld bytes)\n",
+                    tsFile.toUtf8().constData(), (long long)QFileInfo(tsFile).size());
+        } else {
+            fprintf(stderr, "[SentinelQT] FAILED to save report: %s (error: %s)\n",
+                    tsFile.toUtf8().constData(), tsF.errorString().toUtf8().constData());
         }
     }
 
