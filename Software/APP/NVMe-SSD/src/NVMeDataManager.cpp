@@ -10,6 +10,8 @@
 #include <cmath>
 #include <ctime>
 #include <cstdio>
+#include <limits>
+#include <new>
 #include "lodepng.h"
 
 extern "C" {
@@ -230,22 +232,18 @@ bool NVMeDataManager::initialize(const char* device_path) {
         return false;
     }
 
-    // 分配页对齐的缓冲池
-    void* lidar_ptr = nullptr;
-    void* imu_ptr = nullptr;
-
-    if (posix_memalign(&lidar_ptr, page_size, BUFFER_SIZE) != 0 ||
-        posix_memalign(&imu_ptr, page_size, BUFFER_SIZE) != 0) {
-        std::cerr << "Failed to allocate aligned buffers" << std::endl;
+    // LiDAR/IMU 累积缓冲区只在用户态拼包，不直接传给 O_DIRECT write，
+    // 因此不需要 posix_memalign。原实现先分配对齐内存再 assign 到 vector，
+    // 但没有 free 临时指针，会造成固定泄漏。直接 resize 即可。
+    try {
+        lidar_buffer_.resize(BUFFER_SIZE);
+        imu_buffer_.resize(BUFFER_SIZE);
+    } catch (const std::bad_alloc&) {
+        std::cerr << "Failed to allocate LiDAR/IMU buffers" << std::endl;
         close(nvme_fd_);
         nvme_fd_ = -1;
         return false;
     }
-
-    lidar_buffer_.assign(static_cast<uint8_t*>(lidar_ptr),
-                       static_cast<uint8_t*>(lidar_ptr) + BUFFER_SIZE);
-    imu_buffer_.assign(static_cast<uint8_t*>(imu_ptr),
-                     static_cast<uint8_t*>(imu_ptr) + BUFFER_SIZE);
 
     // 预分配摄像头帧缓冲池（避免运行时 6MB 反复 malloc/free）
     for (int i = 0; i < CAMERA_POOL_SIZE; i++) {
@@ -669,14 +667,15 @@ bool NVMeDataManager::write_video_frame_to_disk(const uint8_t* frame_data, size_
             this->release_pool_block(b);
         });
     } else {
-        // 池耗尽，回退到普通分配（极少发生）
-        auto fb = std::make_shared<DataBlock>();
-        prepare_header(fb->header,
-                      is_front_camera ? DataType::VIDEO_FRONT : DataType::VIDEO_REAR,
-                      timestamp_ns, static_cast<uint32_t>(frame_size));
-        fb->data.assign(frame_data, frame_data + frame_size);
-        fb->padding_size = padding;
-        block = std::move(fb);
+        // 固定池耗尽时直接丢帧，不再回退到 3~6 MB 的临时堆分配。
+        // 回溯导出会与实时写入竞争 NVMe 带宽，回退分配会放大内存峰值。
+        ++queueDropCount_;
+        if (queueDropCount_ % 100 == 1) {
+            fprintf(stderr,
+                    "[NVMeDataManager] camera pool exhausted, dropped %zu frames\n",
+                    queueDropCount_);
+        }
+        return false;
     }
 
     // 队列有上限：满了直接丢帧，防止写线程跟不上导致内存无限堆积
@@ -716,10 +715,15 @@ bool NVMeDataManager::write_lidar_points_to_disk(const uint8_t* points_data, siz
                               lidar_buffer_.data() + lidar_buffer_pos_);
             block->padding_size = calc_padding(sizeof(Header) + lidar_buffer_pos_);
 
-            data_queue_.push(std::move(block));
-            queue_cv_.notify_one();
+            if (data_queue_.size() < MAX_QUEUE_SIZE) {
+                data_queue_.push(std::move(block));
+                queue_cv_.notify_one();
+            } else {
+                ++queueDropCount_;
+                fprintf(stderr, "[NVMeDataManager] queue full, dropped LiDAR block\n");
+            }
 
-            // 重置缓冲池位置
+            // 无论入队还是丢弃都重置累积缓冲，避免无界增长。
             lidar_buffer_pos_ = 0;
         }
 
@@ -762,10 +766,15 @@ bool NVMeDataManager::write_imu_data_to_disk(const uint8_t* imu_data, size_t imu
                           imu_buffer_.data() + imu_buffer_pos_);
         block->padding_size = calc_padding(sizeof(Header) + imu_buffer_pos_);
 
-        data_queue_.push(std::move(block));
-        queue_cv_.notify_one();
+        if (data_queue_.size() < MAX_QUEUE_SIZE) {
+            data_queue_.push(std::move(block));
+            queue_cv_.notify_one();
+        } else {
+            ++queueDropCount_;
+            fprintf(stderr, "[NVMeDataManager] queue full, dropped IMU block\n");
+        }
 
-        // 重置缓冲池位置
+        // 无论入队还是丢弃都重置累积缓冲，避免无界增长。
         imu_buffer_pos_ = 0;
     }
 
@@ -861,67 +870,93 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
                                                 int frame_height,
                                                 int camera_id,
                                                 bool input_is_nv12) {
-    // 计算时间窗口（纳秒）：仅回溯 time_window_sec 秒
-    uint64_t window_ns = static_cast<uint64_t>(time_window_sec * 1'000'000'000.0);
-    uint64_t start_ns = (trigger_timestamp_ns > window_ns)
-                      ? (trigger_timestamp_ns - window_ns) : 0;
-    uint64_t end_ns = trigger_timestamp_ns;  // 不包含未来数据
+    const uint64_t window_ns =
+        static_cast<uint64_t>(time_window_sec * 1'000'000'000.0);
+    const uint64_t start_ns =
+        (trigger_timestamp_ns > window_ns)
+            ? (trigger_timestamp_ns - window_ns)
+            : 0;
+    const uint64_t end_ns = trigger_timestamp_ns;
+
     const size_t expected_frame_size = input_is_nv12
         ? static_cast<size_t>(frame_width) * frame_height * 3 / 2
         : static_cast<size_t>(frame_width) * frame_height * 3;
 
-    // 打开 NVMe 设备用于读取
     int read_fd = open(nvme_device_path_.c_str(), O_RDONLY);
     if (read_fd < 0) {
-        std::cerr << "Failed to open NVMe device for reading: " << strerror(errno) << std::endl;
+        std::cerr << "Failed to open NVMe device for reading: "
+                  << strerror(errno) << std::endl;
         return false;
     }
 
-    // 收集时间窗口内的视频帧
-    struct FrameRecord {
+    struct ReadFdGuard {
+        int fd;
+        ~ReadFdGuard() {
+            if (fd >= 0) close(fd);
+        }
+    } readGuard{read_fd};
+
+    /*
+     * 只保存帧在 NVMe 上的索引，不把窗口内所有 1080p 帧一次性读入内存。
+     * 原实现 5 秒、15 FPS、双路 NV12 的单路临时内存约为：
+     * 75 × 1920 × 1080 × 1.5 ≈ 233 MB；malloc 通常不会立即把这部分 RSS
+     * 归还系统，看起来像“每回溯一次内存都上涨”。
+     */
+    struct FrameIndex {
         uint64_t timestamp_ns;
-        std::vector<uint8_t> data;
+        off_t data_offset;
+        uint32_t data_size;
     };
-    std::vector<FrameRecord> frames;
+
+    std::vector<FrameIndex> frames;
+    frames.reserve(static_cast<size_t>(std::max(1.0, time_window_sec * fps * 1.5)));
 
     off_t offset = 0;
-    Header header;
+    Header header{};
 
     while (true) {
-        ssize_t n = pread(read_fd, &header, sizeof(Header), offset);
+        const ssize_t n = pread(read_fd, &header, sizeof(Header), offset);
         if (n != static_cast<ssize_t>(sizeof(Header))) break;
         if (header.magic_number != MAGIC_NUMBER) break;
 
-        size_t record_payload = sizeof(Header) + header.data_size;
-        size_t padding = (HEADER_ALIGNMENT - (record_payload % HEADER_ALIGNMENT)) % HEADER_ALIGNMENT;
-        size_t record_size = record_payload + padding;
+        const size_t record_payload = sizeof(Header) + header.data_size;
+        const size_t padding =
+            (HEADER_ALIGNMENT - (record_payload % HEADER_ALIGNMENT)) % HEADER_ALIGNMENT;
+        const size_t record_size = record_payload + padding;
+
+        // 防止损坏的头导致 offset 溢出或死循环。
+        if (record_size < sizeof(Header) ||
+            header.data_size > CAMERA_MAX_SIZE + HEADER_ALIGNMENT) {
+            std::cerr << "[NVMeExport] invalid record at offset " << offset << std::endl;
+            break;
+        }
 
         bool is_video = false;
         if (camera_id == -1) {
-            // -1: 匹配所有视频类型（支持后续扩展更多摄像头）
-            is_video = (header.data_type == static_cast<uint8_t>(DataType::VIDEO_FRONT) ||
-                        header.data_type == static_cast<uint8_t>(DataType::VIDEO_REAR));
+            is_video =
+                header.data_type == static_cast<uint8_t>(DataType::VIDEO_FRONT) ||
+                header.data_type == static_cast<uint8_t>(DataType::VIDEO_REAR);
         } else {
-            // 精确匹配指定摄像头ID（data_type 即摄像头序列号）
-            is_video = (header.data_type == static_cast<uint8_t>(camera_id));
+            is_video = header.data_type == static_cast<uint8_t>(camera_id);
         }
 
-        if (is_video && header.timestamp_ns >= start_ns && header.timestamp_ns <= end_ns) {
-            if (header.data_size == expected_frame_size) {
-                FrameRecord fr;
-                fr.timestamp_ns = header.timestamp_ns;
-                fr.data.resize(header.data_size);
-                n = pread(read_fd, fr.data.data(), header.data_size, offset + sizeof(Header));
-                if (n == static_cast<ssize_t>(header.data_size)) {
-                    frames.push_back(std::move(fr));
-                }
-            }
+        if (is_video &&
+            header.timestamp_ns >= start_ns &&
+            header.timestamp_ns <= end_ns &&
+            header.data_size == expected_frame_size) {
+            frames.push_back(FrameIndex{
+                header.timestamp_ns,
+                offset + static_cast<off_t>(sizeof(Header)),
+                header.data_size
+            });
         }
 
-        offset += record_size;
+        if (offset > std::numeric_limits<off_t>::max() -
+                         static_cast<off_t>(record_size)) {
+            break;
+        }
+        offset += static_cast<off_t>(record_size);
     }
-
-    close(read_fd);
 
     if (frames.empty()) {
         std::cerr << "No video frames found in time window ["
@@ -929,17 +964,11 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
         return false;
     }
 
-    // 按时间戳排序保证播放顺序
-    std::sort(frames.begin(), frames.end(), [](const FrameRecord& a, const FrameRecord& b) {
-        return a.timestamp_ns < b.timestamp_ns;
-    });
+    std::sort(frames.begin(), frames.end(),
+              [](const FrameIndex& a, const FrameIndex& b) {
+                  return a.timestamp_ns < b.timestamp_ns;
+              });
 
-    // ================================================================
-    //  MPP 硬件编码 + FFmpeg MP4 复用（参照 sentinel-streamer/mpp_encoder）
-    //  数据流: RGB888(内存) → swscale → NV12 → h264_rkmpp → MP4
-    // ================================================================
-
-    // Step A: 打开 MPP H.264 硬件编码器
     const AVCodec* codec = avcodec_find_encoder_by_name("h264_rkmpp");
     if (!codec) {
         std::cerr << "[NVMeExport] h264_rkmpp encoder not found" << std::endl;
@@ -947,76 +976,96 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
     }
 
     AVCodecContext* encCtx = avcodec_alloc_context3(codec);
+    AVFormatContext* fmtCtx = nullptr;
+    SwsContext* swsCtx = nullptr;
+    AVFrame* nv12 = nullptr;
+    AVPacket* pkt = nullptr;
+    bool headerWritten = false;
+
+    auto cleanup = [&]() {
+        if (pkt) av_packet_free(&pkt);
+        if (nv12) av_frame_free(&nv12);
+        if (swsCtx) {
+            sws_freeContext(swsCtx);
+            swsCtx = nullptr;
+        }
+        if (fmtCtx) {
+            if (headerWritten) {
+                av_write_trailer(fmtCtx);
+            }
+            if (fmtCtx->pb) {
+                avio_closep(&fmtCtx->pb);
+            }
+            avformat_free_context(fmtCtx);
+            fmtCtx = nullptr;
+        }
+        if (encCtx) {
+            avcodec_free_context(&encCtx);
+        }
+    };
+
     if (!encCtx) {
         std::cerr << "[NVMeExport] avcodec_alloc_context3 failed" << std::endl;
         return false;
     }
 
-    encCtx->width       = frame_width;
-    encCtx->height      = frame_height;
-    encCtx->time_base   = AVRational{1, 90000};
-    encCtx->framerate   = AVRational{fps, 1};
-    encCtx->gop_size    = fps;
-    encCtx->bit_rate    = 8000000;   // 8 Mbps, 1080p 回溯录像质量
+    encCtx->width        = frame_width;
+    encCtx->height       = frame_height;
+    encCtx->time_base    = AVRational{1, 90000};
+    encCtx->framerate    = AVRational{fps, 1};
+    encCtx->gop_size     = fps;
+    encCtx->bit_rate     = 8000000;
     encCtx->max_b_frames = 0;
-    encCtx->pix_fmt     = AV_PIX_FMT_NV12;
-
+    encCtx->pix_fmt      = AV_PIX_FMT_NV12;
     encCtx->color_range     = AVCOL_RANGE_JPEG;
     encCtx->color_primaries = AVCOL_PRI_BT709;
     encCtx->color_trc       = AVCOL_TRC_BT709;
     encCtx->colorspace      = AVCOL_SPC_BT709;
 
-    av_opt_set_int(encCtx->priv_data, "rc_mode", 0, 0);  // VBR
-    av_opt_set_int(encCtx->priv_data, "delay",  0, 0);
+    av_opt_set_int(encCtx->priv_data, "rc_mode", 0, 0);
+    av_opt_set_int(encCtx->priv_data, "delay", 0, 0);
 
     if (avcodec_open2(encCtx, codec, nullptr) < 0) {
         std::cerr << "[NVMeExport] avcodec_open2 failed" << std::endl;
-        avcodec_free_context(&encCtx);
+        cleanup();
         return false;
     }
 
-    // Step B: 打开 MP4 复用器
-    AVFormatContext* fmtCtx = nullptr;
-    if (avformat_alloc_output_context2(&fmtCtx, nullptr, "mp4",
-                                       output_path.c_str()) < 0 || !fmtCtx) {
+    if (avformat_alloc_output_context2(
+            &fmtCtx, nullptr, "mp4", output_path.c_str()) < 0 || !fmtCtx) {
         std::cerr << "[NVMeExport] avformat_alloc_output_context2 failed" << std::endl;
-        avcodec_free_context(&encCtx);
+        cleanup();
         return false;
     }
 
     AVStream* stream = avformat_new_stream(fmtCtx, nullptr);
     if (!stream) {
         std::cerr << "[NVMeExport] avformat_new_stream failed" << std::endl;
-        avformat_free_context(fmtCtx);
-        avcodec_free_context(&encCtx);
+        cleanup();
         return false;
     }
 
     if (avcodec_parameters_from_context(stream->codecpar, encCtx) < 0) {
         std::cerr << "[NVMeExport] avcodec_parameters_from_context failed" << std::endl;
-        avformat_free_context(fmtCtx);
-        avcodec_free_context(&encCtx);
+        cleanup();
         return false;
     }
     stream->time_base = encCtx->time_base;
+    stream->avg_frame_rate = encCtx->framerate;
 
     if (avio_open(&fmtCtx->pb, output_path.c_str(), AVIO_FLAG_WRITE) < 0) {
         std::cerr << "[NVMeExport] avio_open failed: " << output_path << std::endl;
-        avformat_free_context(fmtCtx);
-        avcodec_free_context(&encCtx);
+        cleanup();
         return false;
     }
 
     if (avformat_write_header(fmtCtx, nullptr) < 0) {
         std::cerr << "[NVMeExport] avformat_write_header failed" << std::endl;
-        avio_closep(&fmtCtx->pb);
-        avformat_free_context(fmtCtx);
-        avcodec_free_context(&encCtx);
+        cleanup();
         return false;
     }
+    headerWritten = true;
 
-    // Step C: 创建 swscale 上下文 (仅 RGB888→NV12 时需要)
-    SwsContext* swsCtx = nullptr;
     if (!input_is_nv12) {
         swsCtx = sws_getContext(
             frame_width, frame_height, AV_PIX_FMT_RGB24,
@@ -1024,78 +1073,125 @@ bool NVMeDataManager::export_trigger_video_clip(uint64_t trigger_timestamp_ns,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!swsCtx) {
             std::cerr << "[NVMeExport] sws_getContext failed" << std::endl;
-            av_write_trailer(fmtCtx);
-            avio_closep(&fmtCtx->pb);
-            avformat_free_context(fmtCtx);
-            avcodec_free_context(&encCtx);
+            cleanup();
             return false;
         }
     }
 
-    // Step D: 逐帧 → NV12 → MPP 编码 → MP4 写盘
-    uint64_t baseNs = frames.empty() ? 0 : frames[0].timestamp_ns;
-    int y_size = frame_width * frame_height;
+    nv12 = av_frame_alloc();
+    pkt = av_packet_alloc();
+    if (!nv12 || !pkt) {
+        std::cerr << "[NVMeExport] frame/packet allocation failed" << std::endl;
+        cleanup();
+        return false;
+    }
 
-    for (const auto& fr : frames) {
-        // D1: 创建 NV12 AVFrame
-        AVFrame* nv12 = av_frame_alloc();
-        if (!nv12) continue;
-        nv12->format = AV_PIX_FMT_NV12;
-        nv12->width  = frame_width;
-        nv12->height = frame_height;
-        nv12->pts    = static_cast<int64_t>((fr.timestamp_ns - baseNs) * 90000 / 1000'000'000);
-        av_frame_get_buffer(nv12, 0);
+    nv12->format = AV_PIX_FMT_NV12;
+    nv12->width = frame_width;
+    nv12->height = frame_height;
+    if (av_frame_get_buffer(nv12, 32) < 0) {
+        std::cerr << "[NVMeExport] av_frame_get_buffer failed" << std::endl;
+        cleanup();
+        return false;
+    }
 
-        // D2: 填充 NV12 数据
-        if (input_is_nv12) {
-            memcpy(nv12->data[0], fr.data.data(), y_size);
-            memcpy(nv12->data[1], fr.data.data() + y_size, y_size / 2);
-        } else {
-            const uint8_t* srcData[1] = { fr.data.data() };
-            int srcStride[1] = { frame_width * 3 };
-            sws_scale(swsCtx, srcData, srcStride, 0, frame_height,
-                      nv12->data, nv12->linesize);
-        }
+    // 整个回溯过程只复用这一块单帧缓冲。
+    std::vector<uint8_t> frameBuffer(expected_frame_size);
+    const uint64_t baseNs = frames.front().timestamp_ns;
+    const size_t ySize = static_cast<size_t>(frame_width) * frame_height;
+    int encodedFrames = 0;
 
-        // D3: 送编码器
-        avcodec_send_frame(encCtx, nv12);
-        av_frame_free(&nv12);
-
-        // D4: 收编码包 → 写 MP4
-        AVPacket* pkt = av_packet_alloc();
-        if (pkt) {
-            while (avcodec_receive_packet(encCtx, pkt) == 0) {
-                pkt->stream_index = 0;
-                av_write_frame(fmtCtx, pkt);
-                av_packet_unref(pkt);
+    auto drainPackets = [&]() -> bool {
+        while (true) {
+            const int ret = avcodec_receive_packet(encCtx, pkt);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                return true;
             }
-            av_packet_free(&pkt);
+            if (ret < 0) {
+                return false;
+            }
+            av_packet_rescale_ts(pkt, encCtx->time_base, stream->time_base);
+            pkt->stream_index = stream->index;
+            pkt->pos = -1;
+            if (av_interleaved_write_frame(fmtCtx, pkt) < 0) {
+                av_packet_unref(pkt);
+                return false;
+            }
+            av_packet_unref(pkt);
+        }
+    };
+
+    for (const FrameIndex& fr : frames) {
+        const ssize_t n = pread(read_fd,
+                                frameBuffer.data(),
+                                fr.data_size,
+                                fr.data_offset);
+        if (n != static_cast<ssize_t>(fr.data_size)) {
+            std::cerr << "[NVMeExport] failed to read frame at "
+                      << fr.data_offset << std::endl;
+            continue;
+        }
+
+        if (av_frame_make_writable(nv12) < 0) {
+            continue;
+        }
+
+        nv12->pts = static_cast<int64_t>(
+            (fr.timestamp_ns - baseNs) * 90000 / 1'000'000'000ULL);
+
+        if (input_is_nv12) {
+            // AVFrame linesize 可能大于 width，必须逐行复制。
+            for (int y = 0; y < frame_height; ++y) {
+                std::memcpy(nv12->data[0] + y * nv12->linesize[0],
+                            frameBuffer.data() + static_cast<size_t>(y) * frame_width,
+                            frame_width);
+            }
+            const uint8_t* uvSrc = frameBuffer.data() + ySize;
+            for (int y = 0; y < frame_height / 2; ++y) {
+                std::memcpy(nv12->data[1] + y * nv12->linesize[1],
+                            uvSrc + static_cast<size_t>(y) * frame_width,
+                            frame_width);
+            }
+        } else {
+            const uint8_t* srcData[1] = {frameBuffer.data()};
+            const int srcStride[1] = {frame_width * 3};
+            sws_scale(swsCtx,
+                      srcData,
+                      srcStride,
+                      0,
+                      frame_height,
+                      nv12->data,
+                      nv12->linesize);
+        }
+
+        if (avcodec_send_frame(encCtx, nv12) < 0) {
+            continue;
+        }
+        if (!drainPackets()) {
+            std::cerr << "[NVMeExport] packet write failed" << std::endl;
+            cleanup();
+            return false;
+        }
+        ++encodedFrames;
+    }
+
+    if (avcodec_send_frame(encCtx, nullptr) >= 0) {
+        if (!drainPackets()) {
+            cleanup();
+            return false;
         }
     }
 
-    // Step E: 排空编码器残余帧
-    avcodec_send_frame(encCtx, nullptr);
-    AVPacket* drainPkt = av_packet_alloc();
-    if (drainPkt) {
-        while (avcodec_receive_packet(encCtx, drainPkt) == 0) {
-            drainPkt->stream_index = 0;
-            av_write_frame(fmtCtx, drainPkt);
-            av_packet_unref(drainPkt);
-        }
-        av_packet_free(&drainPkt);
+    cleanup();
+
+    if (encodedFrames == 0) {
+        std::cerr << "[NVMeExport] no frame encoded" << std::endl;
+        return false;
     }
 
-    // Step F: 清理
-    if (swsCtx) sws_freeContext(swsCtx);
-    av_write_trailer(fmtCtx);
-    avio_closep(&fmtCtx->pb);
-    avformat_free_context(fmtCtx);
-    avcodec_free_context(&encCtx);
-
-    std::cout << "Exported " << frames.size() << " frames ("
-              << (static_cast<double>(frames.size()) / fps) << "s) to "
+    std::cout << "Exported " << encodedFrames << " frames ("
+              << (static_cast<double>(encodedFrames) / fps) << "s) to "
               << output_path << std::endl;
-
     return true;
 }
 

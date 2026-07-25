@@ -786,10 +786,21 @@ void Widget::ensure_preview_worker_(int camNum)
     }
 
     previewWorker_[camNum] = new PreviewWorker(visioner_, camNum);
+    previewWorker_[camNum]->setEisOutputActive(eisEnabled_[camNum]);
     previewThread_[camNum] = new QThread(this);
     previewWorker_[camNum]->moveToThread(previewThread_[camNum]);
     connect(previewWorker_[camNum], &PreviewWorker::frameReady, this,
-            [this, camNum](const QImage& img) { on_frame_ready_(camNum, img); });
+            [this, camNum](const QImage& img) {
+                on_frame_ready_(camNum, img);
+
+                // 无论 Qt 是否真正显示该帧，都必须确认消费完成。
+                // PreviewWorker 才能投递下一帧；回溯期间主线程阻塞时，
+                // queued event 中最多只会保留一张完整 QImage。
+                if (previewWorker_[camNum]) {
+                    previewWorker_[camNum]->markFrameConsumed();
+                }
+            },
+            Qt::QueuedConnection);
     connect(previewThread_[camNum], &QThread::started,
             previewWorker_[camNum], &PreviewWorker::start);
     previewThread_[camNum]->start();
@@ -825,6 +836,10 @@ void Widget::refresh_preview_worker_(int camNum)
 {
     if (should_run_preview_worker_(camNum)) {
         ensure_preview_worker_(camNum);
+        if (previewWorker_[camNum]) {
+            // EIS 状态变化时同步切换 Qt 对预览 DMA 字节序的解释。
+            previewWorker_[camNum]->setEisOutputActive(eisEnabled_[camNum]);
+        }
     } else {
         stop_preview_worker_(camNum);
     }
