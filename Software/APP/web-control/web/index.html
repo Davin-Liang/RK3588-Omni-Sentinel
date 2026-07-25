@@ -280,14 +280,16 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
               <input type="number" id="aiIntervalMin" value="5" min="1" max="60" step="1" style="width:48px;font-size:13px;background:var(--card2);border:1px solid var(--border);border-radius:4px;padding:2px 4px;text-align:center">
               <span class="sys-label" style="font-size:12px">min</span>
               <button class="btn btn-accent" id="btnAiManual" style="padding:4px 10px;min-width:auto">AI 分析</button>
-              <button class="btn btn-off" id="btnAiToggle" style="padding:4px 10px;min-width:auto">开启分析</button>
+              <button class="btn btn-off" id="btnAiExport" style="padding:4px 10px;min-width:auto">导出报告</button>
             </div>
           </div>
           <div style="display:flex;gap:10px;flex:1;min-height:0">
             <div id="aiOutput" style="flex:1;overflow-y:auto;min-height:0;margin-top:4px;background:var(--dark);border-radius:6px;padding:10px 14px;font-size:14px;line-height:1.7;color:#c9d1d9;white-space:pre-wrap"></div>
-            <div style="width:140px;display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;background:var(--card2);border-radius:6px;padding:8px;font-size:13px;color:var(--text2);text-align:center" id="aiStatus">
-              <div style="font-size:28px">🤖</div>
-              <div id="aiStatusText">AI正在休息中...</div>
+            <div style="flex:1;display:flex;flex-direction:column;min-height:0;margin-top:4px;background:var(--dark);border-radius:6px;padding:0;overflow:hidden">
+              <div style="background:var(--card2);padding:6px 10px;font-size:12px;font-weight:600;color:var(--accent);text-align:center;border-bottom:1px solid var(--border)">已导出报告文件</div>
+              <div id="aiReportFiles" style="flex:1;overflow-y:auto;min-height:0;font-size:12px;color:var(--text2);padding:6px 10px">
+                <div style="text-align:center;padding-top:20px">点击"导出报告"按钮</div>
+              </div>
             </div>
           </div>
         </div>
@@ -704,6 +706,7 @@ async function doAiAnalysis(){
     }catch(e){}
     if(reqId!==_aiReqId)return;
     setAiStatus('done');
+    refreshReportFiles();  // 分析完成后自动刷新右侧文件列表
     setTimeout(function(){
         if(aiEnabled)setAiStatus('collecting');
         aiRunning=!1;
@@ -718,18 +721,46 @@ function startAiTimer(){
 }
 function stopAiTimer(){if(aiTimer){clearInterval(aiTimer);aiTimer=null}}
 
-document.getElementById('btnAiToggle').onclick=function(){
-    aiEnabled=!aiEnabled;
-    var btn=document.getElementById('btnAiToggle');
-    if(aiEnabled){
-        btn.textContent='关闭分析';btn.className='btn btn-on';
-        setAiStatus('collecting');startAiTimer();
-    }else{
-        btn.textContent='开启分析';btn.className='btn btn-off';
-        setAiStatus('idle');stopAiTimer();
-    }
-};
-// 手动分析已移至标题栏 btnAiHeader，此处保留兼容
+// 导出报告 — 下载最新报告文件，同时刷新文件列表
+async function exportReport(){
+    try{
+        var r=await api('GET','/ai/report/files');
+        if(r&&r.files&&r.files.length>0){
+            var latest=r.files[0].name;
+            window.open('/api/v1/ai/report/download?name='+encodeURIComponent(latest),'_blank');
+        }else{
+            alert('暂无已导出的报告文件，请先触发 AI 分析生成报告');
+        }
+    }catch(e){alert('导出失败: '+e)}
+    refreshReportFiles();
+}
+// 刷新已导出报告文件列表
+async function refreshReportFiles(){
+    var el=document.getElementById('aiReportFiles');
+    if(!el)return;
+    try{
+        var r=await api('GET','/ai/report/files');
+        if(r&&r.files&&r.files.length>0){
+            var h='';
+            for(var i=0;i<r.files.length;i++){
+                var f=r.files[i];
+                h+='<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">';
+                h+='<span style="cursor:pointer;color:var(--accent)" onclick="window.open(\'/api/v1/ai/report/download?name='+encodeURIComponent(f.name)+'\',\'_blank\')" title="点击下载">'+f.time+'</span>';
+                h+='<span style="font-size:11px">'+formatSize(f.size)+'</span>';
+                h+='</div>';
+            }
+            el.innerHTML=h;
+        }else{
+            el.innerHTML='<div style="text-align:center;padding-top:20px">暂无报告文件</div>';
+        }
+    }catch(e){}
+}
+function formatSize(b){return b<1024?b+'B':b<1048576?(b/1024).toFixed(1)+'KB':(b/1048576).toFixed(1)+'MB'}
+
+document.getElementById('btnAiExport').onclick=function(){exportReport()};
+
+// 页面加载时刷新一次文件列表
+setTimeout(refreshReportFiles,1000);
 
 // ===== Misc =====
 let sysDirtyTimer=0;

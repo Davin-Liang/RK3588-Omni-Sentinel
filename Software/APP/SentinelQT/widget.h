@@ -249,6 +249,7 @@ private:
     std::string web_auto_backtrack_toggle_();
     std::string web_auto_backtrack_status_();
     std::string web_ai_report_();
+    std::string web_ai_report_files_();
 
     // ---- NVMe ----
     NVMeDataManager*    nvme_manager_ = nullptr;

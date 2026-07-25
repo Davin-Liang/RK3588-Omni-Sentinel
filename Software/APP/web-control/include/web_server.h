@@ -69,6 +69,9 @@ public:
 
     void set_command_handler(CommandHandler handler);
 
+    /** @brief 设置 AI 报告文件路径，供 /api/v1/ai/report/download 下载端点使用 */
+    void set_ai_report_path(const std::string& path);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

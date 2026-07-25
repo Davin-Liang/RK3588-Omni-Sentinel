@@ -53,6 +53,9 @@ struct WebServer::Impl
     // 命令回调
     WebServer::CommandHandler cmdHandler_;
 
+    // AI 报告文件路径（供下载端点使用）
+    std::string aiReportPath_;
+
     Impl(uint16_t p) : port(p) {}
 
     // 在锁内编码为 JPEG
@@ -141,6 +144,7 @@ bool WebServer::start()
     impl_->httpServer_.Get(R"(/api/v1/backtrack/files)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/backtrack/auto-status)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/ai/report)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/ai/report/files)", wrap_get);
 
     // MJPEG snapshots
     impl_->httpServer_.Get(R"(/api/v1/cam/0/snapshot.jpg)", [this](const httplib::Request&, httplib::Response& res) {
@@ -262,6 +266,57 @@ bool WebServer::start()
                 return true;
             },
             [](bool success) { /* done */ }
+        );
+    });
+
+    // ---- AI 报告文件下载 ----
+    impl_->httpServer_.Get(R"(/api/v1/ai/report/download)", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string fileName = req.get_param_value("name");
+        std::string basePath = impl_->aiReportPath_;
+        if (basePath.empty()) {
+            res.status = 404;
+            res.set_content("AI report not available", "text/plain; charset=utf-8");
+            return;
+        }
+
+        // 若指定文件名，从同一目录下载；否则下载最新文件
+        std::string path;
+        if (!fileName.empty()) {
+            // 从 basePath 提取目录部分（纯 POSIX，不依赖 Qt）
+            size_t slash = basePath.find_last_of("/\\");
+            if (slash != std::string::npos)
+                path = basePath.substr(0, slash) + "/" + fileName;
+            else
+                path = fileName;  // 无目录前缀，当前目录
+        } else {
+            path = basePath;
+        }
+
+        std::ifstream fsize(path, std::ios::binary | std::ios::ate);
+        if (!fsize.is_open()) {
+            res.status = 404;
+            res.set_content("report file not found", "text/plain; charset=utf-8");
+            return;
+        }
+        size_t fileSize = fsize.tellg();
+        fsize.close();
+
+        res.set_header("Content-Disposition",
+            ("attachment; filename=\"" + fileName + "\"").c_str());
+        res.set_content_provider(
+            fileSize,
+            "text/plain; charset=utf-8",
+            [path](size_t offset, size_t length, httplib::DataSink& sink) -> bool {
+                std::ifstream f(path, std::ios::binary);
+                if (!f) return false;
+                f.seekg(offset);
+                std::vector<char> buf(length);
+                f.read(buf.data(), length);
+                size_t n = f.gcount();
+                if (n > 0) sink.write(buf.data(), n);
+                return true;
+            },
+            [](bool /*success*/) {}
         );
     });
 
@@ -403,6 +458,11 @@ void WebServer::set_cached_preview(int camNum, const QImage& img)
 void WebServer::set_command_handler(CommandHandler handler)
 {
     impl_->cmdHandler_ = std::move(handler);
+}
+
+void WebServer::set_ai_report_path(const std::string& path)
+{
+    impl_->aiReportPath_ = path;
 }
 
 // ======================================================================
