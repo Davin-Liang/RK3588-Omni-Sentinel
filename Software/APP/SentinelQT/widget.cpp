@@ -577,7 +577,8 @@ Widget::~Widget()
         if (visioner_) {
             visioner_->camera_stream_ctrl(i, false);
         }
-        stop_preview_(i);
+        previewActive_[i] = false;
+        stop_preview_worker_(i);
         if (streamer_) {
             streamer_->remove_camera(i);
         }
@@ -759,11 +760,30 @@ bool Widget::init_camera_(int camNum)
     return true;
 }
 
-// ---- Preview ----
+// ---- Preview / EIS quality frame worker ----
 
-void Widget::start_preview_(int camNum)
+bool Widget::should_run_preview_worker_(int camNum) const
 {
-    if (previewWorker_[camNum]) return;
+    if (camNum < 0 || camNum >= 2 || cameraPaused_[camNum]) {
+        return false;
+    }
+
+    // Qt 本地预览需要帧。
+    if (previewActive_[camNum]) {
+        return true;
+    }
+
+    // Web 端只开启“推流 + 防抖”时，也需要在后台消费预览帧，
+    // 供 EisQualityEvaluator 计算与 Qt 完全相同的两项指标。
+    const bool streaming = streamer_ && streamer_->is_streaming(camNum);
+    return streaming && (eisEnabled_[camNum] || eisEnablePending_[camNum]);
+}
+
+void Widget::ensure_preview_worker_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2 || previewWorker_[camNum]) {
+        return;
+    }
 
     previewWorker_[camNum] = new PreviewWorker(visioner_, camNum);
     previewThread_[camNum] = new QThread(this);
@@ -773,23 +793,66 @@ void Widget::start_preview_(int camNum)
     connect(previewThread_[camNum], &QThread::started,
             previewWorker_[camNum], &PreviewWorker::start);
     previewThread_[camNum]->start();
-    previewActive_[camNum] = true;
+
+    fprintf(stderr,
+            "[SentinelQT] preview frame worker started cam=%d visible=%d quality=%d\n",
+            camNum,
+            previewActive_[camNum] ? 1 : 0,
+            (eisEnabled_[camNum] || eisEnablePending_[camNum]) ? 1 : 0);
 }
 
-void Widget::stop_preview_(int camNum)
+void Widget::stop_preview_worker_(int camNum)
 {
-    if (!previewWorker_[camNum]) return;
+    if (camNum < 0 || camNum >= 2 || !previewWorker_[camNum]) {
+        return;
+    }
 
     previewWorker_[camNum]->stop();
     if (previewThread_[camNum] && previewThread_[camNum]->isRunning()) {
         previewThread_[camNum]->quit();
         previewThread_[camNum]->wait(3000);
     }
+
     delete previewWorker_[camNum];
     previewWorker_[camNum] = nullptr;
     delete previewThread_[camNum];
     previewThread_[camNum] = nullptr;
+
+    fprintf(stderr, "[SentinelQT] preview frame worker stopped cam=%d\n", camNum);
+}
+
+void Widget::refresh_preview_worker_(int camNum)
+{
+    if (should_run_preview_worker_(camNum)) {
+        ensure_preview_worker_(camNum);
+    } else {
+        stop_preview_worker_(camNum);
+    }
+}
+
+void Widget::start_preview_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2) {
+        return;
+    }
+
+    // previewActive_ 只表示“Qt 本地预览是否打开”，
+    // 不再等价于后台帧工作线程是否运行。
+    previewActive_[camNum] = true;
+    refresh_preview_worker_(camNum);
+}
+
+void Widget::stop_preview_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2) {
+        return;
+    }
+
     previewActive_[camNum] = false;
+
+    // 若 Web 正在“推流 + 防抖”，保留后台工作线程继续计算指标；
+    // 否则真正停止工作线程。
+    refresh_preview_worker_(camNum);
 }
 
 // ---- Toggle preview ----
@@ -822,36 +885,34 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
         return;
     }
 
-    /*
-     * 评价频率约为预览帧率的 1/3：30 FPS 时约 10 次/秒。
-     * 防抖关闭时，评价器在后台滚动采集“未防抖基线”；
-     * 防抖开启后，评价器计算防抖后的残余抖动和抑振率。
-     */
-    ++eisQualityFrameCounter_[camNum];
-    if (eisQualityFrameCounter_[camNum] % 3 == 0) {
-        EisQualityMetrics metrics;
-        if (eisQualityEvaluator_[camNum].processFrame(image, metrics)) {
-            eisQualityMetrics_[camNum] = metrics;
+    const bool streaming = streamer_ && streamer_->is_streaming(camNum);
+    const bool qualityRequested = eisEnabled_[camNum] || eisEnablePending_[camNum];
 
-            // 评价计算约 10 Hz。每两次推送一次，Web 指标约 5 Hz 更新，
-            // 不依赖 1 Hz 的系统状态推送，也不修改视频流本身。
-            ++eisQualityWebPushCounter_[camNum];
-            if (eisQualityWebPushCounter_[camNum] % 2 == 0) {
-                push_eis_quality_to_web_(camNum);
+    /*
+     * 指标计算与“Qt 是否开启预览”解耦：
+     * 1. Web：推流 + 防抖即可由后台 PreviewWorker 取帧并计算；
+     * 2. Qt：只有推流 + 本地预览 + 防抖时才把指标绘制到屏幕。
+     * 两端读取的始终是同一个 eisQualityMetrics_[camNum]。
+     */
+    if (qualityRequested) {
+        ++eisQualityFrameCounter_[camNum];
+        if (eisQualityFrameCounter_[camNum] % 3 == 0) {
+            EisQualityMetrics metrics;
+            if (eisQualityEvaluator_[camNum].processFrame(image, metrics)) {
+                eisQualityMetrics_[camNum] = metrics;
+
+                // 评价约 10 Hz，Web 约 5 Hz 推送。
+                ++eisQualityWebPushCounter_[camNum];
+                if (eisQualityWebPushCounter_[camNum] % 2 == 0) {
+                    push_eis_quality_to_web_(camNum);
+                }
             }
         }
     }
 
-    // 开启 EIS 或正在采集基线时，显示两项评价指标。
-    QImage displayImage = image;
-    if (eisEnabled_[camNum] || eisEnablePending_[camNum]) {
-        displayImage = image.convertToFormat(QImage::Format_ARGB32);
-        draw_eis_quality_overlay_(displayImage, camNum);
-    }
-
-    // Web 预览与本地屏幕显示同一份评价叠加画面。
+    // Web 的 HLS/RTC 视频不依赖该缓存；这里保存原始帧作为 MJPEG/API 兜底。
     if (webServer_) {
-        webServer_->set_cached_preview(camNum, displayImage);
+        webServer_->set_cached_preview(camNum, image);
     }
 
     frameCount_[camNum]++;
@@ -872,6 +933,18 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
         lastFpsTsUs_[camNum] = nowUs;
     }
 
+    // 后台仅为 Web 指标取帧时，不更新 Qt 预览控件。
+    if (!previewActive_[camNum]) {
+        return;
+    }
+
+    QImage displayImage = image;
+    const bool showQtMetrics = streaming && qualityRequested;
+    if (showQtMetrics) {
+        displayImage = image.convertToFormat(QImage::Format_ARGB32);
+        draw_eis_quality_overlay_(displayImage, camNum);
+    }
+
     QLabel* previewLabel = cam_lbl(ui->previewLabel0, ui->previewLabel1, camNum);
     previewLabel->setPixmap(
         QPixmap::fromImage(displayImage).scaled(
@@ -882,7 +955,12 @@ void Widget::on_frame_ready_(int camNum, const QImage& image)
 
 void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
 {
-    if (camNum < 0 || camNum >= 2 || image.isNull() ||
+    if (camNum < 0 || camNum >= 2 || image.isNull()) {
+        return;
+    }
+
+    const bool streaming = streamer_ && streamer_->is_streaming(camNum);
+    if (!previewActive_[camNum] || !streaming ||
         (!eisEnabled_[camNum] && !eisEnablePending_[camNum])) {
         return;
     }
@@ -963,6 +1041,7 @@ void Widget::push_eis_quality_to_web_(int camNum)
 
     nlohmann::json j;
     j["cam"] = camNum;
+    j["streaming"] = streamer_ && streamer_->is_streaming(camNum);
     j["eisEnabled"] = eisEnabled_[camNum];
     j["eisPending"] = eisEnablePending_[camNum];
     j["valid"] = metrics.valid;
@@ -973,12 +1052,25 @@ void Widget::push_eis_quality_to_web_(int camNum)
     webServer_->push_event("eis_quality", j.dump());
 }
 
+void Widget::clear_eis_quality_state_(int camNum)
+{
+    if (camNum < 0 || camNum >= 2) {
+        return;
+    }
+
+    eisQualityEvaluator_[camNum].reset();
+    eisQualityMetrics_[camNum] = EisQualityMetrics();
+    eisQualityFrameCounter_[camNum] = 0;
+    eisQualityWebPushCounter_[camNum] = 0;
+}
+
 void Widget::request_eis_enable_(int camNum)
 {
     if (camNum < 0 || camNum >= 2 || eisEnabled_[camNum] || eisEnablePending_[camNum]) {
         return;
     }
 
+    clear_eis_quality_state_(camNum);
     eisEnablePending_[camNum] = true;
     eisBaselinePollCount_[camNum] = 0;
 
@@ -997,6 +1089,9 @@ void Widget::request_eis_enable_(int camNum)
     set_status_(QString("相机%1 正在采集未防抖基线，请保持当前振动约2秒")
                     .arg(camNum + 1),
                 "#d29922");
+
+    // 若只有 Web 推流而没有 Qt 预览，在这里启动隐藏取帧线程。
+    refresh_preview_worker_(camNum);
     push_eis_quality_to_web_(camNum);
 
     QTimer::singleShot(250, this, [this, camNum]() {
@@ -1010,11 +1105,26 @@ void Widget::poll_eis_baseline_and_enable_(int camNum)
         return;
     }
 
+    const bool frameSourceActive =
+        previewActive_[camNum] ||
+        (streamer_ && streamer_->is_streaming(camNum));
+
+    // 尚未开启推流或 Qt 预览时保持等待，不把“没有画面”误判为基线超时。
+    if (!frameSourceActive) {
+        refresh_preview_worker_(camNum);
+        push_eis_quality_to_web_(camNum);
+        QTimer::singleShot(250, this, [this, camNum]() {
+            poll_eis_baseline_and_enable_(camNum);
+        });
+        return;
+    }
+
+    refresh_preview_worker_(camNum);
     eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
     ++eisBaselinePollCount_[camNum];
     push_eis_quality_to_web_(camNum);
 
-    // 正常情况下 15 个有效样本约需 1.5 秒；最多等待 5 秒。
+    // 正常情况下 15 个有效样本约需 1.5 秒；有画面时最多等待 5 秒。
     if (eisQualityMetrics_[camNum].baselineReady ||
         eisBaselinePollCount_[camNum] >= 20) {
         enable_eis_now_(camNum);
@@ -1041,6 +1151,7 @@ void Widget::enable_eis_now_(int camNum)
 
     eisEnabled_[camNum] = true;
     eisQualityEvaluator_[camNum].setEisEnabled(true);
+    refresh_preview_worker_(camNum);
     eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
 
     QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
@@ -1066,6 +1177,8 @@ void Widget::cancel_eis_enable_pending_(int camNum)
 
     eisEnablePending_[camNum] = false;
     eisBaselinePollCount_[camNum] = 0;
+    clear_eis_quality_state_(camNum);
+    refresh_preview_worker_(camNum);
 
     QPushButton* btn = (camNum == 0) ? ui->btnEis0 : ui->btnEis1;
     if (btn) {
@@ -1087,12 +1200,16 @@ void Widget::on_btn_stream_(int camNum)
 
     if (streamer_->is_streaming(camNum)) {
         if (streamer_->stop_stream(camNum)) {
+            refresh_preview_worker_(camNum);
+            push_eis_quality_to_web_(camNum);
             set_status_(QString("相机%1 推流已停止").arg(camNum), "#ffffff");
             update_camera_button_states_(camNum);
         }
     } else {
         QByteArray url = rtspUrl_[camNum].toUtf8();
         if (streamer_->start_stream(camNum, url.constData())) {
+            refresh_preview_worker_(camNum);
+            push_eis_quality_to_web_(camNum);
             set_status_(QString("相机%1 推流中: %2").arg(camNum).arg(rtspUrl_[camNum]), "#58a6ff");
             update_camera_button_states_(camNum);
         } else {
@@ -1168,6 +1285,8 @@ void Widget::on_btn_pause_(int camNum)
         }
         if (previewActive_[camNum]) {
             stop_preview_(camNum);
+        } else {
+            refresh_preview_worker_(camNum);
         }
         visioner_->camera_pause(camNum, true);
         cameraPaused_[camNum] = true;
@@ -1196,6 +1315,8 @@ void Widget::on_btn_system_()
             }
             if (previewActive_[i]) {
                 stop_preview_(i);
+            } else {
+                refresh_preview_worker_(i);
             }
             visioner_->camera_pause(i, true);
             cameraPaused_[i] = true;
@@ -1375,6 +1496,12 @@ void Widget::on_streamer_event(int camNum, StreamerEvent event, const QString& d
     case StreamerEvent::ERROR:
         set_status_(camPrefix + "错误: " + (detail.isEmpty() ? "unknown" : detail), "#f85149");
         break;
+    }
+
+    if (event == StreamerEvent::STREAM_STARTED ||
+        event == StreamerEvent::STREAM_STOPPED) {
+        refresh_preview_worker_(camNum);
+        push_eis_quality_to_web_(camNum);
     }
 
     // Web 事件推送
@@ -2496,17 +2623,16 @@ std::string Widget::web_start_stream_(int camNum)
 {
     if (streamer_->is_streaming(camNum)) return R"({"ok":true})";
 
-    // 如果相机已暂停，先恢复
+    // 如果相机已暂停，先恢复；Web 开始推流不再强制打开 Qt 本地预览。
     if (cameraPaused_[camNum]) {
         visioner_->camera_pause(camNum, false);
         cameraPaused_[camNum] = false;
-        if (!previewActive_[camNum]) {
-            start_preview_(camNum);
-        }
     }
 
     QByteArray url = rtspUrl_[camNum].toUtf8();
     if (streamer_->start_stream(camNum, url.constData())) {
+        refresh_preview_worker_(camNum);
+        push_eis_quality_to_web_(camNum);
         update_camera_button_states_(camNum);
         return R"({"ok":true})";
     }
@@ -2517,6 +2643,8 @@ std::string Widget::web_stop_stream_(int camNum)
 {
     if (!streamer_->is_streaming(camNum)) return R"({"ok":true})";
     streamer_->stop_stream(camNum);
+    refresh_preview_worker_(camNum);
+    push_eis_quality_to_web_(camNum);
     update_camera_button_states_(camNum);
     return R"({"ok":true})";
 }
@@ -2582,6 +2710,8 @@ std::string Widget::web_pause_(int camNum)
     }
     if (previewActive_[camNum]) {
         stop_preview_(camNum);
+    } else {
+        refresh_preview_worker_(camNum);
     }
 
     cameraPaused_[camNum] = true;
@@ -2766,7 +2896,9 @@ void Widget::deinit_eis_()
         eisEnabled_[i] = false;
         eisEnablePending_[i] = false;
         eisBaselinePollCount_[i] = 0;
-        eisQualityEvaluator_[i].setEisEnabled(false);
+        clear_eis_quality_state_(i);
+        refresh_preview_worker_(i);
+        push_eis_quality_to_web_(i);
         QPushButton* btn = (i == 0) ? ui->btnEis0 : ui->btnEis1;
         if (btn) {
             btn->setText(QString::fromUtf8("防抖关"));
@@ -2835,9 +2967,12 @@ void Widget::on_btn_eis_(int camNum)
             imuOnlyEis_->resetImuOnlyState(camNum);
         }
         eisEnabled_[camNum] = false;
-        eisQualityEvaluator_[camNum].setEisEnabled(false);
-        eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
-        cancel_eis_enable_pending_(camNum);
+        eisEnablePending_[camNum] = false;
+        eisBaselinePollCount_[camNum] = 0;
+        clear_eis_quality_state_(camNum);
+        refresh_preview_worker_(camNum);
+        update_camera_button_states_(camNum);
+        push_eis_quality_to_web_(camNum);
         set_status_(QString("相机%1 IMU-only EIS已禁用").arg(camNum + 1), "#ffffff");
 
         if (!eisEnabled_[0] && !eisEnabled_[1] &&
@@ -2887,8 +3022,10 @@ std::string Widget::web_eis_stop_(int camNum)
         imuOnlyEis_->resetImuOnlyState(camNum);
     }
     eisEnabled_[camNum] = false;
-    eisQualityEvaluator_[camNum].setEisEnabled(false);
-    eisQualityMetrics_[camNum] = eisQualityEvaluator_[camNum].latestMetrics();
+    eisEnablePending_[camNum] = false;
+    eisBaselinePollCount_[camNum] = 0;
+    clear_eis_quality_state_(camNum);
+    refresh_preview_worker_(camNum);
     push_eis_quality_to_web_(camNum);
     update_camera_button_states_(camNum);
 

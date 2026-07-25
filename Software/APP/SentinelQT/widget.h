@@ -172,6 +172,7 @@ private:
 
     void draw_eis_quality_overlay_(QImage& image, int camNum);
     void push_eis_quality_to_web_(int camNum);
+    void clear_eis_quality_state_(int camNum);
     void request_eis_enable_(int camNum);
     void poll_eis_baseline_and_enable_(int camNum);
     void enable_eis_now_(int camNum);
@@ -204,6 +205,11 @@ private:
     bool imu_only_eis_offset_callback_(uint64_t timestampUs, int camNum,
                                        int32_t& offsetX, int32_t& offsetY);
     bool init_camera_(int camNum);
+    // previewActive_ 仅表示 Qt 本地预览；后台取帧线程可为 Web 指标独立运行。
+    bool should_run_preview_worker_(int camNum) const;
+    void ensure_preview_worker_(int camNum);
+    void stop_preview_worker_(int camNum);
+    void refresh_preview_worker_(int camNum);
     void start_preview_(int camNum);
     void stop_preview_(int camNum);
     void scan_videos_();
