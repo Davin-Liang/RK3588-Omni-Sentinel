@@ -39,6 +39,7 @@ struct CameraConfig {
     float    tLidarToCam[16];      ///< 雷达到该相机的 4x4 外参矩阵（行主序）
     uint32_t imgWidth;             ///< 图像宽度（像素）
     uint32_t imgHeight;            ///< 图像高度（像素）
+    float    yoloConfThreshold = 0.60f; ///< YOLO 检测置信度阈值（仅 person classId=0）
 };
 
 /**
