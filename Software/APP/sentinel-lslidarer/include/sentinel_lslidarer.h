@@ -85,6 +85,9 @@ struct LidarConfig {
 
     /// 环形缓冲区存储的帧数
     uint32_t ringBufferSize = 10;
+
+    /// 是否打印终端调试信息（[LidarSweep]/[LidarDiag]）
+    bool debugLog = false;
 };
 
 // ============================================================================
