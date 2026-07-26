@@ -487,56 +487,61 @@ function updateTracking(data){if(data.targets){trackingTargets=data.targets;upda
 // 只显示防抖效果评价，不显示算法内部 offset/gyro 等调试量。
 // 状态栏位于每个相机控制行的“点云投影”按钮后面。
 function updateEisQuality(i,q){
-  const bar=document.getElementById('eisStatusBar'+i);
-  const textEl=document.getElementById('eisStatusText'+i);
-  if(!bar||!textEl)return;
+  const bar =
+    document.getElementById('eisStatusBar' + i);
 
-  if(q&&typeof q==='object')cam[i].eisQuality=q;
-  const metrics=cam[i].eisQuality;
+  const textEl =
+    document.getElementById('eisStatusText' + i);
 
-  // Web 指标只在“推流 + 防抖（含基线阶段）”时显示。
-  // Qt 是否开启本地预览，不参与该判断。
-  const shouldShow=!!cam[i].streaming&&(!!cam[i].eisEnabled||!!cam[i].eisPending);
-  if(!shouldShow){
-    bar.className='eis-status-bar';
-    textEl.textContent='';
+  if(!bar || !textEl){
     return;
   }
 
-  bar.className='eis-status-bar show eis-status-pending';
+  if(q && typeof q === 'object'){
+    cam[i].eisQuality = q;
+  }
+
+  const metrics = cam[i].eisQuality;
+
+  // Web 指标只在“推流 + 防抖”时显示。
+  const shouldShow =
+    !!cam[i].streaming &&
+    (
+      !!cam[i].eisEnabled ||
+      !!cam[i].eisPending
+    );
+
+  if(!shouldShow){
+    bar.className = 'eis-status-bar';
+    textEl.textContent = '';
+    return;
+  }
+
+  bar.className =
+    'eis-status-bar show eis-status-pending';
 
   if(cam[i].eisPending){
-    textEl.textContent='防抖状态：基线计算中';
+    textEl.textContent =
+      '防抖状态：基线计算中';
     return;
   }
 
-  if(!metrics){
-    textEl.textContent='防抖状态：效果计算中';
+  if(!metrics || !metrics.valid){
+    textEl.textContent =
+      '残余抖动：计算中';
     return;
   }
 
-  if(!metrics.baselineReady){
-    textEl.textContent='防抖状态：等待基线';
-    return;
-  }
+  const residual =
+    Number(metrics.residualJitterRmsPx || 0);
 
-  if(!metrics.valid){
-    textEl.textContent='防抖状态：效果计算中';
-    return;
-  }
+  bar.className =
+    'eis-status-bar show eis-status-good';
 
-  const suppression=Number(metrics.suppressionPercent||0);
-  const residual=Number(metrics.residualJitterRmsPx||0);
-
-  if(suppression>=60){
-    bar.className='eis-status-bar show eis-status-good';
-  }else if(suppression>=30){
-    bar.className='eis-status-bar show eis-status-medium';
-  }else{
-    bar.className='eis-status-bar show eis-status-poor';
-  }
-
-  textEl.textContent='抑振率：'+suppression.toFixed(1)+'% ｜ 残余抖动：'+residual.toFixed(2)+' px RMS';
+  textEl.textContent =
+    '残余抖动：' +
+    residual.toFixed(2) +
+    ' px RMS';
 }
 
 function handleEvent(data){
