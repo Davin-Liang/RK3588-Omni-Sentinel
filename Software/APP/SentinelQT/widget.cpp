@@ -995,7 +995,8 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
     const int panelWidth = std::min(
         image.width() - margin * 2,
         static_cast<int>(560.0f * uiScale));
-    const int panelHeight = static_cast<int>(150.0f * uiScale);
+    // const int panelHeight = static_cast<int>(150.0f * uiScale);
+    const int panelHeight =static_cast<int>(90.0f * uiScale);
     const QRect panelRect(margin, margin, panelWidth, panelHeight);
 
     painter.setPen(Qt::NoPen);
@@ -1009,7 +1010,7 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
     font.setPixelSize(static_cast<int>(27.0f * uiScale));
     painter.setFont(font);
 
-    QString suppressionText;
+   /*QString suppressionText;
     QColor suppressionColor(210, 210, 210);
 
     if (eisEnablePending_[camNum]) {
@@ -1028,23 +1029,30 @@ void Widget::draw_eis_quality_overlay_(QImage& image, int camNum)
             suppressionColor = QColor(255, 90, 85);
         }
     }
-
+    */ 
     const QString residualText = (!eisEnablePending_[camNum] && metrics.valid)
         ? QString("%1 px RMS").arg(metrics.residualJitterRmsPx, 0, 'f', 2)
         : QString::fromUtf8("计算中");
 
-    const int x = panelRect.left() + static_cast<int>(22.0f * uiScale);
-    const int y1 = panelRect.top() + static_cast<int>(52.0f * uiScale);
-    const int y2 = panelRect.top() + static_cast<int>(112.0f * uiScale);
+    // const int x = panelRect.left() + static_cast<int>(22.0f * uiScale);
+    // const int y1 = panelRect.top() + static_cast<int>(52.0f * uiScale);
+    const int x =panelRect.left() +static_cast<int>(22.0f * uiScale);
+    const int y1 =panelRect.top() + static_cast<int>(58.0f * uiScale);
+    // const int y2 = panelRect.top() + static_cast<int>(112.0f * uiScale);
 
     // 使用基线坐标绘制，避免大字体在 QRect 中被裁剪或与标题重叠。
+    /*
     painter.setPen(suppressionColor);
     painter.drawText(QPointF(x, y1),
                      QString::fromUtf8("抑振率：") + suppressionText);
-
+    */
+    // painter.setPen(QColor(95, 180, 255));
+    // painter.drawText(QPointF(x, y2),
+    //                  QString::fromUtf8("残余抖动：") + residualText);
     painter.setPen(QColor(95, 180, 255));
-    painter.drawText(QPointF(x, y2),
-                     QString::fromUtf8("残余抖动：") + residualText);
+    painter.drawText(
+        QPointF(x, y1),
+        QString::fromUtf8("残余抖动：") + residualText);
 }
 
 void Widget::push_eis_quality_to_web_(int camNum)
