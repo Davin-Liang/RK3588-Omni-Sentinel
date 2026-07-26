@@ -79,6 +79,7 @@ static void fusion_warning_callback_(const TrackedTarget& target, void* /*userDa
     Widget* w = Widget::instance();
     if (w) {
         uint64_t alertTsUs = target.lastUpdateNs / 1000;
+        voice::playDangerWarning();
         QMetaObject::invokeMethod(w, [w, alertTsUs, targetId = static_cast<int>(target.id)]() {
             w->on_fusion_alert_backtrack_(targetId, alertTsUs);
         }, Qt::QueuedConnection);
@@ -4489,7 +4490,6 @@ void Widget::update_ai_status_snapshot_(int tempC, int cpuUsage)
                     QString dangerTag;
                     if (t.distanceMeters < fusionTrackerCfg_.warningExitDistMeters) {
                         dangerTag = QString::fromUtf8(" ⚠ 已进入危险区域!");
-                        voice::playDangerWarning();
                     }
                     fusionStatus += QString::fromUtf8("\n  - 目标#%1: %2m%3")
                                         .arg(t.id)
