@@ -171,7 +171,7 @@ void SentinelLslidarer::reader_loop_() {
 
     while (running_.load(std::memory_order_acquire)) {
         // ---- 周期性诊断输出 ----
-        if (retryCount > 0 && (retryCount % kDiagInterval) == 0) {
+        if (config_.debugLog && retryCount > 0 && (retryCount % kDiagInterval) == 0) {
             std::fprintf(stderr,
                 "[LidarDiag] retries=%lu, timeouts=%lu, syncFails=%lu, "
                 "validPkts=%lu, invalidPkts=%lu, sweeps=%lu\n",
@@ -184,7 +184,7 @@ void SentinelLslidarer::reader_loop_() {
         }
 
         // 一次性警告：串口无任何数据
-        if (timeoutCount == 5 && validPackets == 0) {
+        if (config_.debugLog && timeoutCount == 5 && validPackets == 0) {
             std::fprintf(stderr,
                 "[LidarDiag] WARNING: No data received after 1000 timeouts.\n"
                 "  Check: 1) radar power & motor spinning\n"
@@ -290,12 +290,12 @@ void SentinelLslidarer::reader_loop_() {
             ++sweepCount_;
 
             // 首圈打印
-            if (sweepCount_ == 1) {
+            if (config_.debugLog && sweepCount_ == 1) {
                 std::fprintf(stderr, "[LidarSweep] first sweep detected (points=%u)\n",
                              sweepCount);
             }
 
-            if (sweepCount_ % 10 == 0) {
+            if (config_.debugLog && sweepCount_ % 10 == 0) {
                 static uint64_t lastSweepReportNs = 0;
                 uint64_t now = sweepEndNs;
                 if (lastSweepReportNs > 0) {

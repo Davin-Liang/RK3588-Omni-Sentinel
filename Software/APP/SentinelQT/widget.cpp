@@ -659,7 +659,7 @@ void Widget::load_config_()
             imuOnlyEisCfg_[c].maxOffsetStepPixel = config_.value(prefix + "ImuOnlyMaxOffsetStepPixel", c == 0 ? 6 : 10).toInt();
             imuOnlyEisCfg_[c].enableLeverArmCompensation = config_.value(prefix + "EnableLeverArm", false).toBool();
             imuOnlyEisCfg_[c].nominalDepthMeter = config_.value(prefix + "NominalDepthMeter", 1.5f).toFloat();
-            imuOnlyEisCfg_[c].debugLog = config_.value(prefix + "ImuOnlyDebug", true).toBool();
+            imuOnlyEisCfg_[c].debugLog = config_.value(prefix + "ImuOnlyDebug", false).toBool();
 
             if (c == 0) {
                 // cam0 光轴向左：x_C=+Y_B, y_C=-Z_B, z_C=-X_B。
@@ -1764,6 +1764,7 @@ void Widget::load_lidar_config_()
     lidarCfg_.maxRange      = config_.value("Lidar/maxRange", 50.0f).toFloat();
     lidarCfg_.angleDisableMin = config_.value("Lidar/angleDisableMin", 0).toInt();
     lidarCfg_.angleDisableMax = config_.value("Lidar/angleDisableMax", 0).toInt();
+    lidarCfg_.debugLog        = config_.value("Lidar/debugLog", false).toBool();
 }
 
 void Widget::load_fusion_config_()
