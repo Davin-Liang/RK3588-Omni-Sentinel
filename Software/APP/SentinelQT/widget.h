@@ -129,6 +129,7 @@ private:
     QString camStatus_[2];
     uint64_t prevCpuTotal_;
     uint64_t prevCpuIdle_;
+    int      lastCpuUsage_ = -1;  ///< 缓存的 CPU 使用率，供 Web 状态推送复用
 
     static Widget* instance_;
 
@@ -192,7 +193,8 @@ private:
     int                 aiCountdownSec_;
     bool                aiAutoEnabled_;
     std::atomic<bool>   aiWorkerReady_{false};
-    QString             lastAiReport_;  // 最近一次 AI 报告（供 Web API 缓存）
+    QString             lastAiReport_;       // 最近一次 AI 报告（供 Web API 缓存）
+    std::string         lastAiReportTime_;   // 最近一次 AI 报告时间（供 Web 状态推送）
 
     void update_ai_status_snapshot_(int tempC, int cpuUsage);
     void reload_ai_auto_config_();

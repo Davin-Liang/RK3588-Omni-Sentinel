@@ -1402,6 +1402,7 @@ void Widget::update_hw_usage_()
                 cpuUsage = (int)(100 - (idleDelta * 100 / totalDelta));
             prevCpuTotal_ = total;
             prevCpuIdle_  = idle;
+            lastCpuUsage_ = cpuUsage;  // 缓存供 Web 状态推送复用
         }
     }
 
@@ -3468,6 +3469,16 @@ std::string Widget::get_status_json_() const
     j["fusionConfigVersion"] = fusionConfigVersion_;
     j["autoBacktrackEnabled"] = autoBacktrackEnabled_;
 
+    // AI 报告状态（同步到 Web 端）
+    nlohmann::json aiReport;
+    aiReport["enabled"] = aiAutoEnabled_;
+    aiReport["intervalSec"] = aiAutoIntervalSec_;
+    aiReport["countdownSec"] = aiAutoEnabled_ ? aiCountdownSec_ : -1;
+    aiReport["lastReportTime"] = lastAiReportTime_;
+    aiReport["lastReportSnippet"] = lastAiReport_.isEmpty() ? ""
+        : lastAiReport_.left(500).toStdString();  // 截取前 500 字符避免 JSON 过大
+    j["aiReport"] = aiReport;
+
     j["ok"] = true;
     return j.dump();
 }
@@ -3476,31 +3487,9 @@ std::string Widget::get_hw_json_() const
 {
     nlohmann::json j;
 
-    // CPU — 读取但不修改缓存的 prevCpuTotal_/prevCpuIdle_，
-    // 避免干扰 update_hw_usage_() 的独立计算
-    FILE* fp = fopen("/proc/stat", "r");
-    if (fp) {
-        uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
-        int n = fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
-                       &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
-        fclose(fp);
-        if (n >= 4) {
-            uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
-            // 用静态变量保存上一次的 web 查询值，独立于 update_hw_usage_()
-            static uint64_t webPrevTotal = 0;
-            static uint64_t webPrevIdle  = 0;
-            uint64_t totalDelta = total - webPrevTotal;
-            uint64_t idleDelta  = idle  - webPrevIdle;
-            if (webPrevTotal > 0 && totalDelta > 0)
-                j["cpu"] = (int)(100 - (idleDelta * 100 / totalDelta));
-            else
-                j["cpu"] = 0;
-            webPrevTotal = total;
-            webPrevIdle  = idle;
-        }
-    } else {
-        j["cpu"] = -1;
-    }
+    // CPU — 直接复用 update_hw_usage_() 中 1Hz 定时器已计算好的缓存值，
+    // 避免 REST 轮询与 WebSocket 推送竞争 /proc/stat 导致采样间隔不稳定
+    j["cpu"] = lastCpuUsage_;
 
     // Temperature and level from ThermalController
     if (thermalCtrl_) {
@@ -3517,7 +3506,7 @@ std::string Widget::get_hw_json_() const
 
     // RGA
     nlohmann::json rga = nlohmann::json::array();
-    fp = fopen("/sys/kernel/debug/rkrga/load", "r");
+    FILE* fp = fopen("/sys/kernel/debug/rkrga/load", "r");
     if (fp) {
         char line[128];
         while (fgets(line, sizeof(line), fp)) {
@@ -4554,6 +4543,7 @@ void Widget::on_ai_report_ready_(const QString& report)
 {
     // 缓存报告供 Web API 查询
     lastAiReport_ = report;
+    lastAiReportTime_ = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss").toStdString();
 
     if (!aiReportText_) return;
 

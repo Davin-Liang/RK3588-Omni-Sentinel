@@ -354,7 +354,7 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
 const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
 let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,eisPending:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,eisPending:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null}};
-let trackingTargets=[],trackingClusters=[],showClusters=true,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
+let trackingTargets=[],trackingClusters=[],showClusters=false,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
 
 // ===== WebSocket =====
 function connectWS(){
@@ -467,6 +467,38 @@ function updateUI(data){
     if(btn){
       btn.textContent = data.autoBacktrackEnabled ? '自动回溯: 开' : '自动回溯: 关';
       btn.className = 'btn ' + (data.autoBacktrackEnabled ? 'btn-on' : 'btn-off');
+    }
+  }
+  // AI report sync (Qt auto-report → Web)
+  if(data.aiReport){
+    aiEnabled = !!data.aiReport.enabled;
+    if(data.aiReport.intervalSec){
+      var min = Math.round(data.aiReport.intervalSec / 60);
+      document.getElementById('aiIntervalMin').value = min;
+    }
+    // 显示倒计时
+    var cd = data.aiReport.countdownSec;
+    var ts = document.getElementById('aiStatusText');
+    if(ts && aiEnabled && cd > 0){
+      var m = Math.floor(cd/60), s = cd%60;
+      ts.textContent = '下次分析倒计时: '+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+    }
+    // 新报告到达 → 更新 aiOutput
+    if(data.aiReport.lastReportTime && data.aiReport.lastReportSnippet &&
+       data.aiReport.lastReportTime !== _lastAiRptTime){
+      _lastAiRptTime = data.aiReport.lastReportTime;
+      var out = document.getElementById('aiOutput');
+      if(out){
+        out.textContent = (out.textContent||'') +
+          '\n[' + data.aiReport.lastReportTime + '] AI自动分析报告\n' +
+          data.aiReport.lastReportSnippet;
+        if(data.aiReport.lastReportSnippet.length >= 500){
+          out.textContent += '\n...(内容过长已截断，完整报告请在QT端查看或点击"导出报告"下载)';
+        }
+        out.textContent += '\n';
+        out.scrollTop = out.scrollHeight;
+      }
+      refreshReportFiles();
     }
   }
   // EIS control card — WebSocket 同步 showEisControl
@@ -594,6 +626,8 @@ function startHls(i){if(hlsPlayer[i])return;const pane=document.getElementById('
 // ===== Fusion =====
 document.getElementById('btnFusionToggle').onclick=async function(){if(fusionEnabled){await api('POST','/fusion/stop');fusionEnabled=!1;trackingTargets=[];trackingClusters=[];updateFusionStatus();drawRadar()}else{const r=await api('POST','/fusion/start');if(!r.ok)toast(r.error||'融合启动失败')}};
 document.getElementById('btnClusterVis').onclick=function(){showClusters=!showClusters;this.textContent=showClusters?'隐藏聚类':'显示聚类';this.className='btn '+(showClusters?'btn-on':'btn-off');drawRadar()};
+// 页面加载时同步按钮初始状态
+(function(){var b=document.getElementById('btnClusterVis');b.textContent=showClusters?'隐藏聚类':'显示聚类';b.className='btn '+(showClusters?'btn-on':'btn-off');})();
 function updateFusionStatus(){const f=trackingTargets.filter(t=>t.state==='FusionTracking').length,p=trackingTargets.filter(t=>t.state==='PureRadarTracking').length,l=trackingTargets.filter(t=>t.state==='Lost').length,w=trackingTargets.filter(t=>t.warningActive).length;document.getElementById('fusionHdrStatus').textContent='目标:'+trackingTargets.length+' 融合:'+f+' 纯雷达:'+p+' 丢失:'+l+' 告警:'+w+' | '+(fusionEnabled?'运行中':'关闭')}
 
 // ===== Radar =====
@@ -695,7 +729,7 @@ async function delBacktrackFile(name) {
 }
 
 // ===== AI 分析 =====
-let aiEnabled=!1,aiTimer=null,aiRunning=!1;
+let aiEnabled=!1,aiTimer=null,aiRunning=!1,_lastAiRptTime='';
 function setAiStatus(mode){
     var t=document.getElementById('aiStatusText');
     if(!t)return;
