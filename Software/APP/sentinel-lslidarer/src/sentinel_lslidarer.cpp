@@ -40,7 +40,7 @@ bool SentinelLslidarer::start() {
     build_lut_();
 
     // 3. 分配环形缓冲区
-    ringBuffer_ = std::make_unique<RingBuffer>(config_.ringBufferSize,
+    ringBuffer_ = std::make_shared<RingBuffer>(config_.ringBufferSize,
                                                LidarConfig::LidarConfig::kPointsPerSweep);
 
     // 4. 启动读取线程
@@ -75,12 +75,13 @@ bool SentinelLslidarer::is_running() const {
 // ============================================================================
 
 bool SentinelLslidarer::get_closest_frame(uint64_t cameraTsNs, LidarFrame& outFrame) {
-    if (!ringBuffer_) return false;
+    std::shared_ptr<RingBuffer> rb = ringBuffer_;  // 局部持有引用，防止 stop() 并发删除
+    if (!rb) return false;
 
-    uint32_t writeIdx = ringBuffer_->write_index();
+    uint32_t writeIdx = rb->write_index();
     if (writeIdx == 0) return false;
 
-    uint32_t cap = ringBuffer_->capacity();
+    uint32_t cap = rb->capacity();
     uint32_t latestSlot = (writeIdx - 1) % cap;  // 最近写入的槽位
     uint32_t validCount = std::min(writeIdx, cap);
     if (validCount == 0) return false;
@@ -93,7 +94,7 @@ bool SentinelLslidarer::get_closest_frame(uint64_t cameraTsNs, LidarFrame& outFr
         uint32_t i = (latestSlot + cap - j) % cap;
         LidarFrame tmp;
         tmp.points = outFrame.points;  // 复用调用者缓冲区
-        ringBuffer_->copy_slot(i, tmp);
+        rb->copy_slot(i, tmp);
 
         if (tmp.pointsCount == 0) continue;
 
@@ -110,29 +111,31 @@ bool SentinelLslidarer::get_closest_frame(uint64_t cameraTsNs, LidarFrame& outFr
         }
     }
 
-    ringBuffer_->copy_slot(bestIdx, outFrame);
+    rb->copy_slot(bestIdx, outFrame);
     return true;
 }
 
 bool SentinelLslidarer::get_latest_frame(LidarFrame& outFrame) {
-    if (!ringBuffer_) return false;
+    std::shared_ptr<RingBuffer> rb = ringBuffer_;  // 局部持有引用，防止 stop() 并发删除
+    if (!rb) return false;
 
-    uint32_t writeIdx = ringBuffer_->write_index();
+    uint32_t writeIdx = rb->write_index();
     if (writeIdx == 0) return false;
 
-    uint32_t cap = ringBuffer_->capacity();
+    uint32_t cap = rb->capacity();
     uint32_t validCount = std::min(writeIdx, cap);
     if (validCount == 0) return false;
 
     // 最近写入的槽位 = (writeIdx - 1) % capacity
-    ringBuffer_->copy_slot((writeIdx - 1) % cap, outFrame);
+    rb->copy_slot((writeIdx - 1) % cap, outFrame);
     return true;
 }
 
 uint32_t SentinelLslidarer::available_frames() const {
-    if (!ringBuffer_) return 0;
-    uint32_t writeIdx = ringBuffer_->write_index();
-    return std::min(writeIdx, ringBuffer_->capacity());
+    std::shared_ptr<RingBuffer> rb = ringBuffer_;
+    if (!rb) return 0;
+    uint32_t writeIdx = rb->write_index();
+    return std::min(writeIdx, rb->capacity());
 }
 
 uint32_t SentinelLslidarer::max_points_per_frame() const {

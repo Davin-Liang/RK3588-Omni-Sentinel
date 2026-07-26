@@ -55,7 +55,7 @@ void NvmeWorker::start()
         // 雷达数据写入（与视频帧同步存储）
         // lidarPtr_ 指向 Widget::lidar_，每次解引用获取最新指针值
         SentinelLslidarer* lidar = (lidarPtr_ != nullptr) ? *lidarPtr_ : nullptr;
-        if (lidar != nullptr) {
+        if (lidar != nullptr && lidar->is_running()) {
             LidarFrame frame;
             frame.points = lidarPointsBuf_;
             if (lidar->get_latest_frame(frame)) {

@@ -339,7 +339,7 @@ private:
     float cosLut_[36000]{};
 
     // ---- 环形缓冲区 ----
-    std::unique_ptr<RingBuffer> ringBuffer_;
+    std::shared_ptr<RingBuffer> ringBuffer_;
 };
 
 #endif  // SENTINEL_LSLIDARER_H
