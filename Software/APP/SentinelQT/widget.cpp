@@ -168,6 +168,23 @@ void Widget::set_robot_alarm_gpio_(bool active)
         return;
     }
 
+    /*
+     * 机械臂急停 GPIO 采用锁存策略：
+     * - 程序启动初始化时默认输出高电平；
+     * - 一旦语音报警触发 active=true，立即拉低 GPIO，并将状态锁存；
+     * - 运行期间后续 active=false 不再自动恢复高电平，避免危险刚消失时
+     *   机械臂被自动释放。恢复动作交给 STM32/机械臂控制板或重启程序处理。
+     */
+    if (active) {
+        robotAlarmGpioLatched_ = true;
+    } else if (robotAlarmGpioLatched_) {
+        fprintf(stderr,
+                "[RobotAlarmGPIO] gpio%d latched ACTIVE, ignore inactive request; keep physical level=%s\n",
+                robotAlarmGpioNum_,
+                robotAlarmGpioActiveLow_ ? "LOW" : "HIGH");
+        return;
+    }
+
     if (!robotAlarmGpio_.setAlarmActive(active)) {
         fprintf(stderr,
                 "[RobotAlarmGPIO] failed to set gpio%d active=%d\n",
@@ -176,11 +193,12 @@ void Widget::set_robot_alarm_gpio_(bool active)
     }
 
     fprintf(stderr,
-            "[RobotAlarmGPIO] gpio%d %s, physical level=%s\n",
+            "[RobotAlarmGPIO] gpio%d %s, physical level=%s%s\n",
             robotAlarmGpioNum_,
             active ? "ACTIVE" : "INACTIVE",
             (robotAlarmGpioActiveLow_ ? (active ? "LOW" : "HIGH")
-                                      : (active ? "HIGH" : "LOW")));
+                                      : (active ? "HIGH" : "LOW")),
+            robotAlarmGpioLatched_ ? ", latched" : "");
 }
 
 // ---- Styles ----
@@ -572,7 +590,9 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
-    // 程序退出前恢复非报警状态，避免 RK3588 退出后仍拉低 STM32 急停输入。
+    // 注意：机械臂急停 GPIO 为报警锁存低电平策略。
+    // 如果运行期间已触发报警，这里的 false 请求会被 set_robot_alarm_gpio_() 忽略，
+    // 避免程序退出时自动释放 STM32/机械臂急停输入。
     set_robot_alarm_gpio_(false);
 
     // WebServer 必须在其他组件之前停止，避免 BlockingQueuedConnection 死锁
@@ -2459,6 +2479,7 @@ void Widget::on_btn_fusion_toggle_()
 
         fusionEnabled_ = false;
         lastTrackedTargets_.clear();
+        // 融合关闭不自动释放机械臂急停 GPIO；若此前已报警，GPIO 会保持低电平锁存。
         set_robot_alarm_gpio_(false);
 
         ui->btnFusionToggle->setText("启用融合");
@@ -2480,8 +2501,9 @@ void Widget::on_tracking_updated_(const QVector<TrackedTarget>& targets)
     topDownView_->set_targets(targets);
     topDownView_->update();
 
-    // 根据当前融合跟踪告警状态控制外部急停 GPIO。
-    // 任一目标处于 warningActive 时保持低电平；无告警时恢复高电平。
+    // 根据当前融合跟踪告警状态触发外部急停 GPIO。
+    // 注意：该 GPIO 为锁存低电平策略，一旦 warningActive 触发，
+    // 后续即使 anyWarningActive 变为 false，也不会在运行期间自动恢复高电平。
     bool anyWarningActive = false;
     for (const auto& t : targets) {
         if (t.warningActive) {
@@ -4146,6 +4168,7 @@ void Widget::set_auto_backtrack_enabled_(bool enabled)
 
     if (!enabled) {
         lastAutoBacktrackUs_.clear();
+        // 关闭自动回溯不自动释放机械臂急停 GPIO；若此前已报警，GPIO 会保持低电平锁存。
         set_robot_alarm_gpio_(false);
     }
 

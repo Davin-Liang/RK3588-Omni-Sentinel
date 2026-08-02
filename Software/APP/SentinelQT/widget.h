@@ -140,6 +140,7 @@ private:
     bool               robotAlarmGpioEnabled_ = true;
     bool               robotAlarmGpioReady_ = false;
     bool               robotAlarmGpioActiveLow_ = true;
+    bool               robotAlarmGpioLatched_ = false;  // 语音报警触发后锁存低电平，运行期间不自动恢复
     int                robotAlarmGpioNum_ = 97;  // P26-32 / GPIO3_A1
 
     // ---- Fusion ----
