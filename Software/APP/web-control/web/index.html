@@ -82,6 +82,15 @@ body{
 .cam-status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:14px;color:var(--text2)}
 .cam-status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 
+/* Robot arm emergency-stop status */
+.robot-status-card{flex-direction:column}
+.robot-status-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.robot-status-badge{display:inline-flex;align-items:center;justify-content:center;min-height:26px;padding:4px 10px;border-radius:999px;border:1px solid var(--gray2);font-size:13px;font-weight:700;white-space:nowrap}
+.robot-normal{background:#e9f9ee;border-color:#7fcf95;color:#1f6d36}
+.robot-stopped{background:#ffeaea;border-color:#e19b9b;color:#a22c2c}
+.robot-unknown{background:#fff6dd;border-color:#d9c16b;color:#8a6a00}
+.robot-hint{font-size:12px;color:var(--text2);line-height:1.5}
+
 /* Buttons */
 .btn{font-size:13px;font-weight:600;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;white-space:nowrap;transition:filter 0.15s;min-width:80px;text-align:center}
 .btn:hover{filter:brightness(1.15)}
@@ -297,6 +306,17 @@ select{font-size:12px;color:var(--text);background:var(--card2);border:1px solid
           <div class="sys-title">系统控制</div>
           <div class="sys-row"><button class="btn btn-red" id="btnSystem" style="flex:1">关闭系统</button><button class="btn btn-blue" id="btnReboot" style="flex:1;padding:7px">重启应用</button></div>
         </div>
+        <div class="right-card robot-status-card" id="robotAlarmCard">
+          <div class="robot-status-top">
+            <div class="sys-title">机械臂急停联动</div>
+            <span class="robot-status-badge robot-unknown" id="robotAlarmStatus">状态读取中</span>
+          </div>
+          <div class="sys-row">
+            <button class="btn btn-off" id="btnRobotRecover" style="flex:1">恢复机械臂状态</button>
+            <button class="btn btn-red" id="btnRobotStop" style="flex:1">紧急急停</button>
+          </div>
+          <div class="robot-hint" id="robotAlarmHint">GPIO97 默认高电平；语音报警或手动急停后拉低，触发 STM32 外部中断。</div>
+        </div>
         <div class="right-card" style="flex-direction:column" id="eisControlCard">
           <div style="display:flex;align-items:center;justify-content:space-between"><div class="sys-title">防抖控制</div><button class="btn btn-accent" id="btnSaveEis" style="padding:4px 10px;min-width:auto" onclick="saveEisConfig()">保存</button></div>
           <div style="display:flex;gap:6px;margin-top:2px"><button class="btn btn-on" id="eisTab0" style="flex:1;padding:4px 8px;font-size:13px;min-width:auto" onclick="switchEisTab(0)">相机1</button><button class="btn" id="eisTab1" style="flex:1;padding:4px 8px;font-size:13px;min-width:auto" onclick="switchEisTab(1)">相机2</button></div>
@@ -355,6 +375,7 @@ const WS_URL=`ws://${location.hostname}:${location.port||8080}/ws`;
 let ws,wsTimer,fusionEnabled=!1,btrDirty=!1,sysDirty=!1,fusionCfgVer=-1,fusionCfgDirty=!1;
 let cam={0:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,eisPending:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null},1:{previewActive:!1,streaming:!1,recording:!1,paused:!1,osdEnabled:!1,eisEnabled:!1,eisPending:!1,lidarOsdEnabled:!1,fps:0,width:1920,height:1080,recordResolution:1080,recordingElapsedSec:0,eisQuality:null}};
 let trackingTargets=[],trackingClusters=[],showClusters=false,radarRange=10,hlsPlayer=[null,null],hlsInstance=[null,null];
+let robotAlarm={enabled:false,ready:false,active:false,latched:false,gpio:97,stateText:'状态读取中'};
 
 // ===== WebSocket =====
 function connectWS(){
@@ -454,6 +475,8 @@ function updateUI(data){
     document.getElementById('backtrackSecs').value = data.backtrack.seconds || 5.0;
     document.getElementById('backtrackCam').value = (data.backtrack.cam !== undefined) ? data.backtrack.cam : -1;
   }
+  if(data.robotAlarm)updateRobotAlarmStatus(data.robotAlarm);
+
   // System control (Qt → Web sync)
   if(data.system && !sysDirty){
     var r0=document.getElementById('resSelect0'), r1=document.getElementById('resSelect1');
@@ -607,9 +630,51 @@ function handleEvent(data){
 }
 
 // ===== Buttons =====
+
+// ===== Robot arm emergency-stop GPIO =====
+function updateRobotAlarmStatus(d){
+  if(!d)return;
+  Object.assign(robotAlarm,d);
+  const badge=document.getElementById('robotAlarmStatus');
+  const hint=document.getElementById('robotAlarmHint');
+  const recover=document.getElementById('btnRobotRecover');
+  const stop=document.getElementById('btnRobotStop');
+  if(!badge)return;
+  if(!d.enabled){
+    badge.textContent='GPIO 未启用';
+    badge.className='robot-status-badge robot-unknown';
+    if(hint)hint.textContent='机械臂急停 GPIO 功能未启用。';
+    return;
+  }
+  if(!d.ready){
+    badge.textContent='GPIO 未就绪';
+    badge.className='robot-status-badge robot-unknown';
+    if(hint)hint.textContent='gpio'+(d.gpio||97)+' 初始化失败，请检查 /sys/class/gpio。';
+    return;
+  }
+  const stopped=!!d.active;
+  badge.textContent=stopped?'停止工作状态':'正常运行状态';
+  badge.className='robot-status-badge '+(stopped?'robot-stopped':'robot-normal');
+  if(recover)recover.className='btn '+(stopped?'btn-on':'btn-off');
+  if(stop)stop.className='btn '+(stopped?'btn-red':'btn-off');
+  if(hint)hint.textContent='gpio'+(d.gpio||97)+' 当前为 '+(d.physicalLevel||'--')+'，'+(stopped?'机械臂保持急停。':'机械臂允许正常运行。');
+}
+async function loadRobotAlarmStatus(){
+  const r=await api('GET','/robot-alarm/status',null,{silent:true});
+  if(r&&r.ok!==false)updateRobotAlarmStatus(r.robotAlarm||r);
+}
+async function setRobotAlarm(active){
+  const r=await api('POST','/robot-alarm/'+(active?'low':'high'));
+  if(r&&r.ok!==false){
+    updateRobotAlarmStatus(r.robotAlarm||r);
+    toast(active?'已触发机械臂急停':'已恢复机械臂状态');
+  }
+}
 for(let i=0;i<2;i++){document.getElementById('btnPreview'+i).onclick=()=>togglePreview(i);document.getElementById('btnStream'+i).onclick=()=>toggleStream(i);document.getElementById('btnRecord'+i).onclick=()=>toggleRecord(i);document.getElementById('btnPause'+i).onclick=()=>togglePause(i);document.getElementById('btnOsd'+i).onclick=()=>toggleOsd(i);document.getElementById('btnEis'+i).onclick=()=>toggleEis(i);document.getElementById('btnLidarOsd'+i).onclick=()=>toggleLidarOsd(i)}
 document.getElementById('btnSystem').onclick=async function(){const anyActive=cam[0].previewActive||cam[1].previewActive;await api('POST',anyActive?'/system/stop':'/system/start')};
 document.getElementById('btnReboot').onclick=async function(){if(confirm('确认重启应用?')){await api('POST','/system/stop');setTimeout(()=>api('POST','/system/start'),1000)}};
+document.getElementById('btnRobotRecover').onclick=()=>setRobotAlarm(false);
+document.getElementById('btnRobotStop').onclick=()=>setRobotAlarm(true);
 async function togglePreview(i){await api('POST','/cam/'+i+'/preview/'+(cam[i].previewActive?'stop':'start'))}
 async function toggleStream(i){if(cam[i].streaming){await api('POST','/cam/'+i+'/stream/stop');stopHls(i)}else{await api('POST','/cam/'+i+'/stream/start');setTimeout(()=>startHls(i),2000)}}
 async function toggleRecord(i){await api('POST','/cam/'+i+'/record/'+(cam[i].recording?'stop':'start'))}
@@ -828,7 +893,7 @@ connectWS();
 pollStatusFallback();
 setInterval(pollStatusFallback,1000);updateClock();setInterval(updateClock,1000);buildFusionParams();
 window.addEventListener('resize',()=>{initCanvas();drawRadar()});
-setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig();switchEisTab(0);initEisControl();initAutoBacktrackStatus()},1000);
+setTimeout(()=>{initCanvas();loadVideos();loadBacktrackFiles();loadFusionConfig();switchEisTab(0);initEisControl();initAutoBacktrackStatus();loadRobotAlarmStatus()},1000);
 async function initAutoBacktrackStatus(){
     var r = await api('GET','/backtrack/auto-status', null, {silent:true});
     if(r.enabled !== undefined){

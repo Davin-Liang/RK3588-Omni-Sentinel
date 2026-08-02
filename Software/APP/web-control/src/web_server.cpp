@@ -141,6 +141,7 @@ bool WebServer::start()
     impl_->httpServer_.Get(R"(/api/v1/fusion/config)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/eis/config)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/eis/visible)", wrap_get);
+    impl_->httpServer_.Get(R"(/api/v1/robot-alarm/status)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/backtrack/files)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/backtrack/auto-status)", wrap_get);
     impl_->httpServer_.Get(R"(/api/v1/ai/report)", wrap_get);
@@ -198,6 +199,8 @@ bool WebServer::start()
     impl_->httpServer_.Post(R"(/api/v1/fusion/stop)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/config)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/eis/config)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/robot-alarm/high)", wrap_post);
+    impl_->httpServer_.Post(R"(/api/v1/robot-alarm/low)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/0/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/fusion/camera/1/intrinsics)", wrap_post);
     impl_->httpServer_.Post(R"(/api/v1/backtrack/query)", wrap_post);

@@ -56,6 +56,7 @@ public:
 
     void on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs);
     void set_robot_alarm_gpio_(bool active);
+    bool force_robot_alarm_gpio_(bool active, const char* reason = "manual");
 
     /** @brief Web 命令处理（由 WebServer 线程通过 BlockingQueuedConnection 调用）
      *  @return JSON 响应字符串 */
@@ -140,7 +141,8 @@ private:
     bool               robotAlarmGpioEnabled_ = true;
     bool               robotAlarmGpioReady_ = false;
     bool               robotAlarmGpioActiveLow_ = true;
-    bool               robotAlarmGpioLatched_ = false;  // 语音报警触发后锁存低电平，运行期间不自动恢复
+    bool               robotAlarmGpioLatched_ = false;  // 报警或 Web 紧急急停后锁存低电平，Web 恢复按钮可解除锁存
+    bool               robotAlarmGpioActive_ = false;   // 当前机械臂急停 GPIO 状态：true=停止工作(低电平)，false=正常运行(高电平)
     int                robotAlarmGpioNum_ = 97;  // P26-32 / GPIO3_A1
 
     // ---- Fusion ----
@@ -231,6 +233,7 @@ private:
     void refresh_status_label_();
     std::string get_status_json_() const;
     std::string get_hw_json_() const;
+    std::string get_robot_alarm_status_json_() const;
     std::string get_videos_json_() const;
     std::string get_fusion_config_json_() const;
 
@@ -268,6 +271,7 @@ private:
     std::string web_auto_backtrack_status_();
     std::string web_ai_report_();
     std::string web_ai_report_files_();
+    std::string web_robot_alarm_set_(bool active);
 
     // ---- NVMe ----
     NVMeDataManager*    nvme_manager_ = nullptr;

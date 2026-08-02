@@ -169,17 +169,16 @@ void Widget::set_robot_alarm_gpio_(bool active)
     }
 
     /*
-     * 机械臂急停 GPIO 采用锁存策略：
-     * - 程序启动初始化时默认输出高电平；
-     * - 一旦语音报警触发 active=true，立即拉低 GPIO，并将状态锁存；
-     * - 运行期间后续 active=false 不再自动恢复高电平，避免危险刚消失时
-     *   机械臂被自动释放。恢复动作交给 STM32/机械臂控制板或重启程序处理。
+     * 自动告警接口：
+     * - 语音报警或 warningActive=true 时 active=true，立即拉低 GPIO 并锁存；
+     * - 普通自动流程传入 active=false 时，如果已经锁存，则不自动恢复高电平；
+     * - Web 端“恢复机械臂状态”会走 force_robot_alarm_gpio_(false)，用于人工解除锁存。
      */
     if (active) {
         robotAlarmGpioLatched_ = true;
     } else if (robotAlarmGpioLatched_) {
         fprintf(stderr,
-                "[RobotAlarmGPIO] gpio%d latched ACTIVE, ignore inactive request; keep physical level=%s\n",
+                "[RobotAlarmGPIO] gpio%d latched ACTIVE, ignore auto inactive request; keep physical level=%s\n",
                 robotAlarmGpioNum_,
                 robotAlarmGpioActiveLow_ ? "LOW" : "HIGH");
         return;
@@ -192,6 +191,8 @@ void Widget::set_robot_alarm_gpio_(bool active)
         return;
     }
 
+    robotAlarmGpioActive_ = active;
+
     fprintf(stderr,
             "[RobotAlarmGPIO] gpio%d %s, physical level=%s%s\n",
             robotAlarmGpioNum_,
@@ -199,6 +200,54 @@ void Widget::set_robot_alarm_gpio_(bool active)
             (robotAlarmGpioActiveLow_ ? (active ? "LOW" : "HIGH")
                                       : (active ? "HIGH" : "LOW")),
             robotAlarmGpioLatched_ ? ", latched" : "");
+}
+
+bool Widget::force_robot_alarm_gpio_(bool active, const char* reason)
+{
+    if (!robotAlarmGpioEnabled_) {
+        fprintf(stderr, "[RobotAlarmGPIO] force ignored: disabled, active=%d\n", active ? 1 : 0);
+        return false;
+    }
+
+    if (!robotAlarmGpioReady_) {
+        fprintf(stderr, "[RobotAlarmGPIO] force ignored: gpio not ready, active=%d\n", active ? 1 : 0);
+        return false;
+    }
+
+    /*
+     * Web 手动控制接口：
+     * - active=true  ：紧急急停，拉低 GPIO 并锁存；
+     * - active=false ：恢复机械臂状态，拉高 GPIO 并解除锁存。
+     */
+    if (active) {
+        robotAlarmGpioLatched_ = true;
+    } else {
+        robotAlarmGpioLatched_ = false;
+    }
+
+    if (!robotAlarmGpio_.setAlarmActive(active)) {
+        fprintf(stderr,
+                "[RobotAlarmGPIO] force failed: gpio%d active=%d reason=%s\n",
+                robotAlarmGpioNum_, active ? 1 : 0, reason ? reason : "?");
+        return false;
+    }
+
+    robotAlarmGpioActive_ = active;
+
+    fprintf(stderr,
+            "[RobotAlarmGPIO] force gpio%d %s by %s, physical level=%s%s\n",
+            robotAlarmGpioNum_,
+            active ? "ACTIVE" : "INACTIVE",
+            reason ? reason : "manual",
+            (robotAlarmGpioActiveLow_ ? (active ? "LOW" : "HIGH")
+                                      : (active ? "HIGH" : "LOW")),
+            robotAlarmGpioLatched_ ? ", latched" : ", latch-cleared");
+
+    if (webServer_ && webServer_->is_running()) {
+        webServer_->push_status(get_status_json_());
+    }
+
+    return true;
 }
 
 // ---- Styles ----
@@ -324,8 +373,10 @@ Widget::Widget(QWidget *parent)
     // 初始化机械臂急停 GPIO。默认非报警状态输出高电平；报警时拉低。
     if (robotAlarmGpioEnabled_) {
         robotAlarmGpioReady_ = robotAlarmGpio_.init(robotAlarmGpioNum_, robotAlarmGpioActiveLow_);
+        robotAlarmGpioActive_ = false;
+        robotAlarmGpioLatched_ = false;
         fprintf(stderr,
-                "[RobotAlarmGPIO] init gpio%d %s, activeLow=%d\n",
+                "[RobotAlarmGPIO] init gpio%d %s, activeLow=%d, default=HIGH/normal\n",
                 robotAlarmGpioNum_,
                 robotAlarmGpioReady_ ? "OK" : "FAILED",
                 robotAlarmGpioActiveLow_ ? 1 : 0);
@@ -2633,6 +2684,7 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/fusion/config") return get_fusion_config_json_();
         if (path == "/api/v1/eis/config")    return get_eis_config_json_();
         if (path == "/api/v1/eis/visible")   return showEisControl_ ? R"({"visible":true})" : R"({"visible":false})";
+        if (path == "/api/v1/robot-alarm/status") return get_robot_alarm_status_json_();
         if (path == "/api/v1/backtrack/files") return get_backtrack_files_json_();
         if (path == "/api/v1/backtrack/auto-status") return web_auto_backtrack_status_();
         if (path == "/api/v1/ai/report") return web_ai_report_();
@@ -2682,6 +2734,8 @@ std::string Widget::handle_web_command(const std::string& method,
         if (path == "/api/v1/fusion/stop")          return web_fusion_stop_();
         if (path == "/api/v1/fusion/config")        return web_fusion_config_(body);
         if (path == "/api/v1/eis/config")           return web_eis_config_(body);
+        if (path == "/api/v1/robot-alarm/high")     return web_robot_alarm_set_(false);
+        if (path == "/api/v1/robot-alarm/low")      return web_robot_alarm_set_(true);
         if (path == "/api/v1/fusion/camera/0/intrinsics") return web_fusion_intrinsics_(0, body);
         if (path == "/api/v1/fusion/camera/1/intrinsics") return web_fusion_intrinsics_(1, body);
         if (path == "/api/v1/backtrack/query")  return web_backtrack_query_(body);
@@ -3556,6 +3610,22 @@ std::string Widget::get_status_json_() const
     j["fusionConfigVersion"] = fusionConfigVersion_;
     j["autoBacktrackEnabled"] = autoBacktrackEnabled_;
 
+    nlohmann::json robotAlarm;
+    robotAlarm["enabled"] = robotAlarmGpioEnabled_;
+    robotAlarm["ready"] = robotAlarmGpioReady_;
+    robotAlarm["gpio"] = robotAlarmGpioNum_;
+    robotAlarm["activeLow"] = robotAlarmGpioActiveLow_;
+    robotAlarm["active"] = robotAlarmGpioActive_;
+    robotAlarm["latched"] = robotAlarmGpioLatched_;
+    robotAlarm["physicalLevel"] = robotAlarmGpioActive_
+        ? (robotAlarmGpioActiveLow_ ? "LOW" : "HIGH")
+        : (robotAlarmGpioActiveLow_ ? "HIGH" : "LOW");
+    robotAlarm["state"] = robotAlarmGpioActive_ ? "stopped" : "normal";
+    robotAlarm["stateText"] = robotAlarmGpioActive_
+        ? "停止工作状态"
+        : "正常运行状态";
+    j["robotAlarm"] = robotAlarm;
+
     // AI 报告状态（同步到 Web 端）
     nlohmann::json aiReport;
     aiReport["enabled"] = aiAutoEnabled_;
@@ -3568,6 +3638,45 @@ std::string Widget::get_status_json_() const
 
     j["ok"] = true;
     return j.dump();
+}
+
+std::string Widget::get_robot_alarm_status_json_() const
+{
+    nlohmann::json robotAlarm;
+    robotAlarm["enabled"] = robotAlarmGpioEnabled_;
+    robotAlarm["ready"] = robotAlarmGpioReady_;
+    robotAlarm["gpio"] = robotAlarmGpioNum_;
+    robotAlarm["activeLow"] = robotAlarmGpioActiveLow_;
+    robotAlarm["active"] = robotAlarmGpioActive_;
+    robotAlarm["latched"] = robotAlarmGpioLatched_;
+    robotAlarm["physicalLevel"] = robotAlarmGpioActive_
+        ? (robotAlarmGpioActiveLow_ ? "LOW" : "HIGH")
+        : (robotAlarmGpioActiveLow_ ? "HIGH" : "LOW");
+    robotAlarm["state"] = robotAlarmGpioActive_ ? "stopped" : "normal";
+    robotAlarm["stateText"] = robotAlarmGpioActive_
+        ? "停止工作状态"
+        : "正常运行状态";
+
+    nlohmann::json j;
+    j["ok"] = true;
+    j["robotAlarm"] = robotAlarm;
+    return j.dump();
+}
+
+std::string Widget::web_robot_alarm_set_(bool active)
+{
+    if (!robotAlarmGpioEnabled_) {
+        return R"({"ok":false,"error":"robot alarm gpio disabled"})";
+    }
+    if (!robotAlarmGpioReady_) {
+        return R"({"ok":false,"error":"robot alarm gpio not ready"})";
+    }
+
+    if (!force_robot_alarm_gpio_(active, active ? "web-emergency-stop" : "web-recover")) {
+        return R"({"ok":false,"error":"failed to set robot alarm gpio"})";
+    }
+
+    return get_robot_alarm_status_json_();
 }
 
 std::string Widget::get_hw_json_() const
