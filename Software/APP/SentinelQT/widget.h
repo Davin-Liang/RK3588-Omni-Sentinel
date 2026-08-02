@@ -15,6 +15,7 @@
 
 #include "imu_eis.hpp"
 #include "eis_quality_evaluator.h"
+#include "alarm_gpio.h"
 
 class SentinelVisioner;
 class SentinelStreamer;
@@ -54,6 +55,7 @@ public:
     void on_streamer_event(int camNum, StreamerEvent event, const QString& detail);
 
     void on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs);
+    void set_robot_alarm_gpio_(bool active);
 
     /** @brief Web 命令处理（由 WebServer 线程通过 BlockingQueuedConnection 调用）
      *  @return JSON 响应字符串 */
@@ -132,6 +134,13 @@ private:
     int      lastCpuUsage_ = -1;  ///< 缓存的 CPU 使用率，供 Web 状态推送复用
 
     static Widget* instance_;
+
+    // ---- Robot emergency-stop GPIO ----
+    AlarmGpio          robotAlarmGpio_;
+    bool               robotAlarmGpioEnabled_ = true;
+    bool               robotAlarmGpioReady_ = false;
+    bool               robotAlarmGpioActiveLow_ = true;
+    int                robotAlarmGpioNum_ = 97;  // P26-32 / GPIO3_A1
 
     // ---- Fusion ----
     SentinelLslidarer*  lidar_;

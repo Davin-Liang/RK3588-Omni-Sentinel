@@ -80,6 +80,11 @@ static void fusion_warning_callback_(const TrackedTarget& target, void* /*userDa
     if (w) {
         uint64_t alertTsUs = target.lastUpdateNs / 1000;
         voice::playDangerWarning();
+
+        // 语音报警触发后，同步拉低 RK3588 GPIO3_A1(gpio97)，
+        // 触发 STM32 外部中断用于机械臂急停。
+        w->set_robot_alarm_gpio_(true);
+
         QMetaObject::invokeMethod(w, [w, alertTsUs, targetId = static_cast<int>(target.id)]() {
             w->on_fusion_alert_backtrack_(targetId, alertTsUs);
         }, Qt::QueuedConnection);
@@ -148,6 +153,34 @@ void Widget::on_fusion_alert_backtrack_(int targetId, uint64_t alertTsUs)
             }
         }, Qt::QueuedConnection);
     }).detach();
+}
+
+void Widget::set_robot_alarm_gpio_(bool active)
+{
+    if (!robotAlarmGpioEnabled_) {
+        return;
+    }
+
+    if (!robotAlarmGpioReady_) {
+        fprintf(stderr,
+                "[RobotAlarmGPIO] gpio not ready, ignore active=%d\n",
+                active ? 1 : 0);
+        return;
+    }
+
+    if (!robotAlarmGpio_.setAlarmActive(active)) {
+        fprintf(stderr,
+                "[RobotAlarmGPIO] failed to set gpio%d active=%d\n",
+                robotAlarmGpioNum_, active ? 1 : 0);
+        return;
+    }
+
+    fprintf(stderr,
+            "[RobotAlarmGPIO] gpio%d %s, physical level=%s\n",
+            robotAlarmGpioNum_,
+            active ? "ACTIVE" : "INACTIVE",
+            (robotAlarmGpioActiveLow_ ? (active ? "LOW" : "HIGH")
+                                      : (active ? "HIGH" : "LOW")));
 }
 
 // ---- Styles ----
@@ -269,6 +302,18 @@ Widget::Widget(QWidget *parent)
     ui->setupUi(this);
 
     load_config_();
+
+    // 初始化机械臂急停 GPIO。默认非报警状态输出高电平；报警时拉低。
+    if (robotAlarmGpioEnabled_) {
+        robotAlarmGpioReady_ = robotAlarmGpio_.init(robotAlarmGpioNum_, robotAlarmGpioActiveLow_);
+        fprintf(stderr,
+                "[RobotAlarmGPIO] init gpio%d %s, activeLow=%d\n",
+                robotAlarmGpioNum_,
+                robotAlarmGpioReady_ ? "OK" : "FAILED",
+                robotAlarmGpioActiveLow_ ? 1 : 0);
+    } else {
+        fprintf(stderr, "[RobotAlarmGPIO] disabled by config\n");
+    }
 
     thermalCtrl_ = new (std::nothrow) ThermalController(thermalCfg_);
 
@@ -527,6 +572,9 @@ Widget::Widget(QWidget *parent)
 
 Widget::~Widget()
 {
+    // 程序退出前恢复非报警状态，避免 RK3588 退出后仍拉低 STM32 急停输入。
+    set_robot_alarm_gpio_(false);
+
     // WebServer 必须在其他组件之前停止，避免 BlockingQueuedConnection 死锁
     if (webServer_) {
         webServer_->stop();
@@ -613,6 +661,11 @@ void Widget::load_config_()
     // USB 分辨率允许 1080p（MJPG 硬件支持 30fps）
 
     recordDir_ = config_.value("Record/dir", "/mnt/sdcard").toString();
+
+    // 机械臂急停联动 GPIO：P26-32 / GPIO3_A1 / gpio97，低电平有效
+    robotAlarmGpioEnabled_ = config_.value("RobotAlarm/enabled", true).toBool();
+    robotAlarmGpioNum_ = config_.value("RobotAlarm/gpio", 97).toInt();
+    robotAlarmGpioActiveLow_ = config_.value("RobotAlarm/activeLow", true).toBool();
 
     backtrackDir_ = config_.value("Backtrack/backtrackDir", "/mnt/sdcard/backtrack").toString();
     nvmeDevicePath_ = config_.value("Backtrack/nvmeDevice", "/dev/nvme0n1").toString();
@@ -2406,6 +2459,7 @@ void Widget::on_btn_fusion_toggle_()
 
         fusionEnabled_ = false;
         lastTrackedTargets_.clear();
+        set_robot_alarm_gpio_(false);
 
         ui->btnFusionToggle->setText("启用融合");
         ui->btnFusionToggle->setStyleSheet(FUSION_OFF_STYLE);
@@ -2425,6 +2479,17 @@ void Widget::on_tracking_updated_(const QVector<TrackedTarget>& targets)
     lastTrackedTargets_ = targets;
     topDownView_->set_targets(targets);
     topDownView_->update();
+
+    // 根据当前融合跟踪告警状态控制外部急停 GPIO。
+    // 任一目标处于 warningActive 时保持低电平；无告警时恢复高电平。
+    bool anyWarningActive = false;
+    for (const auto& t : targets) {
+        if (t.warningActive) {
+            anyWarningActive = true;
+            break;
+        }
+    }
+    set_robot_alarm_gpio_(anyWarningActive);
 
     // Web 跟踪数据推送 (5Hz，由 FusionWorker 频率决定)
     if (webServer_ && webServer_->is_running()) {
@@ -4081,6 +4146,7 @@ void Widget::set_auto_backtrack_enabled_(bool enabled)
 
     if (!enabled) {
         lastAutoBacktrackUs_.clear();
+        set_robot_alarm_gpio_(false);
     }
 
     fprintf(stderr, "[SentinelQT] auto backtrack %s\n",

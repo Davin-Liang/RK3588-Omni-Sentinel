@@ -130,6 +130,8 @@ add_executable(SentinelQT
     nvme_worker.h
     voice_warning.cpp
     voice_warning.h
+    alarm_gpio.cpp
+    alarm_gpio.h
     ${TS_FILES}
 )
 
